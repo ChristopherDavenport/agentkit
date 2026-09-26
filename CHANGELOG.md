@@ -42,9 +42,14 @@ Options for the rest of `agentturn.Config`: `WithModel`, `WithName`,
 `WithToolExecution`, `WithMaxParallelTools`, and one `With*` per hook.
 
 Sessions: `WithSession` and `WithResumedSession` start or resume a
-session and bind `compact.WithOnFold` to its recorder. The memory
-manifest is recorded under `agentmemory.ManifestNS` when its hash
-moves. `Kit.Transcript` is what a resumed session left off at.
+session and bind `compact.WithOnFold` to its recorder. `Kit.Attach`
+subscribes that recorder to the agent and returns the unsubscribe —
+the one step a `Config` cannot carry, since the agent does not exist
+until `Config()` has been handed to `agentturn.New`, and a session
+never attached records nothing. It is a no-op without a session. The
+memory manifest is recorded under `agentmemory.ManifestNS` when its
+hash moves, and `Kit.Transcript` is what a resumed session left off
+at.
 
 `WithSkillGrants` grants a skill's `allowed-tools` to the policy engine
 when the model reads that skill. It is off by default and attributes

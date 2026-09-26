@@ -138,7 +138,19 @@ reach the instructions and what it injects is not recorded.
 
 ## What the kit does that no line here covers
 
-Two things, both outside `agentturn.Config`:
+Three things, all outside `agentturn.Config`:
+
+- `Kit.Attach(agent)` is `rec.Attach(agent)`, and returns the same
+  unsubscribe. It cannot be a config field because the recorder
+  subscribes to the *agent*, which does not exist until `Config()` has
+  been handed to `agentturn.New`. The kit's only addition is returning
+  a no-op instead of nil when there is no session, so a caller need not
+  branch. A session that is never attached records nothing:
+
+  ```go
+  agent := agentturn.New(kit.Config())
+  defer kit.Attach(agent)()   // manually: defer rec.Attach(agent)()
+  ```
 
 - `Kit.Omitted()` collects what each layer reported it left out —
   `agentsmd.Result.Omitted`, `agentmemory.Manifest.Omitted`, the skills
@@ -148,5 +160,5 @@ Two things, both outside `agentturn.Config`:
   from `agentskill.Skill.Rules()` when the model reads a skill. Both
   calls are exported; the kit is only the place they meet.
 
-Neither changes a field of the config, so neither can make the manual
+None of them changes a field of the config, so none can make the manual
 path a different path.

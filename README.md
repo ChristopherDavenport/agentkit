@@ -35,6 +35,16 @@ defer kit.Attach(agent)()
 session, dialing MCP — and reports it once. `Config()` is then pure and
 can be called per run. `Close()` releases what `New` opened.
 
+`Attach` is the one step a `Config` cannot carry. The recorder has to
+subscribe to the agent, and the agent does not exist until after
+`Config()` — so `Attach` subscribes it and returns the unsubscribe,
+which is why the call is doubled: `kit.Attach(agent)` runs at the
+`defer` and subscribes, and the function it returns runs at scope exit
+and unsubscribes. A session configured but never attached records
+nothing and says nothing about it, so attach where the agent is built.
+Without a session it is a no-op, so the line does not need a branch
+around it.
+
 Every method, and every config `Config()` returns, is safe to use from
 any goroutine. The configs are not independent of each other: concurrent
 runs off one kit share its memory state, which is the right sharing for

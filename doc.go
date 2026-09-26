@@ -37,8 +37,16 @@
 //	}
 //
 //	agent := agentturn.New(kit.Config())
+//	defer kit.Attach(agent)()
 //
 // [New] does the work that can fail: discovery, validation, opening the
 // session, dialing MCP. [Kit.Config] is then pure and may be called per
 // run. [Kit.Close] releases what New opened.
+//
+// [Kit.Attach] is the one step a config cannot carry: it subscribes the
+// recorder to the agent and returns the unsubscribe, so the doubled
+// call above subscribes now and unsubscribes when the scope ends. A
+// session configured but never attached records nothing, and nothing
+// reports that, so attach where the agent is built. It is a no-op
+// without a session, so the line is the same either way.
 package agentkit
