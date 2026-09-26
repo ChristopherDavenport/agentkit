@@ -1,0 +1,6 @@
+.cache/
+
+# Design notes, kept locally and deliberately unpublished. README.md
+# and docs/ are the design of record for anyone reading the repo.
+/PLAN.md
+/STATUS.md
