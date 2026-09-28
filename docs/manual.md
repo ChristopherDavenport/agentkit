@@ -33,6 +33,7 @@ privately", the kit has become a framework and the rule is broken.
 | `OutputGuard` | `WithGuards`, `WithOutputGuard` | `agentturn.ChainOutputGuard(guard.OutputGuard(gs...), yours...)` |
 | `ShouldStopAfterTurn` | `WithGuards`, `WithShouldStopAfterTurn` | `agentturn.ChainShouldStopAfterTurn(guard.ShouldStopAfterTurn(gs...), yours...)` |
 | `Transform` | `WithCompaction`, `WithCompactor`, `WithTransform` | `compact.NewLocal(model, compact.WithModel(name), compact.WithBudget(n), compact.WithOnFold(rec.Fold)).Transform` |
+| `ToolRecorder` | `WithSession`, `WithResumedSession` | `rec.RecordFunc()`; without a session the kit leaves it nil, and the loop honours a recorder the product installs with `agenttool.ContextWithRecorder` on the prompt's context |
 
 A field no option named is left at its zero value, so the loop's own
 default applies. `chain1` returns the one hook unchanged when there is

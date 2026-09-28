@@ -14,6 +14,7 @@ import (
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentskill"
 	"github.com/ChristopherDavenport/agentsmd"
+	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
 )
@@ -323,5 +324,84 @@ func TestAResumedSessionSeedsTheNextAgent(t *testing.T) {
 	last := model.requests()[len(model.requests())-1]
 	if len(last.Input) <= len(seed) {
 		t.Fatalf("the request carried %d items, want more than the %d it was seeded with", len(last.Input), len(seed))
+	}
+}
+
+// noteRecord is what a tool writes while it runs: a Recordable Details
+// value the session files beside the call.
+type noteRecord struct {
+	Note string `json:"note"`
+}
+
+func (noteRecord) RecordNS() string { return "test:note" }
+
+// A record a tool writes while it runs reaches the session, because the
+// kit sets Config.ToolRecorder to the recorder's RecordFunc. Without a
+// session the field is left alone.
+func TestAToolsRecordLandsInTheSession(t *testing.T) {
+	sessions := agentsession.NewMemoryStore()
+	noting := agenttool.New("note", "writes a record while it runs",
+		func(ctx context.Context, _ agenttool.NoArgs) (string, error) {
+			if err := agenttool.WriteRecord(ctx, noteRecord{Note: "dug"}); err != nil {
+				return "", err
+			}
+			return "noted", nil
+		})
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn("note", `{}`),
+	}}
+
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(model, "test-model"),
+		agentkit.WithTools(noting),
+		agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	if kit.Config().ToolRecorder == nil {
+		t.Fatal("a kit with a session leaves Config.ToolRecorder nil")
+	}
+
+	agent := agentturn.New(kit.Config())
+	defer kit.Attach(agent)()
+	end, err := agent.Prompt(t.Context(), openresponses.UserText("take a note"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if end.Err != nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("run ended %q with %v", end.Reason, end.Err)
+	}
+
+	s, err := sessions.Open(t.Context(), kit.SessionID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, e := range s.Entries() {
+		c, ok := e.(*agentsession.CustomEntry)
+		if !ok || c.NS != "test:note" {
+			continue
+		}
+		found = true
+		if string(c.Data) != `{"note":"dug"}` {
+			t.Errorf("record data = %s", c.Data)
+		}
+	}
+	if !found {
+		t.Error("the tool's record is not in the session")
+	}
+
+	plain, err := agentkit.New(t.Context(),
+		agentkit.WithModel(model, "test-model"),
+		agentkit.WithTools(noting),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Close()
+	if plain.Config().ToolRecorder != nil {
+		t.Error("a kit without a session sets Config.ToolRecorder")
 	}
 }

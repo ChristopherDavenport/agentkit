@@ -42,7 +42,10 @@ Options for the rest of `agentturn.Config`: `WithModel`, `WithName`,
 `WithToolExecution`, `WithMaxParallelTools`, and one `With*` per hook.
 
 Sessions: `WithSession` and `WithResumedSession` start or resume a
-session and bind `compact.WithOnFold` to its recorder. `Kit.Attach`
+session, bind `compact.WithOnFold` to its recorder, and set
+`Config.ToolRecorder` to the recorder's `RecordFunc`, so a record a
+tool writes with `agenttool.WriteRecord` while it runs lands in the
+session beside its call. `Kit.Attach`
 subscribes that recorder to the agent and returns the unsubscribe —
 the one step a `Config` cannot carry, since the agent does not exist
 until `Config()` has been handed to `agentturn.New`, and a session
