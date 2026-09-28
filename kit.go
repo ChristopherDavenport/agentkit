@@ -353,6 +353,15 @@ func (k *Kit) build(ctx context.Context, s *settings) error {
 	k.cfg.ToolExecution, k.cfg.MaxParallelTools = s.toolExec, s.maxParallel
 	k.cfg.Filter = s.filter
 	k.cfg.AfterToolCall = s.afterToolCall
+
+	// ToolRecorder: the session's, when there is one, so a record a
+	// tool writes with agenttool.WriteRecord while it runs lands in the
+	// session beside its call. Without a session it stays nil, and the
+	// loop then honours a recorder the product installed on the
+	// prompt's context.
+	if k.rec != nil {
+		k.cfg.ToolRecorder = k.rec.RecordFunc()
+	}
 	return nil
 }
 

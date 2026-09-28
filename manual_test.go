@@ -156,6 +156,7 @@ func TestEveryFieldTheKitSetsIsDocumented(t *testing.T) {
 		"ShouldStopAfterTurn": cfg.ShouldStopAfterTurn != nil,
 		"Transform":           cfg.Transform != nil,
 		"Filter":              cfg.Filter != nil,
+		"ToolRecorder":        cfg.ToolRecorder != nil,
 	}
 	for field, isSet := range set {
 		if !isSet {
