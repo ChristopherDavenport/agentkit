@@ -95,9 +95,11 @@ So the kit builds `[]Part` — which is
 order, under a total budget, and returns both the joined text for
 `Config.Instructions` and the parts and the omissions for a recorder.
 A session the kit opens takes them through
-`session.WithInstructionsParts(kit.PartsFor)`, so a memory write is
-recorded as a change to the memory part rather than the whole prompt
-again. The input guards run over each part before the join, so a part
+`session.WithInstructionsParts(kit.PartsFor)`, and the memory block
+is a part per entry, so a memory write is recorded as that entry's part
+and the summary line rather than the whole block again. `PartsFrom`
+does the same for a recorder several kits share, such as two agents
+handing a conversation to each other. The input guards run over each part before the join, so a part
 `guard.Redact` rewrote is recorded as it was sent.
 
 | # | part id | source | why here |
@@ -121,11 +123,11 @@ contest was silent, and the kit is where they get called, in one order:
 | field | order |
 |---|---|
 | `BeforeModelCall` | memory re-render, then the guards over each part and over the whole request, then the product's |
-| `BeforeToolCall` | the policy engine, then the product's |
+| `BeforeToolCall` | the policy engine, with the product's hooks folded into it (`agentpolicy.WithHooks`) |
 | `OutputGuard` | the guards, then the product's |
 | `ShouldStopAfterTurn` | the policy's, then the product's |
-| `BeforeTurn` | the skill grants' revoke under `WithSkillGrantScope`, then the product's |
-| `Transform` | the product's, then `compact`, with `WithOnFold` bound to the recorder when there is one |
+| `BeforeTurn` | the skill grants' revoke at each new user message under `WithSkillGrantScope`, then the product's |
+| `Transform` | the product's, then `compact`, with `WithOnFold` bound to the recorder and `WithFoldObserver` |
 
 With a session, the engine's verdicts and the guards' are recorded
 under `agentpolicy.VerdictNS`, so the record says which rule held a
@@ -165,7 +167,14 @@ them itself: whether a library's tool runs unasked is a decision.
 A front needs things a `Config` cannot carry: `kit.Engine()` for
 `Deferred` and `Release`, `kit.Recorder()` and `kit.SessionID()`,
 `kit.Catalog()`, `kit.Tools()`, and `kit.MemoryManifest()` for the hash
-that says whether the render moved.
+that says whether the render moved. A front resuming a session seeds
+the agent with `kit.AgentOptions()`, the transcript at the leaf and the
+calls pending there, so a call held before a restart can still be
+approved:
+
+```go
+agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
+```
 
 A front that asks a person about a held call says so when it answers,
 or the record cannot tell the approval from one a script gave:
@@ -196,7 +205,7 @@ policy: reading a skill grants its rules to the engine through
 attributes the grant to an **untrusted** source unless the caller's own
 source function says otherwise, so a skill widens what the agent may do
 only when the product has said it trusts the tree the skill came from.
-`WithSkillGrantScope` ends each grant when a new message starts a run, as
+`WithSkillGrantScope` ends each grant when the user's next message arrives, as
 Claude Code clears `allowed-tools` at the next message, and
 `kit.RevokeSkillGrants(ctx)` ends them when a front says; a skill read
 again is granted again.
@@ -242,13 +251,13 @@ a2a.
 | library | version |
 |---|---|
 | `openresponses` | v0.0.12 |
-| `agenttool`, `agenttool/mcpclient` | v0.0.9 |
-| `agentturn`, `agentturn/session` | v0.0.10 |
-| `agentsession` | v0.0.9 |
+| `agenttool`, `agenttool/mcpclient` | v0.0.10 |
+| `agentturn`, `agentturn/session` | v0.0.11 |
+| `agentsession` | v0.0.11 |
 | `agentsmd` | v0.0.2 |
-| `agentskill` | v0.0.6 |
-| `agentmemory` | v0.0.5 |
-| `agentpolicy` | v0.0.6 |
+| `agentskill` | v0.0.7 |
+| `agentmemory` | v0.0.6 |
+| `agentpolicy` | v0.0.7 |
 
 Every sibling is required at a released version with no `replace`, and
 `make no-replace` enforces it: the kit is the module that proves the

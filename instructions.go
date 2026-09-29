@@ -27,8 +27,17 @@ const (
 	PartProduct = "product"
 	// PartSkills is the skill catalogue, from [WithSkills].
 	PartSkills = "skills"
-	// PartMemory is the memory block, from [WithMemory].
+	// PartMemory is the memory block, from [WithMemory]. The block is
+	// several parts, one per piece [agentmemory.RenderParts] returns,
+	// and PartMemory is both the ID of the first, the block's title, and
+	// the ID [WithOrder] places the whole group by. Every part of the
+	// group has an ID that is PartMemory or starts with "memory/" or
+	// "memory:".
 	PartMemory = "memory"
+	// PartMemoryUsage is the last part of the memory group:
+	// [agentmemory.Usage], the paragraph that tells the model what the
+	// block is and which tool makes which change.
+	PartMemoryUsage = "memory:usage"
 )
 
 // The Source of each part: the library that produced the text, in the
@@ -61,8 +70,8 @@ type Omission struct {
 	// Source is the library that reported it.
 	Source string
 	// What names the thing left out in its layer's own stable key: an
-	// absolute path for a file, "scope/name" for a memory entry, a
-	// location for a skill.
+	// absolute path for a file, the part ID an entry would have had,
+	// [agentmemory.PartID], for a memory entry, a location for a skill.
 	What string
 	// Reason is the layer's own word for why.
 	Reason string
@@ -92,20 +101,32 @@ func (o Omission) String() string {
 	return s
 }
 
-// join renders the parts in order, dropping the empty ones, and returns
-// both the text and the parts that carried it.
-func join(order []string, byID map[string]Part) (string, []Part) {
+// join puts the groups of parts in order and returns them, with the
+// text they join to. An empty group is left out; the memory group is
+// the only one with more than one part.
+func join(order []string, byID map[string][]Part) (string, []Part) {
 	var kept []Part
-	var texts []string
 	for _, id := range order {
-		p, ok := byID[id]
-		if !ok || p.Text == "" {
-			continue
-		}
-		kept = append(kept, p)
-		texts = append(texts, p.Text)
+		kept = append(kept, byID[id]...)
 	}
-	return strings.Join(texts, Separator), kept
+	return agentsession.JoinInstructions(kept), kept
+}
+
+// group is the ID [WithOrder] places a part by: [PartMemory] for every
+// part of the memory block, and the part's own ID for the rest.
+func group(id string) string {
+	if id == PartMemory || strings.HasPrefix(id, PartMemory+"/") || strings.HasPrefix(id, PartMemory+":") {
+		return PartMemory
+	}
+	return id
+}
+
+// single is the group of one part, or none when the part is empty.
+func single(p Part) []Part {
+	if p.Text == "" {
+		return nil
+	}
+	return []Part{p}
 }
 
 // checkOrder reports whether every configured part appears exactly once
@@ -168,10 +189,17 @@ func skillPart(s *settings, withTool bool) (*agentskill.Catalog, Part, []Omissio
 			Reason: unlistedReason(sk, cat.Problems[sk.Location]),
 		})
 	}
+	// The skill a shadowed one lost to is the one the catalogue lists
+	// under the name it wanted. Skills holds others of that name, a
+	// qualified apps/web:deploy or one that is not listed and so claims
+	// nothing, so the winner is read from Listed, first claim first.
+	// Discover clears a shadowed skill's Qualifier, so one shadowed
+	// under a qualified name already taken is blamed on the bare name's
+	// winner; agentskill does not say which qualified skill it lost to.
 	winner := map[string]string{}
-	for _, sk := range cat.Skills {
-		if sk.Name != "" {
-			winner[sk.Name] = skillKey(sk)
+	for _, sk := range cat.Listed() {
+		if _, ok := winner[sk.ListedName()]; !ok {
+			winner[sk.ListedName()] = skillKey(sk)
 		}
 	}
 	for _, sk := range cat.Shadowed {
@@ -180,7 +208,7 @@ func skillPart(s *settings, withTool bool) (*agentskill.Catalog, Part, []Omissio
 			Source: SourceSkills,
 			What:   skillKey(sk),
 			Reason: "shadowed",
-			By:     winner[sk.Name],
+			By:     winner[sk.ListedName()],
 		})
 	}
 	return cat, Part{ID: PartSkills, Text: text, Source: SourceSkills}, omitted, nil
@@ -216,11 +244,16 @@ func unlistedReason(sk *agentskill.Skill, problems []agentskill.Problem) string 
 	return "not listed"
 }
 
-// memoryPart renders the memory block and appends [agentmemory.Usage]
-// to it, bounded to limit bytes when limit is positive. A limit of zero
-// leaves the layer its own bound; a negative limit drops the part,
-// since a block the budget cannot hold at all is better reported than
-// sent short.
+// memoryPart renders the memory block as parts, one per piece
+// [agentmemory.RenderParts] returns, followed by [agentmemory.Usage] as
+// [PartMemoryUsage], bounded to limit bytes, the whole group joined,
+// when limit is positive. A limit of zero leaves the layer its own
+// bound; a negative limit drops the group, since a block the budget
+// cannot hold at all is better reported than sent short. The group
+// joins to the block [agentmemory.Render] returns and the usage
+// paragraph, so the joined instructions are the same text either way;
+// what the parts buy is a record in which a write to one entry is that
+// entry's part and the summary.
 //
 // The usage paragraph is always appended to a block that is sent,
 // because the memory tools are offered whenever the block is, and it
@@ -228,38 +261,45 @@ func unlistedReason(sk *agentskill.Skill, problems []agentskill.Problem) string 
 // block without it leaves the model the tools and no word on them. A
 // block the budget drops takes the paragraph with it, as the skill
 // catalogue's usage goes with the catalogue.
-func memoryPart(ctx context.Context, s *settings, limit int64) (Part, agentmemory.Manifest, []Omission, error) {
-	usage := Separator + agentmemory.Usage()
+func memoryPart(ctx context.Context, s *settings, limit int64) ([]Part, agentmemory.Manifest, []Omission, error) {
+	usage := agentmemory.Usage()
 	if limit > 0 {
-		if limit -= int64(len(usage)); limit <= 0 {
+		if limit -= int64(len(Separator) + len(usage)); limit <= 0 {
 			limit = -1
 		}
 	}
 	opts := s.memRender
-	text, man, err := agentmemory.Render(ctx, s.memStore, s.memScopes, opts...)
+	scopes := s.renderScopes()
+	parts, man, err := agentmemory.RenderParts(ctx, s.memStore, scopes, opts...)
 	if err != nil {
-		return Part{}, man, nil, fmt.Errorf("agentkit: rendering memory: %w", err)
+		return nil, man, nil, fmt.Errorf("agentkit: rendering memory: %w", err)
 	}
-	if limit > 0 && int64(len(text)) > limit {
+	if limit > 0 && int64(len(agentmemory.JoinParts(parts))) > limit {
 		bounded := append(append([]agentmemory.RenderOption(nil), opts...),
 			agentmemory.WithMaxTotalBytes(int(limit)))
-		text, man, err = agentmemory.Render(ctx, s.memStore, s.memScopes, bounded...)
+		parts, man, err = agentmemory.RenderParts(ctx, s.memStore, scopes, bounded...)
 		if err != nil {
-			return Part{}, man, nil, fmt.Errorf("agentkit: rendering memory: %w", err)
+			return nil, man, nil, fmt.Errorf("agentkit: rendering memory: %w", err)
 		}
 	}
-	dropped := limit < 0 || (limit > 0 && int64(len(text)) > limit)
-	if dropped {
+	size := int64(len(agentmemory.JoinParts(parts)))
+	if limit < 0 || (limit > 0 && size > limit) {
 		// The block has a floor it cannot go under, a header and one
 		// heading per scope, so a share below that floor buys nothing.
 		// Report every entry rather than send a block the budget said
 		// there was no room for.
-		text = ""
+		parts = nil
 		man.Omitted = append(man.Omitted, man.Entries...)
 		man.Entries = nil
 	}
-	if text != "" {
-		text += usage
+
+	var group []Part
+	if size > 0 && len(parts) > 0 {
+		group = make([]Part, 0, len(parts)+1)
+		for _, p := range parts {
+			group = append(group, Part{ID: p.ID, Text: p.Text, Source: SourceMemory})
+		}
+		group = append(group, Part{ID: PartMemoryUsage, Text: usage, Source: SourceMemory})
 	}
 
 	omitted := make([]Omission, 0, len(man.Omitted))
@@ -271,12 +311,12 @@ func memoryPart(ctx context.Context, s *settings, limit int64) (Part, agentmemor
 		omitted = append(omitted, Omission{
 			Part:   PartMemory,
 			Source: SourceMemory,
-			What:   string(e.Scope) + "/" + e.Name,
+			What:   agentmemory.PartID(e.Scope, e.Name),
 			Reason: reason,
 			Size:   int64(e.Bytes),
 		})
 	}
-	return Part{ID: PartMemory, Text: text, Source: SourceMemory}, man, omitted, nil
+	return group, man, omitted, nil
 }
 
 // agentsMDPart reads the AGENTS.md chain and renders it, bounded to

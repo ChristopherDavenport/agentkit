@@ -15,7 +15,10 @@ import (
 // tools. It is reported through the function [WithSkillGrantReport] was
 // given, once per read.
 type SkillGrant struct {
-	// Skill is the skill that was read.
+	// Skill is the skill that was read, by the name the catalogue lists
+	// it under, [agentskill.Skill.ListedName]: "deploy" for a root
+	// skill and "apps/web:deploy" for a qualified one that shares its
+	// name, so the two are two grants and two reports.
 	Skill string
 	// Location is the SKILL.md behind the name.
 	Location string
@@ -82,10 +85,10 @@ func (g *skillGrants) grant(ctx context.Context, name string) {
 	if !ok {
 		return
 	}
-	out := SkillGrant{Skill: sk.Name, Location: sk.Location}
+	out := SkillGrant{Skill: sk.ListedName(), Location: sk.Location}
 	rules, err := sk.Rules()
 	if err != nil {
-		out.Err = fmt.Errorf("agentkit: skill %s: allowed-tools: %w", sk.Name, err)
+		out.Err = fmt.Errorf("agentkit: skill %s: allowed-tools: %w", sk.ListedName(), err)
 		g.tell(out)
 		return
 	}
@@ -129,8 +132,11 @@ func (g *skillGrants) sourceOf(sk *agentskill.Skill) agentpolicy.Source {
 	}
 	// Untrusted, so the allow rules are withheld. A skill is a file
 	// someone else wrote; a product that trusts the tree it came from
-	// says so in its own source function.
-	return agentpolicy.Source{Name: "agentskill:" + sk.Name, Path: sk.Location}
+	// says so in its own source function. The listed name, not Name: a
+	// root deploy and a qualified apps/web:deploy share Name, and the
+	// engine keys a grant set by its source's name, so reading one
+	// would replace the other's.
+	return agentpolicy.Source{Name: "agentskill:" + sk.ListedName(), Path: sk.Location}
 }
 
 func (g *skillGrants) tell(s SkillGrant) {

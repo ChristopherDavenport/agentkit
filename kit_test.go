@@ -21,6 +21,7 @@ import (
 	"github.com/ChristopherDavenport/agentsmd"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/agentturn/compact"
 	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
@@ -98,10 +99,7 @@ func TestPartsAreInTheDocumentedOrder(t *testing.T) {
 	}
 	defer kit.Close()
 
-	var ids []string
-	for _, p := range kit.Parts() {
-		ids = append(ids, p.ID)
-	}
+	ids := groupIDs(kit.Parts())
 	want := []string{agentkit.PartProduct, agentkit.PartSkills, agentkit.PartMemory, agentsmd.PartID}
 	if strings.Join(ids, ",") != strings.Join(want, ",") {
 		t.Fatalf("part ids = %v, want %v", ids, want)
@@ -927,6 +925,27 @@ func TestTheUsageParagraphFollowsTheToolThatServesTheSkills(t *testing.T) {
 	}
 }
 
+// groupIDs is the part IDs with each run of the memory group's parts
+// collapsed to agentkit.PartMemory, the ID WithOrder places it by.
+func groupIDs(parts []agentkit.Part) []string {
+	var ids []string
+	for _, p := range parts {
+		id := p.ID
+		if isMemoryPart(id) {
+			id = agentkit.PartMemory
+			if len(ids) > 0 && ids[len(ids)-1] == id {
+				continue
+			}
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func isMemoryPart(id string) bool {
+	return id == agentkit.PartMemory || strings.HasPrefix(id, "memory/") || strings.HasPrefix(id, "memory:")
+}
+
 func toolNames(ts []agenttool.Tool) []string {
 	out := make([]string, len(ts))
 	for i, t := range ts {
@@ -1029,10 +1048,7 @@ func TestAMemoryBlockThatWasEmptyAtNewLandsInItsPosition(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var ids []string
-	for _, p := range kit.Parts() {
-		ids = append(ids, p.ID)
-	}
+	ids := groupIDs(kit.Parts())
 	want := []string{agentkit.PartProduct, agentkit.PartMemory, agentsmd.PartID}
 	if strings.Join(ids, ",") != strings.Join(want, ",") {
 		t.Fatalf("part ids = %v, want %v", ids, want)
@@ -1213,14 +1229,9 @@ func TestTheMemoryPartCarriesTheUsageParagraph(t *testing.T) {
 	}
 	defer kit.Close()
 
-	var memory string
-	for _, p := range kit.Parts() {
-		if p.ID == agentkit.PartMemory {
-			memory = p.Text
-		}
-	}
-	if !strings.HasSuffix(memory, agentkit.Separator+agentmemory.Usage()) {
-		t.Fatalf("the memory part does not end with the usage paragraph:\n%s", memory)
+	parts := kit.Parts()
+	if last := parts[len(parts)-1]; last.ID != agentkit.PartMemoryUsage || last.Text != agentmemory.Usage() {
+		t.Fatalf("the memory group does not end with the usage paragraph: last part %q:\n%s", last.ID, last.Text)
 	}
 
 	// The per-turn render keeps it.
@@ -1299,5 +1310,173 @@ func TestAToolElicitorIsWrittenUnderTheCall(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("the question is not on the record")
+	}
+}
+
+// WithFoldObserver hears every fold, with a session and without, and
+// with a session the recorder has written each before the observer
+// hears it. A compact.WithOnFold passed to WithCompaction was replaced
+// by the kit's the moment a session was configured. (#15)
+func TestAFoldObserverHearsEveryFoldBesideTheRecorder(t *testing.T) {
+	for _, recorded := range []bool{false, true} {
+		sessions := agentsession.NewMemoryStore()
+		var folds atomic.Int32
+		opts := []agentkit.Option{
+			agentkit.WithModel(&scriptModel{}, "test-model"),
+			agentkit.WithCompaction(1, compact.WithKeepLast(1)),
+			agentkit.WithFoldObserver(func(context.Context, compact.Fold) { folds.Add(1) }),
+		}
+		if recorded {
+			opts = append(opts, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))
+		}
+		kit, err := agentkit.New(t.Context(), opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer kit.Close()
+
+		agent := agentturn.New(kit.Config())
+		defer kit.Attach(agent)()
+		for _, text := range []string{"one", "two", "three"} {
+			if _, err := agent.Prompt(t.Context(), openresponses.UserText(text)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if folds.Load() == 0 {
+			t.Fatalf("recorded=%v: the observer heard no fold", recorded)
+		}
+		if !recorded {
+			continue
+		}
+		s, err := sessions.Open(t.Context(), kit.SessionID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var written int32
+		for _, e := range s.Entries() {
+			if _, ok := e.(*agentsession.CompactionEntry); ok {
+				written++
+			}
+		}
+		if written != folds.Load() {
+			t.Fatalf("the observer heard %d folds and %d are recorded", folds.Load(), written)
+		}
+	}
+}
+
+// A scope the model may read and not write is rendered into the block,
+// reachable through memory_search and refused by the writers. (#23)
+func TestAReadScopeIsRenderedAndNotWritable(t *testing.T) {
+	store := memStore(t,
+		agentmemory.Entry{Scope: "user", Name: "likes-tea", Content: "tea, not coffee"},
+		agentmemory.Entry{Scope: "project", Name: "style", Content: "tabs, never spaces"},
+	)
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithMemory(store, "user", "project"),
+		agentkit.WithMemoryReadScopes("project"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	if !strings.Contains(kit.Config().Instructions, "tabs, never spaces") {
+		t.Fatal("the read scope is not rendered")
+	}
+	var save agenttool.Tool
+	for _, tool := range kit.Config().ResolveTools(t.Context()) {
+		if tool.Name() == agentmemory.SaveTool {
+			save = tool
+		}
+	}
+	if save == nil {
+		t.Fatal("memory_save is not offered")
+	}
+	_, err = save.Execute(t.Context(), agenttool.Call{ID: "c", Args: json.RawMessage(`{"scope":"project","name":"style","content":"spaces"}`)})
+	if err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("a save to the read scope = %v, want it refused as read-only", err)
+	}
+	if _, err := save.Execute(t.Context(), agenttool.Call{ID: "c", Args: json.RawMessage(`{"scope":"user","name":"likes-tea","content":"tea"}`)}); err != nil {
+		t.Fatalf("a save to the writable scope failed: %v", err)
+	}
+}
+
+// What agentmemory.Tools panics on is an error from New, which is the
+// call documented to fail. (#23)
+func TestMemoryScopesToolsCannotBuildAreAnErrorNotAPanic(t *testing.T) {
+	for name, opts := range map[string][]agentkit.Option{
+		"a read scope WithMemory also makes writable": {
+			agentkit.WithMemory(memStore(t), "user", "project"),
+			agentkit.WithMemoryTools(agentmemory.WithReadScopes("project")),
+		},
+		"every scope read-only": {
+			agentkit.WithMemory(memStore(t), "project"),
+			agentkit.WithMemoryReadScopes("project"),
+		},
+		"no scope at all": {
+			agentkit.WithMemory(memStore(t)),
+		},
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%s: New panicked: %v", name, r)
+				}
+			}()
+			kit, err := agentkit.New(t.Context(), append([]agentkit.Option{agentkit.WithModel(stubModel{}, "m")}, opts...)...)
+			if err == nil {
+				kit.Close()
+				t.Errorf("%s: New succeeded, want an error", name)
+			}
+		}()
+	}
+}
+
+// A shadowed skill names the skill that took its name, not the last of
+// that name in source order: a qualified sibling and an unlisted skill
+// later in order share the name and claim nothing. (#26)
+func TestAShadowedSkillNamesTheSkillThatShadowedIt(t *testing.T) {
+	root := t.TempDir()
+	repo := skillDir(t, filepath.Join(root, "repo"), "deploy", "deploy the platform", "kubectl apply")
+	home := skillDir(t, filepath.Join(root, "home"), "deploy", "my deploy", "make deploy")
+	skillDir(t, filepath.Join(root, "web"), "deploy", "deploy the web app", "npm run deploy")
+	writeFile(t, filepath.Join(root, "pack", "deploy", "SKILL.md"), "---\nname: deploy\n---\n\na draft with no description\n")
+
+	var sources []agentskill.Source
+	for _, dir := range []string{"repo", "home", "web", "pack"} {
+		src, err := agentskill.Dir(filepath.Join(root, dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dir == "web" {
+			src.Qualifier = "apps/web"
+		}
+		sources = append(sources, src)
+	}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithSkillSources(sources...),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	winner, ok := kit.Catalog().Lookup("deploy")
+	if !ok || !strings.HasPrefix(winner.Location, repo) {
+		t.Fatalf("Lookup(deploy) = %v, want the repository's", winner)
+	}
+	var found bool
+	for _, o := range kit.Omitted() {
+		if o.Reason == "shadowed" && strings.HasPrefix(o.What, home) {
+			found = true
+			if o.By != winner.Location {
+				t.Fatalf("the personal deploy is shadowed by %s, want %s", o.By, winner.Location)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("the personal deploy is not reported shadowed: %v", kit.Omitted())
 	}
 }
