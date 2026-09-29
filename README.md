@@ -84,7 +84,8 @@ siblings.
 
 `agentsmd.Render`, `agentskill.Catalog.Prompt` + `Usage`, and
 `agentmemory.Render` + `Usage` each produce a block of instruction
-text. Joining them with `"\n\n"` is the whole composition, and three
+text; each `Usage` paragraph is joined with its block exactly when the
+tool it describes is offered. Joining them with `"\n\n"` is the whole composition, and three
 problems follow from nobody owning the join: the order is a policy
 nobody states, the session's `instructions_parts` record has a shape
 and no writer, and every layer reports its omissions to nobody.
@@ -93,6 +94,11 @@ So the kit builds `[]Part` — which is
 `agentsession.InstructionPart`, not a type of its own — in a stated
 order, under a total budget, and returns both the joined text for
 `Config.Instructions` and the parts and the omissions for a recorder.
+A session the kit opens takes them through
+`session.WithInstructionsParts(kit.PartsFor)`, so a memory write is
+recorded as a change to the memory part rather than the whole prompt
+again. The input guards run over each part before the join, so a part
+`guard.Redact` rewrote is recorded as it was sent.
 
 | # | part id | source | why here |
 |---|---|---|---|
@@ -114,14 +120,17 @@ contest was silent, and the kit is where they get called, in one order:
 
 | field | order |
 |---|---|
-| `BeforeModelCall` | memory re-render, then the policy guards, then the product's |
+| `BeforeModelCall` | memory re-render, then the guards over each part and over the whole request, then the product's |
 | `BeforeToolCall` | the policy engine, then the product's |
 | `OutputGuard` | the guards, then the product's |
 | `ShouldStopAfterTurn` | the policy's, then the product's |
-| `Transform` | `compact`, with `WithOnFold` bound to the recorder when there is one |
+| `BeforeTurn` | the skill grants' revoke under `WithSkillGrantScope`, then the product's |
+| `Transform` | the product's, then `compact`, with `WithOnFold` bound to the recorder when there is one |
 
-`Transform` has no chain, so compaction and a product's own `Transform`
-are mutually exclusive and `New` refuses both rather than losing one.
+With a session, the engine's verdicts and the guards' are recorded
+under `agentpolicy.VerdictNS`, so the record says which rule held a
+call and not only that the policy did; `WithVerdictObserver` sees the
+same verdicts.
 
 ### 3. The tool set
 
@@ -145,13 +154,41 @@ cannot: it sees each tool with the label of the source that produced
 it, which is how a product takes five tools from a server offering
 forty. It runs before the duplicate check, so dropping one of two tools
 claiming a name resolves the collision rather than reporting it.
+`WithToolWrap` is the same seam for replacing a tool, a replay or a
+logger over every tool, inside the kit's own wrapper, and `Kit.Tools()`
+lists each tool with its label once, which is how a product names the
+libraries' tools to a policy whose default asks. The kit does not allow
+them itself: whether a library's tool runs unasked is a decision.
 
 ## What it also exposes
 
 A front needs things a `Config` cannot carry: `kit.Engine()` for
 `Deferred` and `Release`, `kit.Recorder()` and `kit.SessionID()`,
-`kit.Catalog()`, and `kit.MemoryManifest()` for the hash that says
-whether the render moved.
+`kit.Catalog()`, `kit.Tools()`, and `kit.MemoryManifest()` for the hash
+that says whether the render moved.
+
+A front that asks a person about a held call says so when it answers,
+or the record cannot tell the approval from one a script gave:
+
+```go
+answers, err := kit.Engine().Release(ctx, end,
+	agentturn.Approve(callID).WithBy(agentpolicy.ByHuman))
+if err != nil {
+	return err
+}
+end, err = agent.Resume(ctx, answers...)
+```
+
+A host that wants its own run's memory writes to name its session puts
+the ID on the context it prompts with,
+`agentmemory.WithSession(ctx, kit.SessionID())`; the kit cannot, since
+that context is the host's. A child agent's run is the kit's, and
+`WithChildAgent` does it there.
+
+A kit built where a recorder already exists, under an evaluation
+runner or inside a parent's `WithDeferredTools`, takes it with
+`WithRecorder(rec)`: everything the kit binds to a session it binds to
+that recorder, and it opens and attaches nothing.
 
 `WithSkillGrants` is the one place a skill's `allowed-tools` meets a
 policy: reading a skill grants its rules to the engine through
@@ -159,6 +196,10 @@ policy: reading a skill grants its rules to the engine through
 attributes the grant to an **untrusted** source unless the caller's own
 source function says otherwise, so a skill widens what the agent may do
 only when the product has said it trusts the tree the skill came from.
+`WithSkillGrantScope` ends each grant when a new message starts a run, as
+Claude Code clears `allowed-tools` at the next message, and
+`kit.RevokeSkillGrants(ctx)` ends them when a front says; a skill read
+again is granted again.
 
 ## Composing with other agents
 
@@ -171,8 +212,10 @@ tool through `WithTools`, and serving the agent as a peer is
 would have a seam.
 
 `WithChildAgent` is the in-process one, and it exists for a different
-reason than a seam: it binds the child's observer to the session
-recorder, which only the kit has, because only the kit opened the
+reason than a seam: it binds the child's observer and run context to
+the session recorder, which only the kit has, because only the kit
+opened the session, so the child's run is recorded into its own linked
+session and what its tools write, a memory among them, names that
 session.
 
 [`docs/composition.md`](docs/composition.md) has both directions, and
@@ -199,15 +242,16 @@ a2a.
 | library | version |
 |---|---|
 | `openresponses` | v0.0.12 |
-| `agenttool`, `agenttool/mcpclient` | v0.0.7 |
-| `agentturn`, `agentturn/session` | v0.0.8 |
-| `agentsession` | v0.0.7 |
+| `agenttool`, `agenttool/mcpclient` | v0.0.9 |
+| `agentturn`, `agentturn/session` | v0.0.10 |
+| `agentsession` | v0.0.9 |
 | `agentsmd` | v0.0.2 |
-| `agentskill` | v0.0.4 |
-| `agentmemory` | v0.0.3 |
-| `agentpolicy` | v0.0.3 |
+| `agentskill` | v0.0.6 |
+| `agentmemory` | v0.0.5 |
+| `agentpolicy` | v0.0.5 |
 
 Every sibling is required at a released version with no `replace`, and
 `make no-replace` enforces it: the kit is the module that proves the
 released libraries compose, so it has to build against the versions a
-consumer would fetch.
+consumer would fetch. `TestTheREADMEVersionTableIsGoMod` holds the
+table above to `go.mod`, so a bump that forgets the table fails.

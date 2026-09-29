@@ -216,11 +216,25 @@ func unlistedReason(sk *agentskill.Skill, problems []agentskill.Problem) string 
 	return "not listed"
 }
 
-// memoryPart renders the memory block, bounded to limit bytes when
-// limit is positive. A limit of zero leaves the layer its own bound; a
-// negative limit drops the part, since a block the budget cannot hold
-// at all is better reported than sent short.
+// memoryPart renders the memory block and appends [agentmemory.Usage]
+// to it, bounded to limit bytes when limit is positive. A limit of zero
+// leaves the layer its own bound; a negative limit drops the part,
+// since a block the budget cannot hold at all is better reported than
+// sent short.
+//
+// The usage paragraph is always appended to a block that is sent,
+// because the memory tools are offered whenever the block is, and it
+// is paid for out of the limit first: it cannot be bounded, and a
+// block without it leaves the model the tools and no word on them. A
+// block the budget drops takes the paragraph with it, as the skill
+// catalogue's usage goes with the catalogue.
 func memoryPart(ctx context.Context, s *settings, limit int64) (Part, agentmemory.Manifest, []Omission, error) {
+	usage := Separator + agentmemory.Usage()
+	if limit > 0 {
+		if limit -= int64(len(usage)); limit <= 0 {
+			limit = -1
+		}
+	}
 	opts := s.memRender
 	text, man, err := agentmemory.Render(ctx, s.memStore, s.memScopes, opts...)
 	if err != nil {
@@ -243,6 +257,9 @@ func memoryPart(ctx context.Context, s *settings, limit int64) (Part, agentmemor
 		text = ""
 		man.Omitted = append(man.Omitted, man.Entries...)
 		man.Entries = nil
+	}
+	if text != "" {
+		text += usage
 	}
 
 	omitted := make([]Omission, 0, len(man.Omitted))

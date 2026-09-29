@@ -83,7 +83,7 @@ func TestTheManualPathIsTheSamePath(t *testing.T) {
 		Instructions: strings.Join([]string{
 			"Be brief.",
 			cat.Prompt() + agentkit.Separator + cat.Usage(),
-			block,
+			block + agentkit.Separator + agentmemory.Usage(),
 			agentsmd.Render(chain.Files),
 		}, agentkit.Separator),
 		ToolProvider: engine.ToolProvider(func(context.Context) []agenttool.Tool { return tools }),

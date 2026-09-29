@@ -128,6 +128,11 @@ Three details of the mechanism, all of which the tests pin:
   under that cannot be met; rather than send a block the budget said
   there was no room for, the kit drops the part and reports every entry
   as omitted.
+- The memory part is the block and `agentmemory.Usage()` after it, and
+  the paragraph cannot be bounded, so it is paid for first: the block is
+  rendered under the share less the paragraph and its separator. A
+  share that cannot hold the paragraph drops the part, paragraph and
+  all, since the paragraph describes a block that is not there.
 
 ## Hooks
 
@@ -139,12 +144,12 @@ no sign. The kit is where they get called, in one order:
 
 | field | order | why |
 |---|---|---|
-| `BeforeModelCall` | memory re-render, then the guards, then the product's | the guard must see the text memory injected, or it is guarding a request that is not the one sent |
+| `BeforeModelCall` | memory re-render, then the guards over each part, then the guards over the whole request, then the product's | the guard must see the text memory injected, or it is guarding a request that is not the one sent; over each part first, so a rewrite lands in the part it belongs to and the parts stay the request that was sent |
 | `BeforeToolCall` | the policy engine, then the product's | one engine, keyed by run; decisions fold deny over ask over allow whatever the order, so this one is about which reason the user is shown |
 | `OutputGuard` | the guards, then the product's | each sees what the one before it left |
 | `ShouldStopAfterTurn` | the policy's guards, then the product's | the chain stops at the first hook that stops the run, so the error on `RunEnd` names the layer that fired |
-| `BeforeTurn` | the product's alone | the kit contests nothing here |
-| `Transform` | compaction | there is no `ChainTransform`, so compaction and a product `Transform` are mutually exclusive and `New` refuses both rather than losing one |
+| `BeforeTurn` | the skill grants' revoke on the first turn of a run a new message started, then the product's | under `WithSkillGrantScope` a grant lasts until the next message, so the revoke has to land before anything in that run is decided, and not on a `Resume`, which is the same task going on |
+| `Transform` | the product's, then compaction | `agentturn.ChainTransform`: the fold is over what the product shaped, so a redaction or a filter is never undone by a summary written from the unshaped transcript |
 
 `WithOnFold` is bound to the session recorder when there is one, and is
 appended after the caller's compaction options, so a caller who passes
