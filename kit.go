@@ -47,25 +47,40 @@ import (
 // and usually two sessions. Give each agent its own kit.
 type Kit struct {
 	cfg     agentturn.Config
-	parts   []Part
 	order   []string
 	omitted []Omission
+	origins []ToolOrigin
 
 	engine  *agentpolicy.Engine
 	catalog *agentskill.Catalog
+	grants  *skillGrants
 	rec     *session.Recorder
 	sess    *agentsession.Session
 	seed    agentturn.Transcript
 	remotes []*mcpclient.Remote
 
+	// ownRec is true when the kit opened the recorder, and so is the one
+	// to attach it; false under WithRecorder, whose owner attaches it.
+	ownRec bool
+	// memory is true when WithMemory is configured, which a child agent
+	// reads to decide whether to bridge its session ID to agentmemory's
+	// context key.
+	memory bool
+
 	// closed is read by the per-turn tool provider, which a config
 	// handed out before Close may still be called through.
 	closed atomic.Bool
 
-	// mu guards the parts and the memory manifest, which the per-turn
-	// re-render replaces.
-	mu       sync.Mutex
-	manifest agentmemory.Manifest
+	// mu guards the parts, the memory manifest and the memory
+	// omissions, which the per-turn hook replaces. base is the parts as
+	// the layers rendered them; parts is what the last request was sent,
+	// base with each part as the guards left it. They are the same slice
+	// until a guard runs.
+	mu         sync.Mutex
+	base       []Part
+	parts      []Part
+	manifest   agentmemory.Manifest
+	memOmitted []Omission
 
 	// recmu guards recorded, the hash of the manifest last written to
 	// the session, and is held across the write. It is its own lock for
@@ -97,8 +112,8 @@ func New(ctx context.Context, opts ...Option) (*Kit, error) {
 	if s.policySet && s.engine != nil {
 		return nil, errors.New("agentkit: WithPolicy and WithEngine both set; the kit builds an engine or is given one")
 	}
-	if s.transform != nil && s.compactSet {
-		return nil, errors.New("agentkit: WithTransform and compaction both set; Transform is one field and there is no chain for it")
+	if s.recorder != nil && s.sessionSet {
+		return nil, errors.New("agentkit: WithRecorder and a session option both set; the kit records into the recorder it is given or opens its own")
 	}
 	// The two contradictions in the skill-tool options. Not configuring
 	// skills at all leaves both of these inert instead, because a
@@ -111,12 +126,12 @@ func New(ctx context.Context, opts ...Option) (*Kit, error) {
 		return nil, errors.New("agentkit: WithSkillGrants and WithoutSkillTool both set; a grant happens when the model reads a skill through the catalogue's tool, so withholding that tool withholds every grant")
 	}
 
-	k := &Kit{}
+	k := &Kit{memory: s.memStore != nil}
 	fail := func(err error) (*Kit, error) {
 		return nil, errors.Join(err, k.Close())
 	}
 
-	engine, err := buildEngine(&s)
+	engine, err := k.buildEngine(&s)
 	if err != nil {
 		return nil, err
 	}
@@ -171,14 +186,22 @@ func offersSkillTool(s *settings) bool {
 	return len(s.skillDirs)+len(s.skillSources) > 0
 }
 
-func buildEngine(s *settings) (*agentpolicy.Engine, error) {
+// buildEngine builds the engine WithPolicy asked for, with the kit's
+// observer ahead of the caller's options so an observer the caller
+// passes there replaces it, as any later WithObserver would.
+func (k *Kit) buildEngine(s *settings) (*agentpolicy.Engine, error) {
 	if s.engine != nil {
 		return s.engine, nil
 	}
 	if !s.policySet {
 		return nil, nil
 	}
-	e, err := agentpolicy.Build(s.policy, s.matchers, s.engineOpts...)
+	var opts []agentpolicy.Option
+	if s.sessionSet || s.recorder != nil || s.verdicts != nil {
+		opts = append(opts, agentpolicy.WithObserver(k.observeVerdicts(s, false)))
+	}
+	opts = append(opts, s.engineOpts...)
+	e, err := agentpolicy.Build(s.policy, s.matchers, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("agentkit: building the policy engine: %w", err)
 	}
@@ -260,11 +283,11 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 		}
 		parts[PartMemory] = part
 		k.manifest = man
-		k.omitted = append(k.omitted, om...)
+		k.memOmitted = om
 	}
 
 	text, kept := join(order, parts)
-	k.parts, k.order = kept, order
+	k.base, k.parts, k.order = kept, kept, order
 	k.cfg.Instructions = text
 	return nil
 }
@@ -305,8 +328,13 @@ func (d mcpDial) label(i int) string {
 	return fmt.Sprintf("#%d %s", i+1, what)
 }
 
-// openSession starts or resumes the session and keeps the recorder.
+// openSession starts or resumes the session and keeps the recorder,
+// or keeps the recorder WithRecorder gave it and opens nothing.
 func (k *Kit) openSession(ctx context.Context, s *settings) error {
+	if s.recorder != nil {
+		k.rec = s.recorder
+		return nil
+	}
 	if !s.sessionSet {
 		return nil
 	}
@@ -315,15 +343,18 @@ func (k *Kit) openSession(ctx context.Context, s *settings) error {
 		sess *agentsession.Session
 		err  error
 	)
+	// The kit's parts first, so a WithInstructionsParts the caller
+	// passed replaces them.
+	opts := append([]session.Option{session.WithInstructionsParts(k.PartsFor)}, s.sessionOpts...)
 	if s.sessionResume {
-		rec, sess, err = session.Resume(ctx, s.sessionStore, s.sessionID, s.sessionOpts...)
+		rec, sess, err = session.Resume(ctx, s.sessionStore, s.sessionID, opts...)
 	} else {
-		rec, sess, err = session.Start(ctx, s.sessionStore, s.sessionHeader, s.sessionOpts...)
+		rec, sess, err = session.Start(ctx, s.sessionStore, s.sessionHeader, opts...)
 	}
 	if err != nil {
 		return fmt.Errorf("agentkit: opening the session: %w", err)
 	}
-	k.rec, k.sess = rec, sess
+	k.rec, k.sess, k.ownRec = rec, sess, true
 
 	// The items in force at the leaf are what an agent continuing this
 	// conversation must be seeded with. Reading them can fail, and New
@@ -362,6 +393,15 @@ func (k *Kit) build(ctx context.Context, s *settings) error {
 	if k.rec != nil {
 		k.cfg.ToolRecorder = k.rec.RecordFunc()
 	}
+
+	// ToolElicitor: the product's, around the recorder's when there is
+	// one, so a question and its answer are written under the call.
+	if s.elicitor != nil {
+		k.cfg.ToolElicitor = s.elicitor
+		if k.rec != nil {
+			k.cfg.ToolElicitor = k.rec.Elicitor(s.elicitBy, s.elicitor)
+		}
+	}
 	return nil
 }
 
@@ -369,7 +409,7 @@ func (k *Kit) build(ctx context.Context, s *settings) error {
 // duplicate name found now, and puts the policy's filter in front of
 // the result.
 func (k *Kit) buildTools(ctx context.Context, s *settings) error {
-	ts := &toolSet{onConflict: s.conflict, filter: s.toolFilter}
+	ts := &toolSet{onConflict: s.conflict, filter: s.toolFilter, wrap: s.toolWrap}
 	if len(s.tools) > 0 {
 		ts.sources = append(ts.sources, source{name: "WithTools", tools: s.tools})
 	}
@@ -381,17 +421,17 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 		}
 	}
 	if k.catalog != nil && offersSkillTool(s) {
-		tool := k.catalog.Tool(s.skillToolOpt...)
+		src := source{name: "WithSkills", tools: []agenttool.Tool{k.catalog.Tool(s.skillToolOpt...)}}
 		if s.skillGrants && k.engine != nil {
-			tool = &grantingTool{
-				Tool:   tool,
+			k.grants = &skillGrants{
 				cat:    k.catalog,
 				engine: k.engine,
 				source: s.skillSource,
 				report: s.skillGrant,
 			}
+			src.own = k.grants.wrap
 		}
-		ts.sources = append(ts.sources, source{name: "WithSkills", tools: []agenttool.Tool{tool}})
+		ts.sources = append(ts.sources, src)
 	}
 	if s.memStore != nil {
 		ts.sources = append(ts.sources, source{
@@ -424,18 +464,22 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 		return nil
 	}
 
+	ts.prepare()
+
 	// A collision the kit can see now is an error, because the two
 	// tools are both there and the caller can fix it. A collision that
 	// only appears later, when a remote changes its list, is reported
 	// through WithToolConflict and the later tool dropped: a provider
 	// cannot fail a turn.
-	if _, conflicts := ts.resolve(ctx); len(conflicts) > 0 {
+	_, origins, conflicts := ts.resolve(ctx)
+	if len(conflicts) > 0 {
 		errs := make([]error, len(conflicts))
 		for i, c := range conflicts {
 			errs[i] = c
 		}
 		return errors.Join(errs...)
 	}
+	k.origins = origins
 
 	provider := ts.provider()
 	if k.engine != nil {
@@ -449,14 +493,23 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 // documents. Each is a call to the Chain function agentturn exports for
 // that field, which is what a product would write instead.
 func (k *Kit) buildHooks(s *settings) {
-	// BeforeModelCall: memory re-renders the instructions, then the
-	// guards see the text memory injected, then the product's own.
+	var guards guard.Chain
+	if len(s.guards) > 0 {
+		guards = guard.Chain{Guards: s.guards}
+		if k.rec != nil || s.verdicts != nil {
+			guards.Observer = k.observeVerdicts(s, true)
+		}
+	}
+
+	// BeforeModelCall: the instructions, memory re-rendered and each
+	// part guarded, then the guards over the whole request, then the
+	// product's own.
 	var before []func(context.Context, *openresponses.Request) error
-	if s.memStore != nil {
-		before = append(before, k.rerenderMemory(s))
+	if s.memStore != nil || (len(s.guards) > 0 && len(k.base) > 0) {
+		before = append(before, k.instructions(s, guards))
 	}
 	if len(s.guards) > 0 {
-		before = append(before, guard.BeforeModelCall(s.guards...))
+		before = append(before, guards.BeforeModelCall())
 	}
 	before = append(before, s.beforeModelCall...)
 	k.cfg.BeforeModelCall = chain1(before, agentturn.ChainBeforeModelCall)
@@ -472,7 +525,7 @@ func (k *Kit) buildHooks(s *settings) {
 	// OutputGuard: the guards, then the product's own.
 	var out []func(context.Context, agentturn.OutputInfo) (*openresponses.Message, error)
 	if len(s.guards) > 0 {
-		out = append(out, guard.OutputGuard(s.guards...))
+		out = append(out, guards.OutputGuard())
 	}
 	out = append(out, s.outputGuard...)
 	k.cfg.OutputGuard = chain1(out, agentturn.ChainOutputGuard)
@@ -480,22 +533,27 @@ func (k *Kit) buildHooks(s *settings) {
 	// ShouldStopAfterTurn: the policy's guards, then the product's.
 	var stop []func(context.Context, agentturn.TurnInfo) (bool, error)
 	if len(s.guards) > 0 {
-		stop = append(stop, guard.ShouldStopAfterTurn(s.guards...))
+		stop = append(stop, guards.ShouldStopAfterTurn())
 	}
 	stop = append(stop, s.shouldStop...)
 	k.cfg.ShouldStopAfterTurn = chain1(stop, agentturn.ChainShouldStopAfterTurn)
 
-	// BeforeTurn: the product's alone; the kit contests nothing here.
-	k.cfg.BeforeTurn = chain1(s.beforeTurn, agentturn.ChainBeforeTurn)
+	// BeforeTurn: the skill grants' scope, then the product's own.
+	var turn []func(context.Context, agentturn.TurnStartInfo) (openresponses.Items, error)
+	if s.skillGrantScope && k.grants != nil {
+		turn = append(turn, k.revokeOnRunStart)
+	}
+	turn = append(turn, s.beforeTurn...)
+	k.cfg.BeforeTurn = chain1(turn, agentturn.ChainBeforeTurn)
 
-	// Transform: compaction, with the fold bound to the recorder when
-	// there is one. There is no chain for this field, so the product's
-	// own Transform and compaction are mutually exclusive; New refuses
-	// both.
-	switch {
-	case s.transform != nil:
-		k.cfg.Transform = s.transform
-	case s.compactSet:
+	// Transform: the product's, then compaction, with the fold bound to
+	// the recorder when there is one, so the fold is over what the
+	// product shaped.
+	var transforms []func(context.Context, agentturn.Transcript) (agentturn.Transcript, error)
+	if s.transform != nil {
+		transforms = append(transforms, s.transform)
+	}
+	if s.compactSet {
 		opts := s.compactOpts
 		if k.rec != nil {
 			opts = append(append([]compact.Option(nil), opts...), compact.WithOnFold(k.rec.Fold))
@@ -514,8 +572,9 @@ func (k *Kit) buildHooks(s *settings) {
 			local := append([]compact.Option{compact.WithModel(s.modelName)}, opts...)
 			t = compact.NewLocal(model, local...)
 		}
-		k.cfg.Transform = t.Transform
+		transforms = append(transforms, t.Transform)
 	}
+	k.cfg.Transform = chain1(transforms, agentturn.ChainTransform)
 }
 
 // chain1 returns nil for no hooks, the one hook for one, and the
@@ -533,51 +592,124 @@ func chain1[T any](fns []T, chain func(...T) T) T {
 	}
 }
 
-// rerenderMemory is the BeforeModelCall hook that puts the freshest
-// memory in front of the model each turn. It re-renders the block,
-// rebuilds the instructions from the parts with the new one in place,
-// and, when a session is recorded, writes the manifest under
+// instructions is the BeforeModelCall hook that builds the request's
+// instructions from the parts: it re-renders the memory block, when
+// there is one, so the model sees the freshest memory each turn, runs
+// the input guards over each part, when there are any, so a rewrite
+// lands in the part it belongs to, and joins what they left. When a
+// session is recorded, the manifest is written under
 // [agentmemory.ManifestNS] the first time each render appears.
 //
 // It is a BeforeModelCall and not a Transform because a Transform
 // cannot reach the instructions and what it injects is not recorded.
-func (k *Kit) rerenderMemory(s *settings) func(context.Context, *openresponses.Request) error {
+func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context, *openresponses.Request) error {
 	return func(ctx context.Context, req *openresponses.Request) error {
-		// The same render, the same bound and the same drop as the
-		// first one, so the block cannot grow past the budget between
-		// turns and cannot come back at its floor after the budget
-		// dropped it.
-		part, man, _, err := memoryPart(ctx, s, k.memoryShare(s))
-		if err != nil {
-			return err
+		k.mu.Lock()
+		base := k.base
+		k.mu.Unlock()
+
+		// Without memory the parts never change, so a request whose
+		// instructions are not their join is one a product rewrote,
+		// through Agent.SetConfig or a hook of its own, and the guards
+		// see it whole, after this, as they would without the kit.
+		if s.memStore == nil && req.Instructions != agentsession.JoinInstructions(base) {
+			return nil
+		}
+
+		var (
+			man    agentmemory.Manifest
+			memOm  []Omission
+			render = s.memStore != nil
+		)
+		if render {
+			// The same render, the same bound and the same drop as the
+			// first one, so the block cannot grow past the budget
+			// between turns and cannot come back at its floor after the
+			// budget dropped it.
+			part, m, om, err := memoryPart(ctx, s, k.memoryShare(s))
+			if err != nil {
+				return err
+			}
+			base, man, memOm = withPart(base, part, k.order), m, om
+			// Recorded before the guards run: the manifest says what the
+			// render put in the block, which a guard that blocks the
+			// request does not change.
+			if err := k.record(ctx, man); err != nil {
+				return err
+			}
+		}
+
+		sent := base
+		if len(guards.Guards) > 0 {
+			var err error
+			if sent, err = guardParts(ctx, guards, base); err != nil {
+				return err
+			}
 		}
 
 		k.mu.Lock()
-		parts := make([]Part, 0, len(k.parts)+1)
-		var replaced bool
-		for _, p := range k.parts {
-			if p.ID != PartMemory {
-				parts = append(parts, p)
-				continue
-			}
-			replaced = true
-			if part.Text != "" {
-				parts = append(parts, part)
-			}
+		k.base, k.parts = base, sent
+		if render {
+			k.manifest, k.memOmitted = man, memOm
 		}
-		if !replaced && part.Text != "" {
-			// The first render came out empty and was not joined, so
-			// the part has no position to be replaced at. Put it back
-			// where the order says it goes.
-			parts = insertByOrder(parts, part, k.order)
-		}
-		k.parts = parts
-		k.manifest = man
 		k.mu.Unlock()
 
-		req.Instructions = agentsession.JoinInstructions(parts)
-		return k.record(ctx, man)
+		req.Instructions = agentsession.JoinInstructions(sent)
+		return nil
 	}
+}
+
+// withPart returns parts with p in place of the part of its ID, or
+// inserted where the order puts it when the first render came out empty
+// and was not joined. An empty p is dropped rather than joined. parts
+// is not modified.
+func withPart(parts []Part, p Part, order []string) []Part {
+	out := make([]Part, 0, len(parts)+1)
+	var replaced bool
+	for _, existing := range parts {
+		if existing.ID != p.ID {
+			out = append(out, existing)
+			continue
+		}
+		replaced = true
+		if p.Text != "" {
+			out = append(out, p)
+		}
+	}
+	if !replaced && p.Text != "" {
+		out = insertByOrder(out, p, order)
+	}
+	return out
+}
+
+// guardParts runs the input guards over each part on its own, as an
+// [guard.Input] carrying the part's text and no items, and returns the
+// parts as the guards left them. A part a guard emptied is dropped, so
+// the join of what is returned is still the instructions sent. Each
+// verdict reaches the chain's observer with Subject naming the part,
+// "instructions/<id>", since the chain itself does not know it.
+func guardParts(ctx context.Context, c guard.Chain, parts []Part) ([]Part, error) {
+	out := make([]Part, 0, len(parts))
+	for _, p := range parts {
+		pc := c
+		if obs := c.Observer; obs != nil {
+			subject := "instructions/" + p.ID
+			pc.Observer = func(ctx context.Context, v agentpolicy.Verdict) {
+				v.Subject = subject
+				obs(ctx, v)
+			}
+		}
+		req := openresponses.Request{Instructions: p.Text}
+		if err := pc.BeforeModelCall()(ctx, &req); err != nil {
+			return nil, err
+		}
+		if req.Instructions == "" {
+			continue
+		}
+		p.Text = req.Instructions
+		out = append(out, p)
+	}
+	return out, nil
 }
 
 // record writes the memory manifest to the session the first time each
@@ -601,11 +733,44 @@ func (k *Kit) record(ctx context.Context, man agentmemory.Manifest) error {
 		return nil
 	}
 	ns, data := man.Record()
-	if err := k.rec.Annotate(ctx, ns, json.RawMessage(data)); err != nil {
+	if _, err := k.rec.Annotate(ctx, ns, json.RawMessage(data)); err != nil {
 		return fmt.Errorf("agentkit: recording the memory manifest: %w", err)
 	}
 	k.recorded = hash
 	return nil
+}
+
+// observeVerdicts is the observer the kit gives the engine it builds
+// and the guard chain: it writes each verdict to the session, when
+// there is one, under [agentpolicy.VerdictNS], and hands it to the
+// product's observer. A guard's bare allow is not written, as a hook's
+// allow with no reason is not: guards run on every part and every
+// message, and their silence would outweigh the run.
+//
+// An observer cannot fail the decision it observes, so a write that
+// fails is lost, as it is for any observer; the recorder's own writes
+// for the run fail the run first.
+func (k *Kit) observeVerdicts(s *settings, guards bool) func(context.Context, agentpolicy.Verdict) {
+	product := s.verdicts
+	return func(ctx context.Context, v agentpolicy.Verdict) {
+		if k.rec != nil && (!guards || v.Action != agentturn.Allow || v.Reason != "") {
+			ns, data := v.Record()
+			_, _ = k.rec.Annotate(ctx, ns, json.RawMessage(data))
+		}
+		if product != nil {
+			product(ctx, v)
+		}
+	}
+}
+
+// revokeOnRunStart is the BeforeTurn hook WithSkillGrantScope installs:
+// on a run's first turn it revokes every grant a skill's read made, so
+// a grant lasts the run that read the skill.
+func (k *Kit) revokeOnRunStart(ctx context.Context, info agentturn.TurnStartInfo) (openresponses.Items, error) {
+	if info.Turn == 1 {
+		k.RevokeSkillGrants(ctx)
+	}
+	return nil, nil
 }
 
 // memoryShare is what is left of the budget for the memory block this
@@ -619,7 +784,7 @@ func (k *Kit) memoryShare(s *settings) int64 {
 	}
 	k.mu.Lock()
 	var other int64
-	for _, p := range k.parts {
+	for _, p := range k.base {
 		if p.ID != PartMemory {
 			other += int64(len(p.Text)) + int64(len(Separator))
 		}
@@ -652,17 +817,17 @@ func insertByOrder(parts []Part, p Part, order []string) []Part {
 func (k *Kit) Config() agentturn.Config { return k.cfg }
 
 // Parts are the instructions as named parts, in the order they were
-// joined. Their texts joined with [Separator] are
-// [agentturn.Config.Instructions], so they may be handed to
-// [agentsession.ConfigFromRequestParts] as they are. The memory part is
-// replaced on each model call, so a caller that wants the parts of a
-// particular request reads them from the request.
+// joined, as the last request was sent them: after the memory block
+// was re-rendered and after the input guards ran over each part, so a
+// part [guard.Redact] rewrote holds the rewritten text. Their texts
+// joined with [Separator] are the instructions that request carried,
+// and before the first request they are [agentturn.Config.Instructions],
+// so they may be handed to [agentsession.ConfigFromRequestParts] as
+// they are.
 //
-// A configured session does not record them on its own. The recorder
-// writes its config entries through [agentsession.ConfigFromRequest],
-// which takes the joined string, so a product that wants
-// instructions_parts in the session hands these to
-// [agentsession.ConfigFromRequestParts] itself.
+// A guard that rewrites the joined instructions in its pass over the
+// whole request, or a product hook after the kit's, leaves the parts
+// describing the text before it, and [Kit.PartsFor] then says so.
 func (k *Kit) Parts() []Part {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -671,26 +836,101 @@ func (k *Kit) Parts() []Part {
 	return out
 }
 
+// PartsFor returns the parts req's instructions are composed of and
+// what the layers left out, or nil and nil when [Kit.Parts] do not join
+// to req.Instructions: a request a hook after the kit's rewrote, or one
+// built from a render other than the last. Its signature is the one
+// [session.WithInstructionsParts] takes, and a session the kit opens is
+// given it, so the recorder's config entries carry instructions_parts
+// and instructions_omitted. A recorder opened elsewhere, the one
+// [WithRecorder] is given, takes it the same way:
+//
+//	var kit *agentkit.Kit
+//	rec, _, err := session.Start(ctx, store, h,
+//		session.WithInstructionsParts(func(req openresponses.Request) ([]agentsession.InstructionPart, []agentsession.OmittedPart) {
+//			return kit.PartsFor(req)
+//		}))
+//	kit, err = agentkit.New(ctx, agentkit.WithRecorder(rec), ...)
+//
+// Concurrent runs off one kit share the last render, so a request from
+// the other run's render gets nil and is recorded as a string, which is
+// what the recorder does with parts that do not join.
+func (k *Kit) PartsFor(req openresponses.Request) ([]agentsession.InstructionPart, []agentsession.OmittedPart) {
+	k.mu.Lock()
+	parts := k.parts
+	if agentsession.JoinInstructions(parts) != req.Instructions {
+		// The configuration's own instructions, which the recorder
+		// settles at a run's start before any hook has run, are the
+		// layers' join.
+		if parts = k.base; agentsession.JoinInstructions(parts) != req.Instructions {
+			k.mu.Unlock()
+			return nil, nil
+		}
+	}
+	out := make([]Part, len(parts))
+	copy(out, parts)
+	k.mu.Unlock()
+	return out, k.OmittedParts()
+}
+
 // Omitted is everything the layers considered for the instructions and
 // left out: the files the AGENTS.md budget dropped and the names a
-// preferred file shadowed, the memory entries that did not fit, the
-// skills that would not load and the ones the catalogue will not offer.
-// One list, because a product wants one and a session's
+// preferred file shadowed, the memory entries the last render did not
+// fit, the skills that would not load and the ones the catalogue will
+// not offer. One list, because a product wants one and a session's
 // instructions_omitted is one.
 func (k *Kit) Omitted() []Omission {
-	out := make([]Omission, len(k.omitted))
-	copy(out, k.omitted)
-	return out
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	out := make([]Omission, 0, len(k.omitted)+len(k.memOmitted))
+	out = append(out, k.omitted...)
+	return append(out, k.memOmitted...)
 }
 
 // OmittedParts is [Kit.Omitted] in the shape the session format
 // records.
 func (k *Kit) OmittedParts() []agentsession.OmittedPart {
-	out := make([]agentsession.OmittedPart, 0, len(k.omitted))
-	for _, o := range k.omitted {
+	omitted := k.Omitted()
+	out := make([]agentsession.OmittedPart, 0, len(omitted))
+	for _, o := range omitted {
 		out = append(out, o.OmittedPart())
 	}
 	return out
+}
+
+// Tools lists the tools in the union at [New], after [WithToolFilter]
+// and [WithToolWrap] and before the policy's filter, each with the
+// source it came from. It is how a product names the tools a library
+// made, the skill tool, the memory tools, an MCP server's, a child's,
+// to a policy whose default asks, since the engine is built before the
+// union exists:
+//
+//	var allow []agentpolicy.Rule
+//	for _, t := range kit.Tools() {
+//		if t.Source != "WithTools" {
+//			allow = append(allow, agentpolicy.Rule{Tool: t.Name, Source: libraries})
+//		}
+//	}
+//
+// The kit does not allow them itself: whether a library's tool runs
+// unasked is the product's decision. An MCP server's list and a
+// provider's are fetched each turn, so a tool they add after New is
+// not here.
+func (k *Kit) Tools() []ToolOrigin {
+	return append([]ToolOrigin(nil), k.origins...)
+}
+
+// RevokeSkillGrants revokes every grant a skill's read made through
+// [WithSkillGrants] and returns the number of rules the engine removed.
+// A front calls it when a grant should end, the end of a run or of a
+// conversation; [WithSkillGrantScope] calls it when each run starts. A
+// skill read again is granted again. It is zero and does nothing
+// without skill grants.
+func (k *Kit) RevokeSkillGrants(ctx context.Context) int {
+	if k.grants == nil {
+		return 0
+	}
+	return k.grants.revoke(ctx)
 }
 
 // Engine is the policy engine, or nil when no policy was configured. A
@@ -703,12 +943,14 @@ func (k *Kit) Engine() *agentpolicy.Engine { return k.engine }
 func (k *Kit) Catalog() *agentskill.Catalog { return k.catalog }
 
 // Recorder is the session recorder, or nil when no session was
-// configured. Attach it to the agent with
+// configured: the one the kit opened, or the one [WithRecorder] gave
+// it. Attach one the kit opened to the agent with
 // [session.Recorder.Attach], or use [Kit.Attach].
 func (k *Kit) Recorder() *session.Recorder { return k.rec }
 
-// Session is the session [New] started or resumed, or nil. After a
-// resume its Context().Items is what the agent should be seeded with.
+// Session is the session [New] started or resumed, or nil, as it is
+// under [WithRecorder]. After a resume its Context().Items is what the
+// agent should be seeded with.
 func (k *Kit) Session() *agentsession.Session { return k.sess }
 
 // Transcript is the conversation in force at the session's leaf, and
@@ -731,9 +973,10 @@ func (k *Kit) SessionID() string {
 
 // Attach subscribes the recorder to the agent and returns the
 // unsubscribe. It returns a no-op when there is no session, so a caller
-// need not branch on one.
+// need not branch on one, and under [WithRecorder], whose recorder its
+// owner attaches: a second subscription would write every event twice.
 func (k *Kit) Attach(a *agentturn.Agent) func() {
-	if k.rec == nil {
+	if k.rec == nil || !k.ownRec {
 		return func() {}
 	}
 	return k.rec.Attach(a)

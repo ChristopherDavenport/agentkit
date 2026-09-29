@@ -25,6 +25,15 @@ func (c Conflict) Error() string {
 	return fmt.Sprintf("agentkit: two tools named %q: one from %s and one from %s", c.Name, c.Kept, c.Dropped)
 }
 
+// ToolOrigin is one tool in the union and the source it came from: the
+// label [WithToolFilter], [WithToolWrap] and a [Conflict] use, such as
+// "WithTools", "WithSkills", "WithMemory", "WithChildAgent #1 explore"
+// or "mcp:#1 some-server". [Kit.Tools] lists them.
+type ToolOrigin struct {
+	Name   string
+	Source string
+}
+
 // source is one contributor to the tool set, in the order the kit
 // unions them: the product's own tools, the skill catalogue's tool, the
 // memory tools, each MCP server's, and last a provider the product
@@ -38,13 +47,14 @@ type source struct {
 	// live supplies the set per turn, for a source whose list changes,
 	// such as a remote MCP server.
 	live func(context.Context) []agenttool.Tool
-}
+	// own is the kit's wrapper for this source's tools, applied after
+	// the product's; nil for none. The skill grant is the one there is.
+	own func(agenttool.Tool) agenttool.Tool
 
-func (s source) at(ctx context.Context) []agenttool.Tool {
-	if s.live != nil {
-		return s.live(ctx)
-	}
-	return s.tools
+	// wrapped holds tools wrapped once, in [toolSet.prepare], for a
+	// fixed source; it is nil for a live one, which is wrapped each
+	// turn.
+	wrapped []agenttool.Tool
 }
 
 // toolSet unions the sources into one namespace, keeping the first tool
@@ -58,8 +68,12 @@ type toolSet struct {
 	onConflict func(Conflict)
 	// filter keeps the tools it returns true for, and runs before the
 	// duplicate check so that filtering one of two tools claiming a
-	// name resolves the collision instead of reporting it.
+	// name resolves the collision instead of reporting it. It sees the
+	// tool its source produced, before any wrapper.
 	filter func(source string, t agenttool.Tool) bool
+	// wrap is the product's wrapper, applied after the filter and
+	// before the source's own.
+	wrap func(source string, t agenttool.Tool) agenttool.Tool
 
 	// mu guards seen, which keeps a conflict from being reported on
 	// every turn for as long as the two sources both offer the name.
@@ -67,14 +81,58 @@ type toolSet struct {
 	seen map[Conflict]bool
 }
 
-// resolve returns the union, in source order, and the conflicts found.
-func (ts *toolSet) resolve(ctx context.Context) ([]agenttool.Tool, []Conflict) {
+// wrapOne applies the product's wrapper and then the source's own. A
+// nil from the product's drops the tool.
+func (ts *toolSet) wrapOne(s *source, t agenttool.Tool) agenttool.Tool {
+	if ts.wrap != nil {
+		if t = ts.wrap(s.name, t); t == nil {
+			return nil
+		}
+	}
+	if s.own != nil {
+		t = s.own(t)
+	}
+	return t
+}
+
+// prepare wraps each fixed source's tools once, so a wrapper over a
+// tool that never changes is not rebuilt every turn.
+func (ts *toolSet) prepare() {
+	for i := range ts.sources {
+		s := &ts.sources[i]
+		if s.live != nil {
+			continue
+		}
+		s.wrapped = make([]agenttool.Tool, len(s.tools))
+		for j, t := range s.tools {
+			s.wrapped[j] = ts.wrapOne(s, t)
+		}
+	}
+}
+
+// resolve returns the union, in source order, where each tool came
+// from, and the conflicts found.
+func (ts *toolSet) resolve(ctx context.Context) ([]agenttool.Tool, []ToolOrigin, []Conflict) {
 	var out []agenttool.Tool
+	var origins []ToolOrigin
 	var conflicts []Conflict
 	from := map[string]string{}
-	for _, s := range ts.sources {
-		for _, t := range s.at(ctx) {
+	for i := range ts.sources {
+		s := &ts.sources[i]
+		raw, wrapped := s.tools, s.wrapped
+		if s.live != nil {
+			raw, wrapped = s.live(ctx), nil
+		}
+		for j, t := range raw {
 			if ts.filter != nil && !ts.filter(s.name, t) {
+				continue
+			}
+			if wrapped != nil {
+				t = wrapped[j]
+			} else {
+				t = ts.wrapOne(s, t)
+			}
+			if t == nil {
 				continue
 			}
 			name := t.Name()
@@ -84,9 +142,10 @@ func (ts *toolSet) resolve(ctx context.Context) ([]agenttool.Tool, []Conflict) {
 			}
 			from[name] = s.name
 			out = append(out, t)
+			origins = append(origins, ToolOrigin{Name: name, Source: s.name})
 		}
 	}
-	return out, conflicts
+	return out, origins, conflicts
 }
 
 // provider is the per-turn tool list: the union, with a later duplicate
@@ -94,7 +153,7 @@ func (ts *toolSet) resolve(ctx context.Context) ([]agenttool.Tool, []Conflict) {
 // whichever the set returned first.
 func (ts *toolSet) provider() func(context.Context) []agenttool.Tool {
 	return func(ctx context.Context) []agenttool.Tool {
-		tools, conflicts := ts.resolve(ctx)
+		tools, _, conflicts := ts.resolve(ctx)
 		if len(conflicts) > 0 && ts.onConflict != nil {
 			ts.report(conflicts)
 		}

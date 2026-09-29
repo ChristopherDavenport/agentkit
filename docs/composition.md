@@ -94,14 +94,27 @@ kit, err := agentkit.New(ctx,
 )
 ```
 
-The option earns its place on one binding: when a session is
+The option earns its place on two bindings: when a session is
 configured, the kit passes `childagent.WithObserver(rec.Observe)` to
-the child, so the child's own run is recorded into the parent's session
-live and linked to it. The recorder does not exist until `New` has
-opened the session, so that binding is not something a product can do
-in the option list — which is the whole reason this is an option and a
-peer is not. The caller's own `childagent.Option`s are applied after
-the kit's, so passing an observer still wins.
+the child, so the child's own run is recorded live into a session
+linked to the parent's, and `childagent.WithRunContext` with the
+recorder's `ChildContext`, so the child's tools see that session's ID.
+With `WithMemory` configured the same ID goes on the context under
+`agentmemory.WithSession`, the key the memory journal reads, so a
+memory the child saves names the child's session and not the parent's:
+
+```go
+childagent.WithRunContext(func(ctx context.Context, callID string) context.Context {
+	ctx = rec.ChildContext(ctx, callID)
+	return agentmemory.WithSession(ctx, session.SessionIDFromContext(ctx))
+})
+```
+
+The recorder does not exist until `New` has opened the session, so
+those bindings are not something a product can do in the option list
+— which is the whole reason this is an option and a peer is not. The
+caller's own `childagent.Option`s are applied after the kit's, so
+passing an observer or a run context still wins.
 
 Without a session, or without the recording, a child is an ordinary
 tool and needs no option:
@@ -135,7 +148,9 @@ agentkit.WithDeferredTools(func(k *agentkit.Kit) []agenttool.Tool {
 
 The `Kit` it is handed is not finished — `Config()` is not built yet —
 but `Recorder`, `Session`, `Engine` and `Catalog` are, which is
-everything a tool could need from it. Writing the child agent this way
+everything a tool could need from it. A child that is itself a kit is
+built here with `WithRecorder(k.Recorder())`, so it records into the
+parent's recorder rather than opening a session of its own. Writing the child agent this way
 is exactly what `WithChildAgent` does, so reach for it only when the
 tool is not a child.
 

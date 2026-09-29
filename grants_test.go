@@ -10,6 +10,8 @@ import (
 	"github.com/ChristopherDavenport/agentpolicy"
 	"github.com/ChristopherDavenport/agentskill"
 	"github.com/ChristopherDavenport/agenttool"
+	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/openresponses"
 )
 
 // skillWithTools writes a skill whose frontmatter carries an
@@ -79,10 +81,14 @@ func TestReadingATrustedSkillGrantsItsAllowedTools(t *testing.T) {
 		t.Fatal("the engine holds no grant after the read")
 	}
 
-	// A second read of the same skill grants once.
+	// A second read grants again and says so: GrantSet under one
+	// source replaces the set, so the engine still holds one.
 	readSkill(t, skillTool(t, kit), "digging")
-	if len(reports) != 1 {
-		t.Fatalf("reports = %d after a second read, want 1", len(reports))
+	if len(reports) != 2 {
+		t.Fatalf("reports = %d after a second read, want 2", len(reports))
+	}
+	if got := len(kit.Engine().Grants()); got != 1 {
+		t.Fatalf("grants after a second read = %d, want the one set", got)
 	}
 }
 
@@ -165,7 +171,8 @@ func TestASkillWhoseAllowedToolsWillNotParseIsAnOmission(t *testing.T) {
 
 // The granting wrapper must be the catalogue's tool in every way the
 // loop and a scheduler can observe, or wrapping it has changed what the
-// model is offered and how the batch runs.
+// model is offered and how the batch runs. agenttool.Wrap is what keeps
+// it so; this pins that the kit uses it.
 func TestTheGrantingWrapperIsTheSameToolToTheLoop(t *testing.T) {
 	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "digging", "Bash(git status:*)")
 
@@ -226,5 +233,99 @@ func TestTheGrantingWrapperIsTheSameToolToTheLoop(t *testing.T) {
 	}
 	if string(got) != string(want) {
 		t.Errorf("the function tool the model is offered differs:\n%s\n%s", got, want)
+	}
+}
+
+// A revoke ends a grant, and the next read of the skill puts it back:
+// the kit keeps no memory of what it granted that would swallow the
+// second read.
+func TestASkillReadAfterARevokeIsGrantedAgain(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "digging", "Bash(git status:*)")
+
+	var reports []agentkit.SkillGrant
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithSkills(skills),
+		agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{Execute: []string{"Bash"}}),
+			map[string]agentpolicy.ToolMatcher{
+				"Bash": {Match: agentpolicy.PrefixMatcher("command")},
+			}),
+		agentkit.WithSkillGrants(func(sk *agentskill.Skill) agentpolicy.Source {
+			return agentpolicy.Source{Name: "skill:" + sk.Name, Path: sk.Location, Trusted: true}
+		}),
+		agentkit.WithSkillGrantReport(func(g agentkit.SkillGrant) { reports = append(reports, g) }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	readSkill(t, skillTool(t, kit), "digging")
+	if got := len(kit.Engine().Grants()); got != 1 {
+		t.Fatalf("grants after the read = %d, want 1", got)
+	}
+	if n := kit.RevokeSkillGrants(t.Context()); n != 1 {
+		t.Fatalf("RevokeSkillGrants removed %d rules, want the skill's one", n)
+	}
+	if got := len(kit.Engine().Grants()); got != 0 {
+		t.Fatalf("grants after the revoke = %d, want 0", got)
+	}
+	readSkill(t, skillTool(t, kit), "digging")
+	if got := len(kit.Engine().Grants()); got != 1 {
+		t.Fatalf("grants after reading again = %d, want 1", got)
+	}
+	if len(reports) != 2 {
+		t.Fatalf("reports = %d, want one per read", len(reports))
+	}
+}
+
+// Under WithSkillGrantScope a grant lasts the run that read the skill:
+// the next run starts without it. Without the option it outlives the
+// run.
+func TestSkillGrantScopeEndsAGrantWhenTheNextRunStarts(t *testing.T) {
+	for _, scoped := range []bool{false, true} {
+		skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "digging", "Bash(git status:*)")
+		model := &scriptModel{turns: []func(*openresponses.Emitter) error{
+			callTurn(agentskill.ToolName, `{"name":"digging"}`),
+		}}
+		opts := []agentkit.Option{
+			agentkit.WithModel(model, "m"),
+			agentkit.WithSkills(skills),
+			agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{
+				Read:    []string{agentskill.ToolName},
+				Execute: []string{"Bash"},
+			}), map[string]agentpolicy.ToolMatcher{
+				"Bash": {Match: agentpolicy.PrefixMatcher("command")},
+			}),
+			agentkit.WithSkillGrants(func(sk *agentskill.Skill) agentpolicy.Source {
+				return agentpolicy.Source{Name: "skill:" + sk.Name, Path: sk.Location, Trusted: true}
+			}),
+		}
+		if scoped {
+			opts = append(opts, agentkit.WithSkillGrantScope())
+		}
+		kit, err := agentkit.New(t.Context(), opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer kit.Close()
+
+		agent := agentturn.New(kit.Config())
+		if _, err := agent.Prompt(t.Context(), openresponses.UserText("dig")); err != nil {
+			t.Fatal(err)
+		}
+		if got := len(kit.Engine().Grants()); got != 1 {
+			t.Fatalf("scoped=%v: grants after the run that read the skill = %d, want 1", scoped, got)
+		}
+		if _, err := agent.Prompt(t.Context(), openresponses.UserText("again")); err != nil {
+			t.Fatal(err)
+		}
+		want := 1
+		if scoped {
+			want = 0
+		}
+		if got := len(kit.Engine().Grants()); got != want {
+			t.Fatalf("scoped=%v: grants after the next run = %d, want %d", scoped, got, want)
+		}
 	}
 }

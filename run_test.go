@@ -257,7 +257,7 @@ func TestThePolicyEngineGatesARealRun(t *testing.T) {
 	}
 
 	// Releasing the hold through the engine finishes the run.
-	answers, err := kit.Engine().Release(t.Context(), end, agentturn.Approve(end.Pending[0].Call.CallID))
+	answers, err := kit.Engine().Release(t.Context(), end, agentturn.Approve(end.Pending[0].Call.CallID).WithBy(agentpolicy.ByHuman))
 	if err != nil {
 		t.Fatal(err)
 	}

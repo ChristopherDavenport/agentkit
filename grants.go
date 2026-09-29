@@ -3,6 +3,7 @@ package agentkit
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/ChristopherDavenport/agentpolicy"
@@ -11,8 +12,8 @@ import (
 )
 
 // SkillGrant is what happened when a skill the model read asked for
-// tools. It is reported through the function [WithSkillGrants] was
-// given, when that function is not nil.
+// tools. It is reported through the function [WithSkillGrantReport] was
+// given, once per read.
 type SkillGrant struct {
 	// Skill is the skill that was read.
 	Skill string
@@ -28,62 +29,59 @@ type SkillGrant struct {
 	Err error
 }
 
-// grantingTool wraps the skill catalogue's tool so that reading a skill
-// grants that skill's allowed-tools to the policy engine.
+// skillGrants is the meeting of a skill's allowed-tools and the policy
+// engine: reading a skill grants that skill's rules.
 //
 // This is composition no library can do: agentskill owns the grammar
 // and refuses to widen it, agentpolicy owns the same grammar and the
 // engine, and neither imports the other. The kit is where the two meet,
 // and the whole of the meeting is [agentskill.Skill.Rules] to
 // [agentpolicy.Engine.GrantSet] with a [agentpolicy.Source] the product
-// chose.
-type grantingTool struct {
-	agenttool.Tool
-
+// chose, around the catalogue's tool through [agenttool.Wrap], which
+// keeps every property the tool declares.
+type skillGrants struct {
 	cat    *agentskill.Catalog
 	engine *agentpolicy.Engine
 	source func(*agentskill.Skill) agentpolicy.Source
 	report func(SkillGrant)
 
-	// mu guards granted, so a skill read twice is granted once and the
-	// product is told once.
+	// mu guards sources, the names of every source a read has granted
+	// under, which is what [Kit.RevokeSkillGrants] revokes. A name stays
+	// once granted: revoking one the engine no longer holds is a no-op.
 	mu      sync.Mutex
-	granted map[string]bool
+	sources map[string]bool
 }
 
-func (g *grantingTool) Execute(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
-	res, err := g.Tool.Execute(ctx, call)
-	if err != nil {
-		return res, err
-	}
-	read, ok := res.Details.(agentskill.Read)
-	if !ok || read.Path != "" {
-		// A read of a file inside a skill, or a result whose details
-		// this version of agentskill does not set. The grant belongs to
-		// the read of the skill's own instructions, which is the call
-		// that tells the model what to do.
+// wrap returns the catalogue's tool, or whatever stands in for it,
+// granting on each read of a skill's own instructions.
+func (g *skillGrants) wrap(t agenttool.Tool) agenttool.Tool {
+	return agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+		res, err := t.Execute(ctx, call)
+		if err != nil {
+			return res, err
+		}
+		read, ok := res.Details.(agentskill.Read)
+		if !ok || read.Path != "" {
+			// A read of a file inside a skill, or a result whose details
+			// this version of agentskill does not set. The grant belongs
+			// to the read of the skill's own instructions, which is the
+			// call that tells the model what to do.
+			return res, nil
+		}
+		g.grant(ctx, read.Name)
 		return res, nil
-	}
-	g.grant(ctx, read.Name)
-	return res, nil
+	})
 }
 
-func (g *grantingTool) grant(ctx context.Context, name string) {
+// grant grants the skill's rules. Every read grants and reports: a
+// repeated GrantSet under one source name replaces the set, so a read
+// after a revoke puts the grant back and a read before one costs one
+// engine call.
+func (g *skillGrants) grant(ctx context.Context, name string) {
 	sk, ok := g.cat.Lookup(name)
 	if !ok {
 		return
 	}
-	g.mu.Lock()
-	if g.granted[sk.Location] {
-		g.mu.Unlock()
-		return
-	}
-	if g.granted == nil {
-		g.granted = map[string]bool{}
-	}
-	g.granted[sk.Location] = true
-	g.mu.Unlock()
-
 	out := SkillGrant{Skill: sk.Name, Location: sk.Location}
 	rules, err := sk.Rules()
 	if err != nil {
@@ -98,11 +96,34 @@ func (g *grantingTool) grant(ctx context.Context, name string) {
 	for _, r := range rules {
 		set.Allow = append(set.Allow, agentpolicy.Rule{Tool: r.Tool, Spec: r.Spec, Source: set.Source})
 	}
+	g.mu.Lock()
+	if g.sources == nil {
+		g.sources = map[string]bool{}
+	}
+	g.sources[set.Source.Name] = true
+	g.mu.Unlock()
 	out.Granted, out.Refused = g.engine.GrantSet(ctx, set)
 	g.tell(out)
 }
 
-func (g *grantingTool) sourceOf(sk *agentskill.Skill) agentpolicy.Source {
+// revoke revokes every source a read granted under and returns the
+// number of rules the engine removed.
+func (g *skillGrants) revoke(ctx context.Context) int {
+	g.mu.Lock()
+	names := make([]string, 0, len(g.sources))
+	for name := range g.sources {
+		names = append(names, name)
+	}
+	g.mu.Unlock()
+	sort.Strings(names)
+	n := 0
+	for _, name := range names {
+		n += g.engine.Revoke(ctx, name)
+	}
+	return n
+}
+
+func (g *skillGrants) sourceOf(sk *agentskill.Skill) agentpolicy.Source {
 	if g.source != nil {
 		return g.source(sk)
 	}
@@ -112,34 +133,11 @@ func (g *grantingTool) sourceOf(sk *agentskill.Skill) agentpolicy.Source {
 	return agentpolicy.Source{Name: "agentskill:" + sk.Name, Path: sk.Location}
 }
 
-func (g *grantingTool) tell(s SkillGrant) {
+func (g *skillGrants) tell(s SkillGrant) {
 	if g.report != nil {
 		g.report(s)
 	}
 }
-
-// The embedded Tool supplies Name, Description and Parameters
-// unchanged, so the model is offered exactly the tool agentskill built.
-//
-// Embedding an interface forwards only that interface's methods, so an
-// optional one the catalogue's tool grew would be lost here silently.
-// That is a known agenttool limitation, not a fault of this type:
-// every middleware over a Tool drops the same five — Sequential,
-// Resource, Annotated, Strict and Confined. (Schemer is on the
-// argument type rather than the Tool, so no Tool wrapper can forward
-// it. Recordable is on the Details value, which Execute returns
-// untouched.) Until a forwarding helper lands upstream,
-// TestTheGrantingWrapperIsTheSameToolToTheLoop compares all five
-// against the unwrapped tool, so the day agentskill implements one
-// this fails rather than quietly changing how the batch runs.
-//
-// This wrapper is also the one place the package's rule bends, since a
-// product cannot construct it. Both halves have the same fix and it is
-// upstream: an exported wrapper in agenttool forwards what embedding
-// drops, and, being exported, is a call a product could write, so the
-// manual path stops needing a type only the kit has. This type and its
-// test go when that lands.
-var _ agenttool.Tool = (*grantingTool)(nil)
 
 // skillRuleProblems reports the skills whose allowed-tools will not
 // parse. They are found at New rather than at the first read, so a

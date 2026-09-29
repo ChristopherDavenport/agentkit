@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,6 +21,7 @@ import (
 	"github.com/ChristopherDavenport/agentsmd"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
 
@@ -467,16 +469,31 @@ func TestHooksRunInTheDocumentedOrder(t *testing.T) {
 	}
 }
 
-func TestTransformAndCompactionCannotBothBeSet(t *testing.T) {
-	_, err := agentkit.New(t.Context(),
+// A product's Transform and compaction share the field through
+// agentturn.ChainTransform, the product's first, where New used to
+// refuse the pair.
+func TestAProductTransformComposesWithCompaction(t *testing.T) {
+	kit, err := agentkit.New(t.Context(),
 		agentkit.WithModel(stubModel{}, "m"),
-		agentkit.WithCompaction(1000),
+		agentkit.WithCompaction(1_000_000),
 		agentkit.WithTransform(func(_ context.Context, tr agentturn.Transcript) (agentturn.Transcript, error) {
-			return tr, nil
+			return append(tr, openresponses.UserText("added by the product")), nil
 		}),
 	)
-	if err == nil || !strings.Contains(err.Error(), "no chain for it") {
-		t.Fatalf("err = %v, want one saying Transform is one field", err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	tr := agentturn.Transcript{openresponses.UserText("one"), openresponses.UserText("two")}
+	got, err := kit.Config().Transform(t.Context(), tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Under budget the fold returns what it was given, so the product's
+	// item arriving at the end means the chain ran both.
+	if len(got) != 3 {
+		t.Fatalf("transcript = %d items, want the 3 the product's transform left", len(got))
 	}
 }
 
@@ -1077,5 +1094,210 @@ func TestADeferredToolCanCollide(t *testing.T) {
 	}
 	if c.Kept == c.Dropped {
 		t.Fatalf("conflict = %+v; it does not say which of the two sources to rename", c)
+	}
+}
+
+// Kit.Tools names each tool in the union with the source it came from,
+// which is what a product needs to name a library's tools to a policy.
+func TestToolsNamesEachToolWithItsSource(t *testing.T) {
+	root := t.TempDir()
+	skills := skillDir(t, filepath.Join(root, "skills"), "digging", "how to dig", "dig")
+
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithTools(namedTool(t, "read")),
+		agentkit.WithSkills(skills),
+		agentkit.WithMemory(memStore(t), "user"),
+		agentkit.WithMCPTransport(serveMCP(t, "remote_one")),
+		agentkit.WithToolFilter(func(_ string, tool agenttool.Tool) bool { return tool.Name() != "memory_forget" }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	from := map[string]string{}
+	for _, o := range kit.Tools() {
+		from[o.Name] = o.Source
+	}
+	for name, source := range map[string]string{
+		"read":              "WithTools",
+		agentskill.ToolName: "WithSkills",
+		"memory_save":       "WithMemory",
+	} {
+		if from[name] != source {
+			t.Errorf("%s comes from %q, want %q", name, from[name], source)
+		}
+	}
+	if !strings.HasPrefix(from["remote_one"], "mcp:#1 ") {
+		t.Errorf("remote_one comes from %q, want the MCP server's label", from["remote_one"])
+	}
+	if _, ok := from["memory_forget"]; ok {
+		t.Error("a tool the filter dropped is listed")
+	}
+	if got, want := len(kit.Tools()), len(kit.Config().ResolveTools(t.Context())); got != want {
+		t.Errorf("Tools lists %d, the config offers %d", got, want)
+	}
+}
+
+// WithToolWrap reaches every tool the kit makes, with its source, and
+// runs inside the kit's own wrapper: a read through the product's
+// wrapper still grants.
+func TestAToolWrapReachesEveryToolInsideTheGrant(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "digging", "Bash(git status:*)")
+
+	var mu sync.Mutex
+	wrapped := map[string]string{}
+	var ran []string
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithTools(namedTool(t, "read"), namedTool(t, "gone")),
+		agentkit.WithSkills(skills),
+		agentkit.WithToolProvider(func(context.Context) []agenttool.Tool {
+			return []agenttool.Tool{namedTool(t, "live")}
+		}),
+		agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{Execute: []string{"Bash"}}),
+			map[string]agentpolicy.ToolMatcher{"Bash": {Match: agentpolicy.PrefixMatcher("command")}}),
+		agentkit.WithSkillGrants(func(sk *agentskill.Skill) agentpolicy.Source {
+			return agentpolicy.Source{Name: "skill:" + sk.Name, Trusted: true}
+		}),
+		agentkit.WithToolWrap(func(source string, tool agenttool.Tool) agenttool.Tool {
+			if tool.Name() == "gone" {
+				return nil
+			}
+			mu.Lock()
+			wrapped[tool.Name()] = source
+			mu.Unlock()
+			return agenttool.Wrap(tool, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+				mu.Lock()
+				ran = append(ran, tool.Name())
+				mu.Unlock()
+				return tool.Execute(ctx, call)
+			})
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	names := toolNames(kit.Config().ResolveTools(t.Context()))
+	if strings.Join(names, ",") != "read,skill,live" {
+		t.Fatalf("tools = %v, want the wrapper's nil to drop gone", names)
+	}
+	for name, source := range map[string]string{"read": "WithTools", agentskill.ToolName: "WithSkills", "live": "WithToolProvider #1"} {
+		if wrapped[name] != source {
+			t.Errorf("%s was wrapped with source %q, want %q", name, wrapped[name], source)
+		}
+	}
+
+	readSkill(t, skillTool(t, kit), "digging")
+	if len(ran) != 1 || ran[0] != agentskill.ToolName {
+		t.Fatalf("the product's wrapper ran for %v, want the skill read", ran)
+	}
+	if got := len(kit.Engine().Grants()); got != 1 {
+		t.Fatalf("grants = %d; the grant must wrap the product's wrapper", got)
+	}
+}
+
+// The memory part carries agentmemory.Usage, as the skills part carries
+// the catalogue's: the model is offered the memory tools, so it is told
+// how to use them.
+func TestTheMemoryPartCarriesTheUsageParagraph(t *testing.T) {
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithMemory(memStore(t, agentmemory.Entry{Scope: "user", Name: "a", Content: "remember"}), "user"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	var memory string
+	for _, p := range kit.Parts() {
+		if p.ID == agentkit.PartMemory {
+			memory = p.Text
+		}
+	}
+	if !strings.HasSuffix(memory, agentkit.Separator+agentmemory.Usage()) {
+		t.Fatalf("the memory part does not end with the usage paragraph:\n%s", memory)
+	}
+
+	// The per-turn render keeps it.
+	req := &openresponses.Request{Instructions: kit.Config().Instructions}
+	if err := kit.Config().BeforeModelCall(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(req.Instructions, agentmemory.Usage()) {
+		t.Fatal("the re-rendered instructions dropped the usage paragraph")
+	}
+}
+
+// The usage paragraph is paid for out of the budget, so the joined
+// instructions still fit.
+func TestTheMemoryUsageParagraphIsInsideTheBudget(t *testing.T) {
+	const budget = 3000
+	var entries []agentmemory.Entry
+	for i := range 20 {
+		entries = append(entries, agentmemory.Entry{Scope: "user", Name: fmt.Sprintf("e%02d", i), Content: strings.Repeat("x", 200)})
+	}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithInstructions("Be brief."),
+		agentkit.WithMemory(memStore(t, entries...), "user"),
+		agentkit.WithInstructionBudget(budget),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	if got := len(kit.Config().Instructions); got > budget {
+		t.Fatalf("instructions = %d bytes, over the %d budget", got, budget)
+	}
+	if !strings.Contains(kit.Config().Instructions, agentmemory.Usage()) {
+		t.Fatal("the usage paragraph was dropped though the block was sent")
+	}
+}
+
+// WithToolElicitor sets the field, around the recorder's elicitor when
+// there is a session, so a question and its answer are on the record.
+func TestAToolElicitorIsWrittenUnderTheCall(t *testing.T) {
+	sessions := agentsession.NewMemoryStore()
+	asked := 0
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
+		agentkit.WithToolElicitor(agentpolicy.ByHuman, func(context.Context, agenttool.Elicitation) (agenttool.Answer, error) {
+			asked++
+			return agenttool.Answer{Action: agenttool.ActionAccept}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	elicit := kit.Config().ToolElicitor
+	if elicit == nil {
+		t.Fatal("ToolElicitor is nil")
+	}
+	if _, err := elicit(t.Context(), agenttool.Elicitation{Message: "proceed?"}); err != nil {
+		t.Fatal(err)
+	}
+	if asked != 1 {
+		t.Fatalf("the product's elicitor was asked %d times, want 1", asked)
+	}
+	s, err := sessions.Open(t.Context(), kit.SessionID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, e := range s.Entries() {
+		if c, ok := e.(*agentsession.CustomEntry); ok && c.NS == session.ElicitationNS {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the question is not on the record")
 	}
 }
