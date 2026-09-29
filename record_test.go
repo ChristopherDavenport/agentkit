@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/agentturn/session"
+	childagent "github.com/ChristopherDavenport/agentturn/tools/agent"
 	"github.com/ChristopherDavenport/openresponses"
 )
 
@@ -106,6 +108,7 @@ func TestTheSessionRecordsTheInstructionsAsParts(t *testing.T) {
 // request that was sent and the recorder takes them.
 func TestARedactedPartIsThePartThatWasSent(t *testing.T) {
 	store := memStore(t, agentmemory.Entry{Scope: "user", Name: "deploy", Content: "the key is " + awsKey})
+	entryPart := agentmemory.PartID("user", "deploy")
 	sessions := agentsession.NewMemoryStore()
 	model := &scriptModel{}
 
@@ -135,19 +138,31 @@ func TestARedactedPartIsThePartThatWasSent(t *testing.T) {
 		t.Fatalf("the parts do not describe the redacted request: %v", err)
 	}
 
-	var memory string
-	for _, c := range configEntries(openSession(t, sessions, kit.SessionID())) {
+	// Every config entry, not only the last: the first is settled at the
+	// run's start from the configuration's own instructions, and it is
+	// the entry a reader sees first.
+	var entry string
+	for i, c := range configEntries(openSession(t, sessions, kit.SessionID())) {
+		if c.Instructions != nil && strings.Contains(*c.Instructions, awsKey) {
+			t.Fatalf("config entry %d carries the key in its instructions", i)
+		}
 		for _, p := range c.InstructionsParts {
-			if p.ID == agentkit.PartMemory {
-				memory = p.Text
+			if strings.Contains(p.Text, awsKey) {
+				t.Fatalf("config entry %d carries the key in part %s", i, p.ID)
+			}
+			if p.ID == entryPart {
+				entry = p.Text
 			}
 		}
 	}
-	if memory == "" || strings.Contains(memory, awsKey) {
-		t.Fatalf("the recorded memory part = %q, want the redacted text", memory)
+	if !strings.Contains(entry, "[REDACTED") {
+		t.Fatalf("the recorded memory entry part = %q, want the redacted text", entry)
+	}
+	if strings.Contains(kit.Config().Instructions, awsKey) {
+		t.Fatal("the configuration's own instructions carry the key")
 	}
 
-	// Redact gave a reason, so its verdict on the memory part is on the
+	// Redact gave a reason, so its verdict on the memory entry is on the
 	// record, naming the part.
 	var named bool
 	for _, c := range customEntries(openSession(t, sessions, kit.SessionID()), agentpolicy.VerdictNS) {
@@ -155,7 +170,7 @@ func TestARedactedPartIsThePartThatWasSent(t *testing.T) {
 		if err := json.Unmarshal(c.Data, &v); err != nil {
 			t.Fatal(err)
 		}
-		if v.Guard == "redact" && v.Subject == "instructions/"+agentkit.PartMemory {
+		if v.Guard == "redact" && v.Subject == "instructions/"+entryPart {
 			named = true
 		}
 	}
@@ -440,8 +455,8 @@ func TestARecorderOpenedElsewhereTakesTheKitsParts(t *testing.T) {
 	sessions := agentsession.NewMemoryStore()
 	var kit *agentkit.Kit
 	rec, _, err := session.Start(t.Context(), sessions, agentsession.Header{CWD: t.TempDir()},
-		session.WithInstructionsParts(func(req openresponses.Request) ([]agentsession.InstructionPart, []agentsession.OmittedPart) {
-			return kit.PartsFor(req)
+		session.WithInstructionsParts(func(ctx context.Context, req openresponses.Request) ([]agentsession.InstructionPart, []agentsession.OmittedPart) {
+			return kit.PartsFor(ctx, req)
 		}))
 	if err != nil {
 		t.Fatal(err)
@@ -470,7 +485,7 @@ func TestARecorderOpenedElsewhereTakesTheKitsParts(t *testing.T) {
 		t.Fatal("the recorder did not take the kit's parts")
 	}
 
-	if p, o := kit.PartsFor(openresponses.Request{Instructions: "something else"}); p != nil || o != nil {
+	if p, o := kit.PartsFor(t.Context(), openresponses.Request{Instructions: "something else"}); p != nil || o != nil {
 		t.Fatalf("PartsFor a request the parts do not join to = %v, %v; want nil", p, o)
 	}
 }
@@ -518,5 +533,213 @@ func TestAnObserverPassedToWithPolicyRunsBesideTheRecording(t *testing.T) {
 	defer mu.Unlock()
 	if seen != len(recorded) {
 		t.Fatalf("the product's observer saw %d verdicts and %d are recorded", seen, len(recorded))
+	}
+}
+
+// callTurnID is callTurn with a call ID of the test's choosing, for a
+// script that calls one tool twice.
+func callTurnID(id, name, args string) func(*openresponses.Emitter) error {
+	return func(e *openresponses.Emitter) error {
+		w, err := e.FunctionCall(id, name)
+		if err != nil {
+			return err
+		}
+		if err := w.Arguments(args); err != nil {
+			return err
+		}
+		return w.Close()
+	}
+}
+
+// A handoff between two kits over one session: a recorder the host
+// opens with PartsFrom records each agent's instructions as that
+// agent's parts, on both sides of the handoff. (#17)
+func TestAHandoffBetweenTwoKitsRecordsBothAsParts(t *testing.T) {
+	sessions := agentsession.NewMemoryStore()
+	var triage, billing *agentkit.Kit
+	rec, _, err := session.Start(t.Context(), sessions, agentsession.Header{CWD: t.TempDir()},
+		session.WithInstructionsParts(func(ctx context.Context, req openresponses.Request) ([]agentsession.InstructionPart, []agentsession.OmittedPart) {
+			return agentkit.PartsFrom(triage, billing)(ctx, req)
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func(prompt string) *agentkit.Kit {
+		kit, err := agentkit.New(t.Context(),
+			agentkit.WithModel(&scriptModel{}, "test-model"),
+			agentkit.WithInstructions(prompt),
+			agentkit.WithMemory(memStore(t, agentmemory.Entry{Scope: "user", Name: "a", Content: prompt + " remembers"}), "user"),
+			agentkit.WithRecorder(rec),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = kit.Close() })
+		return kit
+	}
+	triage, billing = build("You triage."), build("You bill.")
+
+	agent := agentturn.New(triage.Config())
+	defer rec.Attach(agent)()
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("my invoice is wrong")); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.SetConfig(billing.Config()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("it says 40, not 4")); err != nil {
+		t.Fatal(err)
+	}
+
+	var sawTriage, sawBilling bool
+	for i, c := range configEntries(openSession(t, sessions, rec.SessionID())) {
+		if c.Instructions != nil && *c.Instructions != "" && len(c.InstructionsParts) == 0 {
+			t.Fatalf("config entry %d records the instructions as one string", i)
+		}
+		for _, p := range c.InstructionsParts {
+			sawTriage = sawTriage || strings.Contains(p.Text, "You triage.")
+			sawBilling = sawBilling || strings.Contains(p.Text, "You bill.")
+		}
+	}
+	if !sawTriage || !sawBilling {
+		t.Fatalf("parts recorded: triage %v, billing %v; want both agents'", sawTriage, sawBilling)
+	}
+}
+
+// A kit built under a parent's recorder, inside the parent's
+// WithDeferredTools, is called twice; each call is a child session of
+// its own, and each carries the memory manifest its run was shown,
+// where the kit wrote it to the first alone. (#20)
+func TestEachChildSessionCarriesItsOwnMemoryManifest(t *testing.T) {
+	store := memStore(t, agentmemory.Entry{Scope: "user", Name: "likes-tea", Content: "tea, not coffee"})
+	sessions := agentsession.NewMemoryStore()
+	parent := &scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurnID("call-1", "explore", `{"input":"one"}`),
+		callTurnID("call-2", "explore", `{"input":"two"}`),
+	}}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(parent, "test-model"),
+		agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
+		agentkit.WithDeferredTools(func(k *agentkit.Kit) []agenttool.Tool {
+			child, err := agentkit.New(t.Context(),
+				agentkit.WithName("explore", "delegate"),
+				agentkit.WithModel(&scriptModel{}, "test-model"),
+				agentkit.WithMemory(store, "user"),
+				agentkit.WithRecorder(k.Recorder()),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = child.Close() })
+			rec := k.Recorder()
+			return []agenttool.Tool{childagent.New(child.Config(),
+				childagent.WithObserver(rec.Observe),
+				childagent.WithRunContext(rec.ChildContext))}
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	agent := agentturn.New(kit.Config())
+	defer kit.Attach(agent)()
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("go")); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range []string{"call-1", "call-2"} {
+		id := agentsession.SubsessionID(kit.SessionID(), call)
+		if got := customEntries(openSession(t, sessions, id), agentmemory.ManifestNS); len(got) == 0 {
+			t.Errorf("the child session of %s holds no memory manifest", call)
+		}
+	}
+}
+
+// A small memory write under a large block is recorded as the entry's
+// part and the summary, not as the whole block again. (#21)
+func TestAMemoryWriteIsRecordedAsThePartsItChanged(t *testing.T) {
+	store := memStore(t,
+		agentmemory.Entry{Scope: "user", Name: "big-one", Content: strings.Repeat("a", 4000)},
+		agentmemory.Entry{Scope: "user", Name: "big-two", Content: strings.Repeat("b", 4000)},
+	)
+	sessions := agentsession.NewMemoryStore()
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn(agentmemory.SaveTool, `{"scope":"user","name":"travel","content":"window seat"}`),
+	}}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(model, "test-model"),
+		agentkit.WithInstructions("Be brief."),
+		agentkit.WithMemory(store, "user"),
+		agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	agent := agentturn.New(kit.Config())
+	defer kit.Attach(agent)()
+	end, err := agent.Prompt(t.Context(), openresponses.UserText("I like the window"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if end.Err != nil {
+		t.Fatal(end.Err)
+	}
+
+	entries := configEntries(openSession(t, sessions, kit.SessionID()))
+	if len(entries) < 2 {
+		t.Fatalf("config entries = %d, want the first and the delta the write caused", len(entries))
+	}
+	last := entries[len(entries)-1]
+	var carried []string
+	for _, p := range last.InstructionsParts {
+		if p.Text != "" {
+			carried = append(carried, p.ID)
+		}
+	}
+	slices.Sort(carried)
+	want := []string{agentmemory.SummaryPartID, agentmemory.PartID("user", "travel")}
+	slices.Sort(want)
+	if !slices.Equal(carried, want) {
+		t.Fatalf("the write's delta carries the text of %v, want only %v", carried, want)
+	}
+}
+
+// memory_save is based on the block the model was shown: a write
+// another session makes while the model composes is reported as lost,
+// where the save used to read the entry again and report nothing. (#22)
+func TestASaveOverAWriteAfterTheRenderIsALostUpdate(t *testing.T) {
+	store := memStore(t, agentmemory.Entry{Scope: "user", Name: "profile", Content: "prefers Python"})
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{
+		func(e *openresponses.Emitter) error {
+			// Another session writes the entry after the render, while the
+			// model is composing its rewrite of it.
+			other := agentmemory.WithSession(context.Background(), "telegram")
+			if _, err := store.Put(other, agentmemory.Entry{Scope: "user", Name: "profile", Content: "prefers Go"}); err != nil {
+				return err
+			}
+			return callTurn(agentmemory.SaveTool, `{"scope":"user","name":"profile","content":"prefers Python, likes tea"}`)(e)
+		},
+	}}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(model, "test-model"),
+		agentkit.WithMemory(store, "user"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	agent := agentturn.New(kit.Config())
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("remember I like tea")); err != nil {
+		t.Fatal(err)
+	}
+	lost, err := agentmemory.LostUpdates(t.Context(), store, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lost) != 1 {
+		t.Fatalf("lost updates = %d, want the write the save discarded", len(lost))
 	}
 }

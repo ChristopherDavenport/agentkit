@@ -387,3 +387,104 @@ func TestSkillGrantScopeKeepsAGrantAcrossAResume(t *testing.T) {
 		t.Fatalf("grants after the Resume = %d, want the skill's grant kept", got)
 	}
 }
+
+// Under WithSkillGrantScope a user's message ends the grant however it
+// arrives: as a follow-up the run takes after its answer, as a steer
+// between turns, or with a developer note after it. The model's own
+// output and an approval's outputs do not. (#24)
+func TestSkillGrantScopeEndsAGrantAtAnyNewUserMessage(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "digging", "Bash(git status:*)")
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithSkills(skills),
+		agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{Execute: []string{"Bash"}}),
+			map[string]agentpolicy.ToolMatcher{
+				"Bash": {Match: agentpolicy.PrefixMatcher("command")},
+			}),
+		agentkit.WithSkillGrants(func(sk *agentskill.Skill) agentpolicy.Source {
+			return agentpolicy.Source{Name: "skill:" + sk.Name, Trusted: true}
+		}),
+		agentkit.WithSkillGrantScope(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	call := &openresponses.FunctionCall{CallID: "call-1", Name: "Bash", Arguments: `{"command":"git status"}`}
+	output := openresponses.NewFunctionCallOutput("call-1", "clean")
+	for _, tc := range []struct {
+		name    string
+		turn    int
+		tail    agentturn.Transcript
+		revoked bool
+	}{
+		{"a follow-up after the answer", 4, agentturn.Transcript{openresponses.AssistantText("done"), openresponses.UserText("also clean the build")}, true},
+		{"a steer between turns", 2, agentturn.Transcript{call, output, openresponses.UserText("stop, use git clean")}, true},
+		{"a prompt with a developer note after it", 1, agentturn.Transcript{openresponses.UserText("release"), openresponses.DeveloperText("cwd is /repo")}, true},
+		{"a prompt with an item reference after it", 1, agentturn.Transcript{openresponses.UserText("release"), &openresponses.ItemReference{ID: "item-1"}}, true},
+		{"a Resume's answered calls", 1, agentturn.Transcript{call, output}, false},
+		{"the model's own turn", 3, agentturn.Transcript{call, output, openresponses.AssistantText("checking")}, false},
+	} {
+		readSkill(t, skillTool(t, kit), "digging")
+		if len(kit.Engine().Grants()) != 1 {
+			t.Fatalf("%s: the read granted nothing", tc.name)
+		}
+		tr := append(agentturn.Transcript{openresponses.UserText("dig")}, tc.tail...)
+		if _, err := kit.Config().BeforeTurn(t.Context(), agentturn.TurnStartInfo{Turn: tc.turn, Transcript: tr}); err != nil {
+			t.Fatal(err)
+		}
+		if revoked := len(kit.Engine().Grants()) == 0; revoked != tc.revoked {
+			t.Errorf("%s: revoked = %v, want %v", tc.name, revoked, tc.revoked)
+		}
+	}
+}
+
+// A root skill and a qualified one of the same name are two grants and
+// two reports: the default source keys on the listed name, so reading
+// one does not replace the other's set. (#25)
+func TestAQualifiedSkillIsAGrantOfItsOwn(t *testing.T) {
+	root := t.TempDir()
+	skillWithTools(t, filepath.Join(root, "skills"), "deploy", "Bash(kubectl:*)")
+	skillWithTools(t, filepath.Join(root, "apps", "web", "skills"), "deploy", "Bash(npm:*)")
+	top, err := agentskill.Dir(filepath.Join(root, "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	web, err := agentskill.Dir(filepath.Join(root, "apps", "web", "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	web.Qualifier = "apps/web"
+
+	var reports []string
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithSkillSources(top, web),
+		agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{Execute: []string{"Bash"}}),
+			map[string]agentpolicy.ToolMatcher{
+				"Bash": {Match: agentpolicy.PrefixMatcher("command")},
+			}),
+		agentkit.WithSkillGrants(nil),
+		agentkit.WithSkillGrantReport(func(g agentkit.SkillGrant) { reports = append(reports, g.Skill) }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	tool := skillTool(t, kit)
+	readSkill(t, tool, "deploy")
+	readSkill(t, tool, "apps/web:deploy")
+
+	if want := []string{"deploy", "apps/web:deploy"}; strings.Join(reports, ",") != strings.Join(want, ",") {
+		t.Fatalf("reports name %v, want %v", reports, want)
+	}
+	sources := map[string]bool{}
+	for _, r := range kit.Engine().Withheld() {
+		sources[r.Source.Name] = true
+	}
+	if !sources["agentskill:deploy"] || !sources["agentskill:apps/web:deploy"] {
+		t.Fatalf("withheld rules come from %v, want one source per skill", sources)
+	}
+}

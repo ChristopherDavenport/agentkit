@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ChristopherDavenport/agentkit"
@@ -189,8 +191,8 @@ func TestThePartsRecordTheRequestThatWasSent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the parts do not describe the request that was sent: %v", err)
 	}
-	if len(entry.InstructionsParts) != 3 {
-		t.Fatalf("parts = %d, want the product, memory and agentsmd parts", len(entry.InstructionsParts))
+	if got := groupIDs(entry.InstructionsParts); strings.Join(got, ",") != "product,memory,agentsmd" {
+		t.Fatalf("parts = %v, want the product, the memory group and the agentsmd part", got)
 	}
 }
 
@@ -403,5 +405,149 @@ func TestAToolsRecordLandsInTheSession(t *testing.T) {
 	defer plain.Close()
 	if plain.Config().ToolRecorder != nil {
 		t.Error("a kit without a session sets Config.ToolRecorder")
+	}
+}
+
+// twoCalls is a turn that calls two tools in one response, one batch.
+func twoCalls(first, firstArgs, second, secondArgs string) func(*openresponses.Emitter) error {
+	return func(e *openresponses.Emitter) error {
+		for _, c := range [][2]string{{first, firstArgs}, {second, secondArgs}} {
+			w, err := e.FunctionCall("call-"+c[0], c[0])
+			if err != nil {
+				return err
+			}
+			if err := w.Arguments(c[1]); err != nil {
+				return err
+			}
+			if err := w.Close(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+// Under AutoEdit a confined command runs unasked, and so does a read
+// beside it in one batch: the engine the kit builds is handed the
+// union, so it reads the sibling's confinement before the loop hands it
+// the sibling's call, where it read it as unconfined and held the read
+// with nobody asked. (#18)
+func TestACallBesideAConfinedCommandIsNotHeld(t *testing.T) {
+	var mu sync.Mutex
+	var ran []string
+	note := func(name string) {
+		mu.Lock()
+		ran = append(ran, name)
+		mu.Unlock()
+	}
+	read := agenttool.New("read", "read a file",
+		func(context.Context, struct {
+			Path string `json:"path"`
+		}) (string, error) {
+			note("read")
+			return "module example", nil
+		})
+	bash := agenttool.New("bash", "run a command in the sandbox",
+		func(context.Context, struct {
+			Command string `json:"command"`
+		}) (string, error) {
+			note("bash")
+			return "go.mod", nil
+		},
+		agenttool.WithConfined(func(context.Context, json.RawMessage) (bool, string) { return true, "sandbox" }))
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{
+		twoCalls("read", `{"path":"go.mod"}`, "bash", `{"command":"ls"}`),
+	}}
+
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(model, "test-model"),
+		agentkit.WithTools(read, bash),
+		agentkit.WithPolicy(agentpolicy.AutoEdit(agentpolicy.Tools{Read: []string{"read"}, Execute: []string{"bash"}}), nil),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	if got, ok := kit.LookupTool("bash"); !ok || got.Name() != "bash" {
+		t.Fatal("LookupTool does not find a tool in the union")
+	}
+	end, err := agentturn.New(kit.Config()).Prompt(t.Context(), openresponses.UserText("look around"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if end.Reason != agentturn.ReasonDone || len(end.Pending) != 0 {
+		t.Fatalf("reason = %q with %d pending, want done with both calls run", end.Reason, len(end.Pending))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	slices.Sort(ran)
+	if strings.Join(ran, ",") != "bash,read" {
+		t.Fatalf("ran %v, want both", ran)
+	}
+}
+
+// A call the policy held before a restart is seeded as held, so the
+// resumed agent can approve it; seeded from the transcript alone it
+// would be unknown, and an approval of it would be refused as a call
+// that may have run.
+func TestAResumedSessionSeedsTheCallsPendingThere(t *testing.T) {
+	sessions := agentsession.NewMemoryStore()
+	var ran atomic.Int32
+	bash := agenttool.New("bash", "run a command",
+		func(context.Context, struct {
+			Command string `json:"command"`
+		}) (string, error) {
+			ran.Add(1)
+			return "ok", nil
+		})
+	build := func(model agentturn.Model, session agentkit.Option) *agentkit.Kit {
+		kit, err := agentkit.New(t.Context(),
+			agentkit.WithModel(model, "test-model"),
+			agentkit.WithTools(bash),
+			agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{Execute: []string{"bash"}}), nil),
+			session,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = kit.Close() })
+		return kit
+	}
+
+	first := build(&scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn("bash", `{"command":"make"}`),
+	}}, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))
+	if got := first.AgentOptions(); len(got) == 0 {
+		t.Fatal("a new session gave no agent options")
+	}
+	agent := agentturn.New(first.Config(), first.AgentOptions()...)
+	unsubscribe := first.Attach(agent)
+	end, err := agent.Prompt(t.Context(), openresponses.UserText("build it"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsubscribe()
+	if end.Reason != agentturn.ReasonInputRequired {
+		t.Fatalf("reason = %q, want the call held", end.Reason)
+	}
+
+	second := build(&scriptModel{}, agentkit.WithResumedSession(sessions, first.SessionID()))
+	resumed := agentturn.New(second.Config(), second.AgentOptions()...)
+	defer second.Attach(resumed)()
+	pending := resumed.State().Pending
+	if len(pending) != 1 || pending[0].Reason != agentturn.PendingDeferred {
+		t.Fatalf("pending = %+v, want the held call", pending)
+	}
+	if _, err := resumed.Resume(t.Context(),
+		agentturn.Approve(pending[0].Call.CallID).WithBy(agentpolicy.ByHuman)); err != nil {
+		t.Fatal(err)
+	}
+	if ran.Load() != 1 {
+		t.Fatalf("the approved call ran %d times, want once", ran.Load())
+	}
+
+	if got := (&agentkit.Kit{}).AgentOptions(); got != nil {
+		t.Fatalf("a kit without a session gave %d agent options, want none", len(got))
 	}
 }

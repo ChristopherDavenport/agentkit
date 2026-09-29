@@ -3,6 +3,8 @@ package agentkit
 import (
 	"context"
 	"fmt"
+	"io"
+	"slices"
 
 	"github.com/ChristopherDavenport/agentmemory"
 	"github.com/ChristopherDavenport/agentpolicy"
@@ -74,12 +76,14 @@ type settings struct {
 
 	memStore  agentmemory.Store
 	memScopes []agentmemory.Scope
+	memRead   []agentmemory.Scope
 	memRender []agentmemory.RenderOption
 	memTools  []agentmemory.ToolOption
 
 	tools      []agenttool.Tool
 	deferTools []deferred
 	mcp        []mcpDial
+	mcpStderr  io.Writer
 	conflict   func(Conflict)
 	toolFilter func(source string, t agenttool.Tool) bool
 	toolWrap   func(source string, t agenttool.Tool) agenttool.Tool
@@ -105,6 +109,7 @@ type settings struct {
 	compactModel openresponses.Streamer
 	compactOpts  []compact.Option
 	compactSet   bool
+	foldObserver func(context.Context, compact.Fold)
 
 	beforeTurn      []func(context.Context, agentturn.TurnStartInfo) (openresponses.Items, error)
 	beforeModelCall []func(context.Context, *openresponses.Request) error
@@ -274,12 +279,15 @@ func WithoutSkillTool() Option {
 // WithSkillGrants grants a skill's allowed-tools to the policy engine
 // each time the model reads that skill. source builds the
 // [agentpolicy.Source] the grant is attributed to; nil means a source
-// named "agentskill:" and the skill's name, with the skill's location
-// as its path, which is untrusted and therefore contributes its deny
-// and ask rules alone.
+// named "agentskill:" and the skill's listed name,
+// [agentskill.Skill.ListedName], with the skill's location as its
+// path, which is untrusted and therefore contributes its deny and ask
+// rules alone. A source function should key its name on ListedName
+// too: a root "deploy" and a qualified "apps/web:deploy" share Name,
+// and two skills given one source name share one grant.
 //
 // A grant lasts until something revokes it. [WithSkillGrantScope]
-// revokes every skill's grant when a new message starts a run, which is the lifetime
+// revokes every skill's grant when the user's next message arrives, which is the lifetime
 // Claude Code gives allowed-tools; without it a grant lasts the life of
 // the engine unless the product calls [Kit.RevokeSkillGrants]. A skill
 // read again is granted again, and reported again: a repeated
@@ -305,13 +313,19 @@ func WithSkillGrants(source func(*agentskill.Skill) agentpolicy.Source) Option {
 }
 
 // WithSkillGrantScope revokes every grant a skill's read made when a
-// new user message starts a run, as Claude Code clears allowed-tools
+// message from the user arrives, as Claude Code clears allowed-tools
 // when the next message arrives: a later request that wants the tools
-// reads the skill again. A run that Resume starts after an approval, or
-// that Continue starts, is the same task going on and keeps them. It is
-// a [agentturn.Config.BeforeTurn] hook that calls [Kit.RevokeSkillGrants]
-// on turn 1 when the transcript ends with a user message, ahead of the
-// product's own BeforeTurn.
+// reads the skill again. The message may start a run, follow the run's
+// answer through [agentturn.Agent.FollowUp], be steered in between
+// turns, or come with a developer note after it; each revokes. A run
+// that Resume starts after an approval, or that Continue starts, is
+// the same task going on and keeps them. It is a
+// [agentturn.Config.BeforeTurn] hook that calls [Kit.RevokeSkillGrants]
+// on every turn whose transcript's tail, back to the last item the
+// model or a tool produced, holds a user message, ahead of the
+// product's own BeforeTurn. An output delivered after a steer ends that
+// tail as a Resume's does, and the steer before it does not revoke:
+// [agentturn.TurnStartInfo] does not say what arrived.
 //
 // Only the sources the kit granted are revoked; a product's own
 // [agentpolicy.Engine.GrantSet] calls are left alone. Every run on the
@@ -331,22 +345,90 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 }
 
 // WithMemory renders the memory block for the given scopes, in order,
-// as the [PartMemory] part, offers the memory tools, and re-renders the
-// block before every model call so the model sees the freshest state.
-// [agentmemory.Usage], the paragraph that tells the model what the
-// block is and which tool makes which change, follows the block in the
-// same part, since the tools are offered whenever the block is.
+// as the [PartMemory] group of parts, offers the memory tools, and
+// re-renders the block before every model call so the model sees the
+// freshest state. [agentmemory.Usage], the paragraph that tells the
+// model what the block is and which tool makes which change, follows
+// the block as [PartMemoryUsage], since the tools are offered whenever
+// the block is.
+//
+// The block is recorded as one part per piece
+// [agentmemory.RenderParts] returns, the title, each scope's heading,
+// each entry and the summary line, so a write to one entry is recorded
+// as that entry's part and the summary rather than the whole block.
+//
+// memory_save is given [agentmemory.WithRendered] with
+// [Kit.MemoryManifest], ahead of [WithMemoryTools]: a save is based on
+// the entry the block showed the model, so a write another session made
+// after the render is reported by [agentmemory.LostUpdates] and the
+// model is told, rather than silently discarded. Concurrent runs off
+// one kit share the last render, so the base is the render that
+// happened last. A [WithMemoryTools] option of the same kind replaces
+// the kit's.
 func WithMemory(store agentmemory.Store, scopes ...agentmemory.Scope) Option {
 	return func(s *settings) { s.memStore, s.memScopes = store, scopes }
 }
 
-// WithMemoryRender passes options to [agentmemory.Render], both for the
-// first render and for the per-turn one.
+// WithMemoryReadScopes renders scopes the model may read and not write,
+// such as project rules the product keeps in memory for the model to
+// follow and never edit. A scope [WithMemory] also names is rendered in
+// its place there and read-only; one it does not is rendered after its
+// scopes. The memory tools are built over the writable scopes alone,
+// with [agentmemory.WithReadScopes] naming these, so memory_search
+// reaches what the block omitted from them and the writers refuse them.
+//
+// At least one scope must stay writable, since agentmemory's tools
+// cannot be built over none; [New] fails otherwise. It has no effect
+// without [WithMemory]. Several calls accumulate.
+func WithMemoryReadScopes(scopes ...agentmemory.Scope) Option {
+	return func(s *settings) { s.memRead = append(s.memRead, scopes...) }
+}
+
+// renderScopes is every scope the block renders: WithMemory's, in
+// order, then the read scopes it does not name, each once.
+func (s *settings) renderScopes() []agentmemory.Scope {
+	out := append([]agentmemory.Scope(nil), s.memScopes...)
+	for _, r := range s.memRead {
+		if !slices.Contains(out, r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// writableScopes is WithMemory's scopes less the read-only ones.
+func (s *settings) writableScopes() []agentmemory.Scope {
+	var out []agentmemory.Scope
+	for _, sc := range s.memScopes {
+		if !slices.Contains(s.memRead, sc) {
+			out = append(out, sc)
+		}
+	}
+	return out
+}
+
+// readScopes is the read-only scopes, each once.
+func (s *settings) readScopes() []agentmemory.Scope {
+	var out []agentmemory.Scope
+	for _, r := range s.memRead {
+		if !slices.Contains(out, r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// WithMemoryRender passes options to [agentmemory.RenderParts], both
+// for the first render and for the per-turn one.
 func WithMemoryRender(opts ...agentmemory.RenderOption) Option {
 	return func(s *settings) { s.memRender = append(s.memRender, opts...) }
 }
 
-// WithMemoryTools passes options to [agentmemory.Tools].
+// WithMemoryTools passes options to [agentmemory.Tools], after the
+// kit's own [agentmemory.WithRendered] and, under
+// [WithMemoryReadScopes], [agentmemory.WithReadScopes]. A read scope
+// given here that [WithMemory] also names is an error from [New]; name
+// it in [WithMemoryReadScopes] instead.
 func WithMemoryTools(opts ...agentmemory.ToolOption) Option {
 	return func(s *settings) { s.memTools = append(s.memTools, opts...) }
 }
@@ -380,6 +462,25 @@ func WithTools(ts ...agenttool.Tool) Option {
 // split on whitespace into the program and its arguments. A server that
 // needs an environment, a working directory or an argument with a space
 // in it is dialed with [WithMCPTransport] instead.
+//
+// The server's stderr goes to [WithMCPStderr], and nowhere without it;
+// either way the kit keeps its last two kilobytes, and an error from
+// [New] connecting to the server ends with them, since a server that
+// fails at start says why there. The label a [Conflict], [WithToolFilter]
+// and [Kit.Tools] give its tools is "mcp:#<n> <program>", the command's
+// first word: its arguments are where a credential is put, and the
+// label is logged.
+//
+// With [WithToolElicitor] set, the client is dialed with
+// [mcpclient.WithElicitation] ahead of opts, so a question the server
+// asks mid-call reaches that elicitor under the call that asked. Every
+// server may then ask the user, a URL to visit among them; a product
+// that trusts one server less passes that server an ElicitationHandler
+// through [mcpclient.WithClientOptions], which takes precedence.
+//
+// The error's stderr tail is the server's own words and may carry what
+// the server printed, a token in a failed request among them; a product
+// that logs errors from New logs it.
 func WithMCP(command string, opts ...mcpclient.Option) Option {
 	return func(s *settings) {
 		s.mcp = append(s.mcp, mcpDial{command: command, opts: opts})
@@ -387,10 +488,24 @@ func WithMCP(command string, opts ...mcpclient.Option) Option {
 }
 
 // WithMCPTransport connects to an MCP server over the given transport.
+// Its label is "mcp:#<n>" and what the transport reaches, without the
+// places credentials go: a *mcp.CommandTransport's program, an HTTP
+// transport's scheme and host, or the transport's type. The command's stderr is
+// the product's to set, since it built the command. [WithToolElicitor]
+// binds elicitation as for [WithMCP].
 func WithMCPTransport(t sdk.Transport, opts ...mcpclient.Option) Option {
 	return func(s *settings) {
 		s.mcp = append(s.mcp, mcpDial{transport: t, opts: opts})
 	}
+}
+
+// WithMCPStderr sends the stderr of every server [WithMCP] starts to w,
+// os.Stderr for a command-line product, a log for one with a screen of
+// its own. The servers' writes are serialised, so w need not be safe
+// for concurrent use. A write to w that fails is dropped rather than
+// stopping the server. A later call replaces an earlier one.
+func WithMCPStderr(w io.Writer) Option {
+	return func(s *settings) { s.mcpStderr = w }
 }
 
 // WithToolConflict is called when two tools claim one name at turn
@@ -527,12 +642,20 @@ func WithChildAgent(cfg agentturn.Config, opts ...childagent.Option) Option {
 // its tool filter and its BeforeToolCall hook. Use [Kit.Engine] to
 // reach the engine a front needs for Deferred and Release.
 //
-// When a session is configured, or [WithVerdictObserver] is, the kit
-// gives the engine an observer through [agentpolicy.WithObserver],
-// ahead of opts: it records each verdict and hands it to
-// [WithVerdictObserver]. The engine keeps every observer it is given,
-// so an agentpolicy.WithObserver in opts runs beside the kit's, after
-// it, and the recording stays either way.
+// The kit gives the engine three options ahead of opts:
+//
+//   - [agentpolicy.WithTools] with [Kit.LookupTool], the union as of the
+//     current turn, so a call ahead of a confined command in one batch
+//     is not held for a sibling the engine could not see. The union
+//     does not exist when the engine is built, so a product cannot hand
+//     it in; an agentpolicy.WithTools in opts replaces the kit's.
+//   - When a session is configured, or [WithVerdictObserver] is,
+//     [agentpolicy.WithObserver]: it records each verdict and hands it
+//     to [WithVerdictObserver]. The engine keeps every observer it is
+//     given, so an agentpolicy.WithObserver in opts runs beside the
+//     kit's, after it, and the recording stays either way.
+//   - [agentpolicy.WithHooks] with the [WithBeforeToolCall] hooks, which
+//     the engine folds into its decision before the batch hold.
 func WithPolicy(p agentpolicy.Policy, matchers map[string]agentpolicy.ToolMatcher, opts ...agentpolicy.Option) Option {
 	return func(s *settings) {
 		s.policy, s.matchers, s.policySet = p, matchers, true
@@ -542,9 +665,13 @@ func WithPolicy(p agentpolicy.Policy, matchers map[string]agentpolicy.ToolMatche
 
 // WithEngine uses an engine the product built. It is [WithPolicy] for a
 // product that needs the engine before the kit exists, and the two are
-// mutually exclusive. The kit cannot give an engine it did not build an
-// observer, so its verdicts are recorded only if the product's own
-// observer records them.
+// mutually exclusive. The kit cannot give an engine it did not build
+// options, so its verdicts are recorded only if the product's own
+// observer records them, it reads siblings' tools only if the product
+// passed agentpolicy.WithTools with [Kit.LookupTool], and the
+// [WithBeforeToolCall] hooks are chained after it rather than folded
+// into it; a product that wants them held with their siblings passes
+// them to the engine with [agentpolicy.WithHooks] instead.
 func WithEngine(e *agentpolicy.Engine) Option {
 	return func(s *settings) { s.engine = e }
 }
@@ -562,6 +689,14 @@ func WithEngine(e *agentpolicy.Engine) Option {
 // then checked as before, which is where a guard that measures the
 // whole, [guard.Limit], has its say. A guard therefore sees each part's
 // text twice, once alone and once joined.
+//
+// [New] runs the same per-part pass over its own render, so
+// [agentturn.Config.Instructions] is the text the guards leave, and the
+// config entry a recorder settles at a run's start, before any hook has
+// run, carries nothing a guard kept from the model. A guard that refuses
+// a part there is an error from New. That pass has no observer, since
+// there is no run to record under; the first turn's pass reports the
+// same verdicts.
 //
 // The chain's observer records each verdict that blocked or gave a
 // reason when a session is configured, and hands every verdict to
@@ -645,12 +780,27 @@ func WithRecorder(rec *session.Recorder) Option {
 // WithCompaction folds the transcript with the model the kit was given
 // when it grows past budget tokens. When a session is recorded, the
 // fold is recorded with it.
+//
+// The kit records the fold through compact.WithOnFold, which holds one
+// function, so a compact.WithOnFold in opts is replaced whenever a
+// session is recorded or [WithFoldObserver] is set. A product that
+// wants to hear of a fold uses [WithFoldObserver], which is called
+// with or without a session.
 func WithCompaction(budget int, opts ...compact.Option) Option {
 	return func(s *settings) {
 		s.compactSet = true
 		s.compactOpts = append(s.compactOpts, compact.WithBudget(budget))
 		s.compactOpts = append(s.compactOpts, opts...)
 	}
+}
+
+// WithFoldObserver is told of each fold compaction makes, after the
+// recorder has written it when a session is recorded: how a front says
+// the model has forgotten a detail. It has no effect without
+// [WithCompaction] or [WithCompactor]. A later call replaces an
+// earlier one.
+func WithFoldObserver(fn func(context.Context, compact.Fold)) Option {
+	return func(s *settings) { s.foldObserver = fn }
 }
 
 // WithCompactionModel folds with a model other than the agent's, which
@@ -680,9 +830,21 @@ func WithBeforeModelCall(fn func(context.Context, *openresponses.Request) error)
 	return func(s *settings) { s.beforeModelCall = append(s.beforeModelCall, fn) }
 }
 
-// WithBeforeToolCall adds a policy on each tool call, after the
-// engine's. Decisions fold deny over ask over allow, as
-// [agentturn.ChainBeforeToolCall] describes.
+// WithBeforeToolCall adds a policy on each tool call. Decisions fold
+// deny over ask over allow, as [agentturn.ChainBeforeToolCall]
+// describes.
+//
+// With [WithPolicy] the hooks are folded into the engine's own decision
+// through [agentpolicy.WithHooks], so a hook that asks about a call
+// holds the call's siblings with it, and a hook that blocks a call the
+// policy asked about leaves nothing held. The engine reads a call's
+// siblings to decide whether to hold it, so a hook may be called for a
+// call before the loop hands it that call, and more than once: it must
+// decide a call the same way each time it is asked, reading the call
+// from its [agentturn.ToolCallInfo] and not from the context, which
+// then carries the call being decided rather than the sibling. A hook
+// that asks a person is asked before the batch runs. Without a policy,
+// or with [WithEngine], they are chained after the engine's hook.
 func WithBeforeToolCall(fn func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)) Option {
 	return func(s *settings) { s.beforeToolCall = append(s.beforeToolCall, fn) }
 }
@@ -702,6 +864,11 @@ func WithAfterToolCall(fn func(context.Context, agentturn.ToolResultInfo) (*agen
 // names who answers, in the session format's words, such as
 // [agentpolicy.ByHuman]. Without the option the field stays nil and an
 // elicitor on the prompt's context applies.
+//
+// An MCP client offers the server elicitation only when dialed with
+// [mcpclient.WithElicitation], so with this option set the kit dials
+// every server [WithMCP] and [WithMCPTransport] name with it, ahead of
+// their own options.
 func WithToolElicitor(by string, fn agenttool.Elicitor) Option {
 	return func(s *settings) { s.elicitBy, s.elicitor = by, fn }
 }
