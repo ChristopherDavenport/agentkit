@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/ChristopherDavenport/agentmemory v0.0.5
-	github.com/ChristopherDavenport/agentpolicy v0.0.5
+	github.com/ChristopherDavenport/agentpolicy v0.0.6
 	github.com/ChristopherDavenport/agentsession v0.0.9
 	github.com/ChristopherDavenport/agentskill v0.0.6
 	github.com/ChristopherDavenport/agentsmd v0.0.2

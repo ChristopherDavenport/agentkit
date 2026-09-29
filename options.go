@@ -529,11 +529,10 @@ func WithChildAgent(cfg agentturn.Config, opts ...childagent.Option) Option {
 //
 // When a session is configured, or [WithVerdictObserver] is, the kit
 // gives the engine an observer through [agentpolicy.WithObserver],
-// ahead of opts: it records each verdict and hands it to the product's
-// observer. An agentpolicy.WithObserver in opts replaces the kit's, as
-// it would replace any earlier one, so a product that passes its own
-// there records nothing through the kit; pass it to
-// [WithVerdictObserver] instead.
+// ahead of opts: it records each verdict and hands it to
+// [WithVerdictObserver]. The engine keeps every observer it is given,
+// so an agentpolicy.WithObserver in opts runs beside the kit's, after
+// it, and the recording stays either way.
 func WithPolicy(p agentpolicy.Policy, matchers map[string]agentpolicy.ToolMatcher, opts ...agentpolicy.Option) Option {
 	return func(s *settings) {
 		s.policy, s.matchers, s.policySet = p, matchers, true
@@ -578,7 +577,10 @@ func WithGuards(gs ...guard.Guard) Option {
 // WithVerdictObserver is told every verdict the policy engine the kit
 // built and the guards reach, after the kit has recorded it. It is the
 // product's observer, for a front that shows the policy at work; the
-// kit binds the recording itself.
+// kit binds the recording itself. It is the one way to see the guards'
+// verdicts, since the kit builds their chain. The engine's verdicts
+// also reach an agentpolicy.WithObserver passed to [WithPolicy], so a
+// product that passes both is told each engine verdict twice.
 //
 // With a session configured the kit writes each of the engine's
 // verdicts, and each guard verdict that blocked or gave a reason,

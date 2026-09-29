@@ -200,8 +200,9 @@ and only on a request whose instructions are still the parts' join.
 
 The engine the kit builds is given the same `observe`, through
 `agentpolicy.WithObserver` ahead of the product's own options. That is
-an engine option, not a config field, and a product that passes its
-own `agentpolicy.WithObserver` replaces the kit's.
+an engine option, not a config field. The engine keeps every observer
+it is given (agentpolicy v0.0.6), so a product's own
+`agentpolicy.WithObserver` runs beside the kit's recording.
 
 ## `BeforeTurn`
 
