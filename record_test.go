@@ -474,3 +474,49 @@ func TestARecorderOpenedElsewhereTakesTheKitsParts(t *testing.T) {
 		t.Fatalf("PartsFor a request the parts do not join to = %v, %v; want nil", p, o)
 	}
 }
+
+// A product that passes its own observer through WithPolicy's options
+// keeps both: agentpolicy v0.0.6 keeps every observer, so the kit's
+// recording does not depend on which option the product reached for.
+func TestAnObserverPassedToWithPolicyRunsBesideTheRecording(t *testing.T) {
+	root := t.TempDir()
+	skills := skillDir(t, filepath.Join(root, "skills"), "digging", "how to dig", "dig with care")
+	sessions := agentsession.NewMemoryStore()
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn("skill", `{"name":"digging"}`),
+	}}
+
+	var mu sync.Mutex
+	var seen int
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(model, "test-model"),
+		agentkit.WithSkills(skills),
+		agentkit.WithPolicy(agentpolicy.FullAuto(agentpolicy.Tools{Read: []string{agentskill.ToolName}}), nil,
+			agentpolicy.WithObserver(func(context.Context, agentpolicy.Verdict) {
+				mu.Lock()
+				seen++
+				mu.Unlock()
+			})),
+		agentkit.WithSession(sessions, agentsession.Header{CWD: root}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	agent := agentturn.New(kit.Config())
+	defer kit.Attach(agent)()
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("dig")); err != nil {
+		t.Fatal(err)
+	}
+
+	recorded := customEntries(openSession(t, sessions, kit.SessionID()), agentpolicy.VerdictNS)
+	if len(recorded) == 0 {
+		t.Fatal("the product's observer replaced the kit's: no verdict is recorded")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if seen != len(recorded) {
+		t.Fatalf("the product's observer saw %d verdicts and %d are recorded", seen, len(recorded))
+	}
+}

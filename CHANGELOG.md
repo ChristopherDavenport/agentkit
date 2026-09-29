@@ -14,7 +14,7 @@ the changes marked **Breaking** below to take.
 - **Breaking**: requires openresponses v0.0.12, agenttool and
   agenttool/mcpclient v0.0.9, agentturn and agentturn/session v0.0.10,
   agentsession v0.0.9, agentskill v0.0.6, agentmemory v0.0.5 and
-  agentpolicy v0.0.5. The README's version table now matches `go.mod`,
+  agentpolicy v0.0.6. The README's version table now matches `go.mod`,
   and `TestTheREADMEVersionTableIsGoMod` fails when it does not. (#10)
 - **Breaking**: the memory part ends with `agentmemory.Usage()`, as the
   skills part ends with the catalogue's usage, since the memory tools
@@ -58,9 +58,12 @@ the changes marked **Breaking** below to take.
   engine verdict, and every guard verdict that blocked or gave a
   reason. A per-part guard verdict names its part in `Subject`,
   `instructions/<id>`. `WithVerdictObserver` is the product's observer
-  beside the recording. An `agentpolicy.WithObserver` passed to
-  `WithPolicy` still replaces the kit's, as any later observer would.
-  The guards are now a `guard.Chain`. (#3, needs agentpolicy#31)
+  beside the recording, and the one that sees the guards' verdicts. An
+  `agentpolicy.WithObserver` passed to `WithPolicy` runs beside the
+  kit's, since agentpolicy v0.0.6 keeps every observer, so the
+  recording no longer depends on which option a product used. The
+  guards are now a `guard.Chain`. (#3, needs agentpolicy#31 and the
+  accumulating observers of agentpolicy v0.0.6)
 - `WithRecorder(rec)` builds a kit onto a recorder it did not open, an
   evaluation runner's or a parent's, and binds everything to it that it
   binds to its own: `ToolRecorder`, the fold, a child agent, the memory

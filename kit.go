@@ -187,8 +187,8 @@ func offersSkillTool(s *settings) bool {
 }
 
 // buildEngine builds the engine WithPolicy asked for, with the kit's
-// observer ahead of the caller's options so an observer the caller
-// passes there replaces it, as any later WithObserver would.
+// observer ahead of the caller's options. The engine keeps every
+// observer, so one the caller passes there runs after the kit's.
 func (k *Kit) buildEngine(s *settings) (*agentpolicy.Engine, error) {
 	if s.engine != nil {
 		return s.engine, nil
