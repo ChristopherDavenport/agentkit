@@ -3,7 +3,7 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## v0.0.1 - 2026-09-28
 
 The first version of the module, with the fixes the round 3 studies
 asked for folded in. A product built on the pinned commit b752942 has
