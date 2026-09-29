@@ -279,7 +279,7 @@ func WithoutSkillTool() Option {
 // and ask rules alone.
 //
 // A grant lasts until something revokes it. [WithSkillGrantScope]
-// revokes every skill's grant when a run starts, which is the lifetime
+// revokes every skill's grant when a new message starts a run, which is the lifetime
 // Claude Code gives allowed-tools; without it a grant lasts the life of
 // the engine unless the product calls [Kit.RevokeSkillGrants]. A skill
 // read again is granted again, and reported again: a repeated
@@ -305,11 +305,13 @@ func WithSkillGrants(source func(*agentskill.Skill) agentpolicy.Source) Option {
 }
 
 // WithSkillGrantScope revokes every grant a skill's read made when a
-// run starts, so a grant lasts the run that read the skill, as Claude
-// Code clears allowed-tools when the next message arrives: a later run
-// that wants the tools reads the skill again. It is a
-// [agentturn.Config.BeforeTurn] hook that calls [Kit.RevokeSkillGrants]
-// on turn 1, ahead of the product's own BeforeTurn.
+// new user message starts a run, as Claude Code clears allowed-tools
+// when the next message arrives: a later request that wants the tools
+// reads the skill again. A run that Resume starts after an approval, or
+// that Continue starts, is the same task going on and keeps them. It is
+// a [agentturn.Config.BeforeTurn] hook that calls [Kit.RevokeSkillGrants]
+// on turn 1 when the transcript ends with a user message, ahead of the
+// product's own BeforeTurn.
 //
 // Only the sources the kit granted are revoked; a product's own
 // [agentpolicy.Engine.GrantSet] calls are left alone. Every run on the
@@ -434,14 +436,17 @@ func WithToolFilter(fn func(source string, t agenttool.Tool) bool) Option {
 // reaches every tool, a replay, a timer or a logger, from inside the
 // kit rather than around the provider.
 //
-// It runs before the kit's own wrapper, so the skill tool's grant is
-// made on what fn's tool returned: a replay that serves a skill read
-// from a recording still grants. It runs after the filter, which sees
-// the tool its source produced. A fixed source's tools, those from
-// [WithTools], [WithChildAgent], [WithDeferredTools], [WithSkills] and
-// [WithMemory], are wrapped once, in [New]; an MCP server's and a
-// [WithToolProvider]'s are wrapped each turn, since their lists are
-// fetched each turn. A wrapper that keeps a tool's properties uses
+// It runs inside the kit's own wrapper, so the skill tool's grant is
+// made on what fn's tool returned: a wrapper whose result carries the
+// catalogue's agentskill.Read in Details still grants, and one that
+// returns a result without it, a replay that decodes a recording into
+// its own type, does not. The filter sees the tool its source produced,
+// not fn's. A fixed source's tools, those from [WithTools],
+// [WithChildAgent], [WithDeferredTools], [WithSkills] and [WithMemory],
+// are wrapped once, in [New], before the filter is asked about them, so
+// fn is called for a tool the filter then drops; an MCP server's and a
+// [WithToolProvider]'s are wrapped each turn, after the filter, since
+// their lists are fetched each turn. A wrapper that keeps a tool's properties uses
 // [agenttool.Wrap]. The duplicate check, [Kit.Tools] and the policy
 // read the name of the tool fn returned, and a nil return drops the
 // tool.
@@ -562,6 +567,10 @@ func WithEngine(e *agentpolicy.Engine) Option {
 // The chain's observer records each verdict that blocked or gave a
 // reason when a session is configured, and hands every verdict to
 // [WithVerdictObserver].
+//
+// [WithInstructionBudget] measures the parts before the guards run, so
+// a guard that makes a part longer, a redaction whose placeholder is
+// longer than the secret, can send instructions over the budget.
 func WithGuards(gs ...guard.Guard) Option {
 	return func(s *settings) { s.guards = append(s.guards, gs...) }
 }

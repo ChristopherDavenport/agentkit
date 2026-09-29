@@ -1,6 +1,7 @@
 package agentkit_test
 
 import (
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"strings"
@@ -327,5 +328,62 @@ func TestSkillGrantScopeEndsAGrantWhenTheNextRunStarts(t *testing.T) {
 		if got := len(kit.Engine().Grants()); got != want {
 			t.Fatalf("scoped=%v: grants after the next run = %d, want %d", scoped, got, want)
 		}
+	}
+}
+
+// A Resume after an approval is the same task going on, not a new
+// message, so the scope keeps the grant: every run's first turn is
+// turn 1, a Resume's too, and revoking there would take the grant away
+// in the middle of the task.
+func TestSkillGrantScopeKeepsAGrantAcrossAResume(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "digging", "Bash(git status:*)")
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn(agentskill.ToolName, `{"name":"digging"}`),
+		callTurn("Bash", `{"command":"rm -rf x"}`),
+	}}
+	bash := agenttool.New("Bash", "run a command",
+		func(context.Context, struct {
+			Command string `json:"command"`
+		}) (string, error) {
+			return "", nil
+		})
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(model, "m"),
+		agentkit.WithSkills(skills),
+		agentkit.WithTools(bash),
+		agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{
+			Read:    []string{agentskill.ToolName},
+			Execute: []string{"Bash"},
+		}), map[string]agentpolicy.ToolMatcher{
+			"Bash": {Match: agentpolicy.PrefixMatcher("command")},
+		}),
+		agentkit.WithSkillGrants(func(sk *agentskill.Skill) agentpolicy.Source {
+			return agentpolicy.Source{Name: "skill:" + sk.Name, Trusted: true}
+		}),
+		agentkit.WithSkillGrantScope(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	agent := agentturn.New(kit.Config())
+	end, err := agent.Prompt(t.Context(), openresponses.UserText("dig"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if end.Reason != agentturn.ReasonInputRequired || len(end.Pending) != 1 {
+		t.Fatalf("reason = %q, pending = %d; want the rm held", end.Reason, len(end.Pending))
+	}
+	answers, err := kit.Engine().Release(t.Context(), end,
+		agentturn.Approve(end.Pending[0].Call.CallID).WithBy(agentpolicy.ByHuman))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Resume(t.Context(), answers...); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(kit.Engine().Grants()); got != 1 {
+		t.Fatalf("grants after the Resume = %d, want the skill's grant kept", got)
 	}
 }

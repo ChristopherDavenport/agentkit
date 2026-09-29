@@ -28,7 +28,7 @@ the changes marked **Breaking** below to take.
   request that was sent. A guard therefore sees each part's text twice,
   once alone and once joined. (#2)
 - **Breaking**: `WithSkillGrants` grants on every read of a skill and
-  reports every read; the kit no longer remembers the skills it granted,
+  reports every read; the kit no longer skips a skill it granted before,
   so a read after a revoke puts the grant back. The grant wrapper is
   `agenttool.Wrap`, which forwards every property the catalogue's tool
   declares, so the kit no longer has a wrapper type a product cannot
@@ -73,9 +73,10 @@ the changes marked **Breaking** below to take.
   child saves names the child's session. The README says a host does the
   same for its own run with `agentmemory.WithSession(ctx,
   kit.SessionID())`. (#5)
-- `WithSkillGrantScope` revokes every skill grant when a run starts, so
-  a grant lasts the run that read the skill, as Claude Code clears
-  `allowed-tools` at the next message; `Kit.RevokeSkillGrants(ctx)` is
+- `WithSkillGrantScope` revokes every skill grant when a new user
+  message starts a run, as Claude Code clears `allowed-tools` at the
+  next message; a `Resume` after an approval and a `Continue` keep
+  them; `Kit.RevokeSkillGrants(ctx)` is
   the same revoke for a front to call. (#12, #7)
 - `WithToolWrap(func(source, tool) tool)` replaces tools in the union,
   with the source label `WithToolFilter` is given, inside the kit's own

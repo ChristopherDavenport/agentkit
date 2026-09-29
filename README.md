@@ -196,7 +196,7 @@ policy: reading a skill grants its rules to the engine through
 attributes the grant to an **untrusted** source unless the caller's own
 source function says otherwise, so a skill widens what the agent may do
 only when the product has said it trusts the tree the skill came from.
-`WithSkillGrantScope` ends each grant when the next run starts, as
+`WithSkillGrantScope` ends each grant when a new message starts a run, as
 Claude Code clears `allowed-tools` at the next message, and
 `kit.RevokeSkillGrants(ctx)` ends them when a front says; a skill read
 again is granted again.

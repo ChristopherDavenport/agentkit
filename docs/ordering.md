@@ -148,7 +148,7 @@ no sign. The kit is where they get called, in one order:
 | `BeforeToolCall` | the policy engine, then the product's | one engine, keyed by run; decisions fold deny over ask over allow whatever the order, so this one is about which reason the user is shown |
 | `OutputGuard` | the guards, then the product's | each sees what the one before it left |
 | `ShouldStopAfterTurn` | the policy's guards, then the product's | the chain stops at the first hook that stops the run, so the error on `RunEnd` names the layer that fired |
-| `BeforeTurn` | the skill grants' revoke on turn 1, then the product's | under `WithSkillGrantScope` a grant lasts the run that read the skill, so the revoke has to land before anything in the new run is decided |
+| `BeforeTurn` | the skill grants' revoke on the first turn of a run a new message started, then the product's | under `WithSkillGrantScope` a grant lasts until the next message, so the revoke has to land before anything in that run is decided, and not on a `Resume`, which is the same task going on |
 | `Transform` | the product's, then compaction | `agentturn.ChainTransform`: the fold is over what the product shaped, so a redaction or a filter is never undone by a summary written from the unshaped transcript |
 
 `WithOnFold` is bound to the session recorder when there is one, and is

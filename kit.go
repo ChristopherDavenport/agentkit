@@ -764,13 +764,33 @@ func (k *Kit) observeVerdicts(s *settings, guards bool) func(context.Context, ag
 }
 
 // revokeOnRunStart is the BeforeTurn hook WithSkillGrantScope installs:
-// on a run's first turn it revokes every grant a skill's read made, so
-// a grant lasts the run that read the skill.
+// on the first turn of a run that a new user message started, it
+// revokes every grant a skill's read made, so a grant lasts until the
+// next message.
+//
+// Every run's first turn is turn 1, a Resume's and a Continue's as
+// well, and neither is a new message: a Resume after an approval is the
+// same task going on, and revoking there would take a grant away in the
+// middle of it. TurnStartInfo does not say what started the run, so the
+// test is the transcript's: a run from a new message has that message
+// last when its first turn starts, a Resume has the answered calls'
+// outputs, and a Continue has whatever the last run left.
 func (k *Kit) revokeOnRunStart(ctx context.Context, info agentturn.TurnStartInfo) (openresponses.Items, error) {
-	if info.Turn == 1 {
+	if info.Turn == 1 && endsWithUserMessage(info.Transcript) {
 		k.RevokeSkillGrants(ctx)
 	}
 	return nil, nil
+}
+
+// endsWithUserMessage reports whether the last item of tr is a message
+// from the user, hidden or not.
+func endsWithUserMessage(tr agentturn.Transcript) bool {
+	if len(tr) == 0 {
+		return false
+	}
+	item, _ := agentturn.Unhide(tr[len(tr)-1])
+	m, ok := item.(*openresponses.Message)
+	return ok && m.Role == openresponses.RoleUser
 }
 
 // memoryShare is what is left of the budget for the memory block this
@@ -869,8 +889,16 @@ func (k *Kit) PartsFor(req openresponses.Request) ([]agentsession.InstructionPar
 	}
 	out := make([]Part, len(parts))
 	copy(out, parts)
+	// The omissions under the same lock, so they are the same render's.
+	omitted := make([]agentsession.OmittedPart, 0, len(k.omitted)+len(k.memOmitted))
+	for _, o := range k.omitted {
+		omitted = append(omitted, o.OmittedPart())
+	}
+	for _, o := range k.memOmitted {
+		omitted = append(omitted, o.OmittedPart())
+	}
 	k.mu.Unlock()
-	return out, k.OmittedParts()
+	return out, omitted
 }
 
 // Omitted is everything the layers considered for the instructions and

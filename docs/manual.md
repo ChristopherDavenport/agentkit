@@ -89,10 +89,13 @@ tools = append(tools, childagent.New(childCfg,
 		ctx = rec.ChildContext(ctx, callID)
 		return agentmemory.WithSession(ctx, session.SessionIDFromContext(ctx))
 	})))
-tools = append(tools, grant(cat.Tool()))
+tools = append(tools, cat.Tool())
 tools = append(tools, agentmemory.Tools(store, scopes)...)
 for i, t := range tools {
 	tools[i] = wrap(sourceOf(t), t) // WithToolWrap
+	if t.Name() == agentskill.ToolName {
+		tools[i] = grant(tools[i]) // WithSkillGrants, outside the product's wrapper
+	}
 }
 
 cfg.ToolProvider = engine.ToolProvider(func(ctx context.Context) []agenttool.Tool {
@@ -204,7 +207,7 @@ own `agentpolicy.WithObserver` replaces the kit's.
 
 ```go
 revokeOnTurnOne := func(ctx context.Context, info agentturn.TurnStartInfo) (openresponses.Items, error) {
-	if info.Turn == 1 {
+	if info.Turn == 1 && lastIsUserMessage(info.Transcript) {
 		for _, name := range granted { // the sources the grants were made under
 			engine.Revoke(ctx, name)
 		}
@@ -214,7 +217,9 @@ revokeOnTurnOne := func(ctx context.Context, info agentturn.TurnStartInfo) (open
 ```
 
 This is `WithSkillGrantScope`, and `kit.RevokeSkillGrants(ctx)` is the
-loop in it.
+loop in it. The kit's hook also checks that the transcript ends with a
+user message, since every run's first turn is turn 1, a `Resume`'s
+too, and a grant should end at the next message, not at an approval.
 
 ## What the kit does that no line here covers
 
