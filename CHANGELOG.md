@@ -3,7 +3,7 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## v0.0.2 - 2026-09-29
 
 The round 4 findings (#15 to #26), and the siblings' round 4 releases
 taken up. Three of the fixes close places the trust boundary leaked:
