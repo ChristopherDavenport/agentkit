@@ -3,7 +3,7 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## v0.0.3 - 2026-09-29
 
 The round 5 findings (#28 to #35), and the siblings' round 5 releases
 taken up.
