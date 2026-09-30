@@ -2,13 +2,19 @@ package agentkit
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/ChristopherDavenport/agentpolicy"
+	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentskill"
 	"github.com/ChristopherDavenport/agenttool"
+	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/openresponses"
 )
 
 // SkillGrant is what happened when a skill the model read asked for
@@ -47,6 +53,10 @@ type skillGrants struct {
 	engine *agentpolicy.Engine
 	source func(*agentskill.Skill) agentpolicy.Source
 	report func(SkillGrant)
+	// observe, when the kit built the engine, records a revocation of a
+	// source whose set held no rules, which the engine does not report,
+	// so the session's journal says every grant ended.
+	observe func(context.Context, agentpolicy.Verdict)
 
 	// mu guards sources, the names of every source a read has granted
 	// under, which is what [Kit.RevokeSkillGrants] revokes. A name stays
@@ -109,6 +119,82 @@ func (g *skillGrants) grant(ctx context.Context, name string) {
 	g.tell(out)
 }
 
+// regrant grants again, at New, what the skill reads on the session's
+// path granted and nothing had revoked when the kit that made them
+// stopped: a grant lives in the engine, and a restart between a held
+// call and its approval lost it, so the approval's Resume went on
+// without the tools the skill had been granted.
+//
+// The path is replayed forward, so the journal decides. Each
+// agentskill.Read record of a skill's own instructions grants its
+// source, and each verdict the engine recorded when it revoked a source,
+// [revokedPrefix], ends it, whether WithSkillGrantScope, the product's
+// Kit.RevokeSkillGrants or anything else revoked it; the kit records
+// the revocation of a set that held no rules itself, since the engine
+// does not. A record whose name the catalogue now gives a skill at
+// another location is passed over: that is not the skill the model
+// read. What is granted is the catalogue's rules as they stand now.
+//
+// Under scoped the replay also starts after the path's last user
+// message, which revoked everything before it, so the scope holds even
+// where the journal is silent: an engine the product built, whose
+// revocations reach the session only if the product records them, or a
+// verdict whose write failed. The journal matches a revocation to a
+// read by the source name the product's source function gives now; a
+// function that renames its sources between releases loses the match.
+func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, scoped bool) {
+	path := sess.Path(sess.Leaf())
+	from := 0
+	if scoped {
+		for i := len(path) - 1; i >= 0; i-- {
+			if e, ok := path[i].(*agentsession.ItemEntry); ok {
+				item, _ := agentturn.Unhide(e.Item)
+				if m, ok := item.(*openresponses.Message); ok && m.Role == openresponses.RoleUser {
+					from = i + 1
+					break
+				}
+			}
+		}
+	}
+	type live struct{ name, source string }
+	var granted []live
+	drop := func(source string) {
+		granted = slices.DeleteFunc(granted, func(l live) bool { return l.source == source })
+	}
+	for _, e := range path[from:] {
+		c, ok := e.(*agentsession.CustomEntry)
+		if !ok {
+			continue
+		}
+		switch c.NS {
+		case agentskill.RecordNS:
+			var read agentskill.Read
+			if json.Unmarshal(c.Data, &read) != nil || read.Path != "" {
+				continue
+			}
+			sk, ok := g.cat.Lookup(read.Name)
+			if !ok || sk.Location != read.Location {
+				continue
+			}
+			source := g.sourceOf(sk).Name
+			drop(source)
+			granted = append(granted, live{name: read.Name, source: source})
+		case agentpolicy.VerdictNS:
+			var v struct{ Reason string }
+			if json.Unmarshal(c.Data, &v) == nil && strings.HasPrefix(v.Reason, revokedPrefix) {
+				drop(strings.TrimPrefix(v.Reason, revokedPrefix))
+			}
+		}
+	}
+	for _, l := range granted {
+		g.grant(ctx, l.name)
+	}
+}
+
+// revokedPrefix opens the reason of the verdict agentpolicy's
+// Engine.Revoke records, which names the source after it.
+const revokedPrefix = "revoked the rules granted by "
+
 // revoke revokes every source a read granted under and returns the
 // number of rules the engine removed.
 func (g *skillGrants) revoke(ctx context.Context) int {
@@ -121,7 +207,15 @@ func (g *skillGrants) revoke(ctx context.Context) int {
 	sort.Strings(names)
 	n := 0
 	for _, name := range names {
-		n += g.engine.Revoke(ctx, name)
+		removed := g.engine.Revoke(ctx, name)
+		if removed == 0 && g.observe != nil {
+			// The engine records a revocation only when it removed a rule.
+			// A skill's set held none, untrusted or refused, and a restart
+			// that replays the journal must still see it end, or a rule the
+			// skill gains by then is granted for a read the scope ended.
+			g.observe(ctx, agentpolicy.Verdict{Action: agentturn.Block, Reason: revokedPrefix + name, By: agentpolicy.ByPolicy})
+		}
+		n += removed
 	}
 	return n
 }

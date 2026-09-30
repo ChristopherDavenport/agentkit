@@ -40,10 +40,13 @@ import (
 // other: they share the kit's memory state, because they share the hook
 // that renders it. Two runs off one kit each render memory for
 // themselves and each build their own instructions, so neither sees a
-// prompt the other assembled; what they share is [Kit.Parts] and
+// prompt the other assembled, and each run's memory_save is based on
+// that run's own render. What they share is [Kit.Parts] and
 // [Kit.MemoryManifest], which describe the render that happened last,
 // and the record of the manifest, which is written once per distinct
-// render because one session records both runs.
+// render because one session records both runs. A front serving one kit
+// to many conversations, each its own session, prompts each run under
+// [ContextWithRecorder] so what the kit records lands in the right one.
 //
 // That is the right sharing for concurrent runs of one agent and the
 // wrong sharing for two agents, which want two prompts, two manifests
@@ -59,9 +62,7 @@ import (
 //
 //	var triage, billing *agentkit.Kit
 //	rec, _, err := session.Start(ctx, store, h,
-//		session.WithInstructionsParts(func(ctx context.Context, req openresponses.Request) ([]agentsession.InstructionPart, []agentsession.OmittedPart) {
-//			return agentkit.PartsFrom(triage, billing)(ctx, req)
-//		}))
+//		session.WithInstructionsParts(agentkit.PartsFrom(&triage, &billing)))
 //	triage, err = agentkit.New(ctx, agentkit.WithRecorder(rec), ...)
 //	billing, err = agentkit.New(ctx, agentkit.WithRecorder(rec), ...)
 //
@@ -120,10 +121,21 @@ type Kit struct {
 	firstOmitted []Omission
 	manifest     agentmemory.Manifest
 	memOmitted   []Omission
+	// rendered is each run's last render, keyed by the run's ID, which is
+	// what memory_save is based on for a call in that run: the block its
+	// model composed from, not whichever run rendered last. saveBase is
+	// the render a memory_save call was composed from, keyed by the call's
+	// ID, kept when the engine decides the call, so a save held for
+	// approval and run by a Resume, a run of its own that has not
+	// rendered, is still based on it; New fills it from the session's
+	// records for the saves pending there.
+	rendered bounded[agentmemory.Manifest]
+	saveBase bounded[agentmemory.Manifest]
 
-	// recmu guards recorded, the hash of the manifest last written to
-	// each session, keyed by the session's ID, and is held across the
-	// write. It is keyed by session because one recorder writes several:
+	// recmu guards recorded, the manifest last written to each session
+	// and the entry that holds it, keyed by the session's ID, and is held
+	// across the write. A later write may be a delta on it,
+	// agentmemory.Manifest.RecordSince; see Kit.record. It is keyed by session because one recorder writes several:
 	// a kit under WithRecorder inside a parent's child agent annotates a
 	// new child session on each call, and each must carry its own
 	// manifest. It is its own lock for two reasons: the comparison, the
@@ -133,13 +145,81 @@ type Kit struct {
 	// that is no longer in force; and holding mu across a store would
 	// block Kit.Parts on a front's own thread.
 	recmu    sync.Mutex
-	recorded map[string]string
+	recorded map[string]recordedManifest
+}
+
+// recordedManifest is a manifest the kit wrote to a session and the ID
+// of the entry that holds it.
+type recordedManifest struct {
+	man   agentmemory.Manifest
+	entry string
+	// inSess is true when the entry landed in the session the kit holds,
+	// so its path can say whether the entry is still last there.
+	inSess bool
 }
 
 // recordedSessions bounds the sessions the kit remembers a manifest for.
 // Past it the memory is dropped and every session's next render is
 // written again, which costs an entry and loses nothing.
 const recordedSessions = 1024
+
+// renderedRuns bounds the runs, and the memory_save calls, the kit
+// remembers a render for. Past it the oldest is dropped, and a save
+// whose render went with it is based on the kit's last render.
+const renderedRuns = 1024
+
+// bounded is a map that keeps its last max keys, dropping the oldest
+// put first. The zero value holds renderedRuns.
+type bounded[V any] struct {
+	m     map[string]boundedEntry[V]
+	order []boundedKey
+	seq   uint64
+}
+
+type boundedEntry[V any] struct {
+	v   V
+	seq uint64
+}
+
+type boundedKey struct {
+	k   string
+	seq uint64
+}
+
+func (b *bounded[V]) get(k string) (V, bool) {
+	e, ok := b.m[k]
+	return e.v, ok
+}
+
+func (b *bounded[V]) put(k string, v V) {
+	if b.m == nil {
+		b.m = map[string]boundedEntry[V]{}
+	}
+	b.seq++
+	b.m[k] = boundedEntry[V]{v: v, seq: b.seq}
+	b.order = append(b.order, boundedKey{k: k, seq: b.seq})
+	// order holds a mark per put, and a key put again or deleted leaves
+	// a stale mark behind, which eviction passes over. Every live key has
+	// its latest mark in order, so the loop ends before order does.
+	for len(b.m) > renderedRuns {
+		old := b.order[0]
+		b.order = b.order[1:]
+		if e, ok := b.m[old.k]; ok && e.seq == old.seq {
+			delete(b.m, old.k)
+		}
+	}
+	if len(b.order) > 2*renderedRuns {
+		live := b.order[:0]
+		for _, o := range b.order {
+			if e, ok := b.m[o.k]; ok && e.seq == o.seq {
+				live = append(live, o)
+			}
+		}
+		b.order = live
+	}
+}
+
+func (b *bounded[V]) delete(k string) { delete(b.m, k) }
 
 // New assembles the kit. It does the work that can fail — discovering
 // skills, reading the AGENTS.md chain, rendering memory, building the
@@ -159,6 +239,9 @@ func New(ctx context.Context, opts ...Option) (*Kit, error) {
 	}
 	if s.policySet && s.engine != nil {
 		return nil, errors.New("agentkit: WithPolicy and WithEngine both set; the kit builds an engine or is given one")
+	}
+	if s.compactor != nil && (s.compactLocal || s.compactModel != nil) {
+		return nil, errors.New("agentkit: WithCompactor beside WithCompaction or WithCompactionModel; the kit folds through a compactor or with a local summary")
 	}
 	if s.recorder != nil && s.sessionSet {
 		return nil, errors.New("agentkit: WithRecorder and a session option both set; the kit records into the recorder it is given or opens its own")
@@ -196,6 +279,14 @@ func New(ctx context.Context, opts ...Option) (*Kit, error) {
 	}
 	if err := k.build(ctx, &s); err != nil {
 		return fail(err)
+	}
+	if k.grants != nil && k.sess != nil {
+		k.grants.regrant(ctx, k.sess, s.skillGrantScope)
+	}
+	if k.memory && k.sess != nil {
+		if err := k.pendingSaveBases(); err != nil {
+			return fail(err)
+		}
 	}
 	return k, nil
 }
@@ -248,9 +339,12 @@ func (k *Kit) buildEngine(s *settings) (*agentpolicy.Engine, error) {
 	}
 	// The union does not exist yet, so the engine is handed the kit's
 	// lookup, which reads it as of the current turn.
-	opts := []agentpolicy.Option{agentpolicy.WithTools(k.LookupTool)}
-	if s.sessionSet || s.recorder != nil || s.verdicts != nil {
-		opts = append(opts, agentpolicy.WithObserver(k.observeVerdicts(s, false)))
+	// The observer is bound whether or not the kit has a session: a run
+	// served under a recorder on its context, ContextWithRecorder, is
+	// recorded there.
+	opts := []agentpolicy.Option{
+		agentpolicy.WithTools(k.LookupTool),
+		agentpolicy.WithObserver(k.observeVerdicts(s, false)),
 	}
 	// The product's hooks are folded into the engine's decision, before
 	// the batch hold, rather than chained after it: a hook that asks
@@ -282,13 +376,15 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 		if err != nil {
 			return err
 		}
-		k.catalog = cat
-		parts[PartSkills] = single(part)
-		k.omitted = append(k.omitted, om...)
-		if s.skillGrants {
-			k.omitted = append(k.omitted, skillRuleProblems(cat)...)
+		if cat != nil {
+			k.catalog = cat
+			parts[PartSkills] = single(part)
+			k.omitted = append(k.omitted, om...)
+			if s.skillGrants {
+				k.omitted = append(k.omitted, skillRuleProblems(cat)...)
+			}
+			configured[PartSkills] = true
 		}
-		configured[PartSkills] = true
 	}
 
 	order := s.order
@@ -580,12 +676,16 @@ func (k *Kit) build(ctx context.Context, s *settings) error {
 		k.cfg.ToolRecorder = k.rec.RecordFunc()
 	}
 
-	// ToolElicitor: the product's, around the recorder's when there is
-	// one, so a question and its answer are written under the call.
+	// ToolElicitor: the product's, around the recorder of the run when
+	// there is one, so a question and its answer are written under the
+	// call.
 	if s.elicitor != nil {
-		k.cfg.ToolElicitor = s.elicitor
-		if k.rec != nil {
-			k.cfg.ToolElicitor = k.rec.Elicitor(s.elicitBy, s.elicitor)
+		by, fn := s.elicitBy, s.elicitor
+		k.cfg.ToolElicitor = func(ctx context.Context, q agenttool.Elicitation) (agenttool.Answer, error) {
+			if rec := k.recorderFor(ctx); rec != nil {
+				return rec.Elicitor(by, fn)(ctx, q)
+			}
+			return fn(ctx, q)
 		}
 	}
 	return nil
@@ -614,6 +714,9 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 				engine: k.engine,
 				source: s.skillSource,
 				report: s.skillGrant,
+			}
+			if s.engine == nil {
+				k.grants.observe = k.observeVerdicts(s, false)
 			}
 			src.own = k.grants.wrap
 		}
@@ -683,20 +786,20 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 }
 
 // memoryTools builds agentmemory's tools over the writable scopes, with
-// memory_save based on the kit's last render and the read scopes named
-// read-only, ahead of the product's own options. agentmemory.Tools
-// panics on scopes it cannot build over, and New is the call documented
-// to fail, so the panic is returned as an error.
+// memory_save based on the render its run's model was shown and the
+// read scopes named read-only, ahead of the product's own options.
+// agentmemory.Tools panics on scopes it cannot build over, and New is
+// the call documented to fail, so the panic is returned as an error.
 func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
 	writable := s.writableScopes()
 	if len(writable) == 0 {
 		return nil, errors.New("agentkit: WithMemory has no writable scope; agentmemory's tools need one, so leave at least one scope out of WithMemoryReadScopes")
 	}
-	opts := []agentmemory.ToolOption{agentmemory.WithRendered(k.MemoryManifest)}
+	var rest []agentmemory.ToolOption
 	if read := s.readScopes(); len(read) > 0 {
-		opts = append(opts, agentmemory.WithReadScopes(read...))
+		rest = append(rest, agentmemory.WithReadScopes(read...))
 	}
-	opts = append(opts, s.memTools...)
+	rest = append(rest, s.memTools...)
 	defer func() {
 		if r := recover(); r != nil {
 			tools, err = nil, fmt.Errorf("agentkit: building the memory tools: %v", r)
@@ -705,7 +808,52 @@ func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
 			}
 		}
 	}()
-	return agentmemory.Tools(s.memStore, writable, opts...), nil
+	based := func(rendered func() agentmemory.Manifest) []agenttool.Tool {
+		return agentmemory.Tools(s.memStore, writable,
+			append([]agentmemory.ToolOption{agentmemory.WithRendered(rendered)}, rest...)...)
+	}
+	tools = based(k.MemoryManifest)
+	for i, t := range tools {
+		if t.Name() == agentmemory.SaveTool {
+			tools[i] = k.saveAsRendered(t, based)
+		}
+	}
+	return tools, nil
+}
+
+// saveAsRendered runs a memory_save call against a memory_save based on
+// the render the call was composed from, so two runs off one kit each
+// save over the block their model read. The render another run made in
+// between may already hold a write a third session made after this
+// run's render, and a save based on it discards that write with nothing
+// reported. The render is the one kept for the call when the engine
+// decided it, which is how a save held for approval and run by a
+// Resume, a run that has not rendered, keeps its base; then the render
+// of the call's run, [agentturn.RunIDFromContext]; then the kit's last.
+// agentmemory.WithRendered takes no context, so the tool is built per
+// call over the render; building one is a few allocations and touches
+// no store.
+func (k *Kit) saveAsRendered(t agenttool.Tool, based func(func() agentmemory.Manifest) []agenttool.Tool) agenttool.Tool {
+	return agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+		k.mu.Lock()
+		key := saveKey(ctx, call.ID)
+		man, ok := k.saveBase.get(key)
+		if ok {
+			k.saveBase.delete(key)
+		} else {
+			man, ok = k.rendered.get(agentturn.RunIDFromContext(ctx))
+		}
+		k.mu.Unlock()
+		if !ok {
+			return t.Execute(ctx, call)
+		}
+		for _, own := range based(func() agentmemory.Manifest { return man }) {
+			if own.Name() == agentmemory.SaveTool {
+				return own.Execute(ctx, call)
+			}
+		}
+		return t.Execute(ctx, call)
+	})
 }
 
 // buildHooks fills the contested fields, in the order the package
@@ -714,10 +862,7 @@ func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
 func (k *Kit) buildHooks(s *settings) {
 	var guards guard.Chain
 	if len(s.guards) > 0 {
-		guards = guard.Chain{Guards: s.guards}
-		if k.rec != nil || s.verdicts != nil {
-			guards.Observer = k.observeVerdicts(s, true)
-		}
+		guards = guard.Chain{Guards: s.guards, Observer: k.observeVerdicts(s, true)}
 	}
 
 	// BeforeModelCall: the instructions, memory re-rendered and each
@@ -776,10 +921,13 @@ func (k *Kit) buildHooks(s *settings) {
 		transforms = append(transforms, s.transform)
 	}
 	if s.compactSet {
-		opts := s.compactOpts
-		if fold := k.onFold(s); fold != nil {
-			opts = append(append([]compact.Option(nil), opts...), compact.WithOnFold(fold))
-		}
+		opts := append(append([]compact.Option(nil), s.compactOpts...), compact.WithOnFold(k.onFold(s)))
+		// The agent's model name is the default and the caller's options
+		// come after it, so a compact.WithModel the product passed still
+		// wins. A compactor needs it as much as a local summary: its
+		// request names the model, and one that names none is refused by
+		// a provider that requires it.
+		opts = append([]compact.Option{compact.WithModel(s.modelName)}, opts...)
 		var t *compact.Transform
 		if s.compactor != nil {
 			t = compact.New(s.compactor, opts...)
@@ -788,37 +936,32 @@ func (k *Kit) buildHooks(s *settings) {
 			if model == nil {
 				model = s.model
 			}
-			// The agent's model name is the default and the caller's
-			// options come after it, so WithModel in WithCompaction
-			// still wins.
-			local := append([]compact.Option{compact.WithModel(s.modelName)}, opts...)
-			t = compact.NewLocal(model, local...)
+			t = compact.NewLocal(model, opts...)
 		}
 		transforms = append(transforms, t.Transform)
 	}
 	k.cfg.Transform = chain1(transforms, agentturn.ChainTransform)
 }
 
-// onFold is the fold callback the kit gives compaction: the recorder's
-// Fold, then the product's [WithFoldObserver], or nil when there is
-// neither and a compact.WithOnFold the product passed stands.
-// compact.WithOnFold sets one function, so the kit writes the one that
-// calls both; the observer hears of a fold only once it is recorded.
+// onFold is the fold callback the kit gives compaction: the Fold of the
+// run's recorder, [Kit.recorderFor], then the product's
+// [WithFoldObserver]. compact.WithOnFold sets one function, so the kit
+// writes the one that calls both; the observer hears of a fold only
+// once it is recorded. It is given whether or not the kit has a
+// session, since a run served under [ContextWithRecorder] has one on its
+// context, so a compact.WithOnFold the product passed is always
+// replaced; WithFoldObserver is how a product hears of a fold.
 func (k *Kit) onFold(s *settings) func(context.Context, compact.Fold) error {
-	rec, observe := k.rec, s.foldObserver
-	switch {
-	case rec == nil && observe == nil:
-		return nil
-	case observe == nil:
-		return rec.Fold
-	}
+	observe := s.foldObserver
 	return func(ctx context.Context, f compact.Fold) error {
-		if rec != nil {
+		if rec := k.recorderFor(ctx); rec != nil {
 			if err := rec.Fold(ctx, f); err != nil {
 				return err
 			}
 		}
-		observe(ctx, f)
+		if observe != nil {
+			observe(ctx, f)
+		}
 		return nil
 	}
 }
@@ -899,6 +1042,9 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 		k.base, k.parts = base, sent
 		if render {
 			k.manifest, k.memOmitted = man, memOm
+			if id := agentturn.RunIDFromContext(ctx); id != "" {
+				k.rendered.put(id, man)
+			}
 		}
 		k.mu.Unlock()
 
@@ -935,7 +1081,10 @@ func withGroup(parts []Part, id string, g []Part, order []string) []Part {
 // parts as the guards left them. A part a guard emptied is dropped, so
 // the join of what is returned is still the instructions sent. Each
 // verdict reaches the chain's observer with Subject naming the part,
-// "instructions/<id>", since the chain itself does not know it.
+// "instructions/<id>", since the chain itself does not know it, and a
+// refusal is returned under the same name, so an error from New, where
+// no observer runs, says which part a guard refused: one memory entry,
+// the AGENTS.md chain or the product's prompt.
 func guardParts(ctx context.Context, c guard.Chain, parts []Part) ([]Part, error) {
 	out := make([]Part, 0, len(parts))
 	for _, p := range parts {
@@ -949,7 +1098,7 @@ func guardParts(ctx context.Context, c guard.Chain, parts []Part) ([]Part, error
 		}
 		req := openresponses.Request{Instructions: p.Text}
 		if err := pc.BeforeModelCall()(ctx, &req); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("instructions/%s: %w", p.ID, err)
 		}
 		if req.Instructions == "" {
 			continue
@@ -965,6 +1114,17 @@ func guardParts(ctx context.Context, c guard.Chain, parts []Part) ([]Part, error
 // time each render appears there, and does nothing when there is no
 // session.
 //
+// A write is a delta, [agentmemory.Manifest.RecordSince], only when the
+// kit can see it will fold: the session is the one New opened, which
+// the kit holds live, and the last manifest record on its path is the
+// one the kit wrote before. Then a write to one entry of a large memory
+// records that entry and not all of them again. Every other write is
+// whole: a session another kit also records a manifest into, as two
+// kits of a handoff do under one recorder, a path a Rebase moved off the
+// last record, a child's session, a recorder on the run's context. A
+// delta on a manifest that is not the one in force on the path is a
+// record [agentmemory.ApplyManifestRecord] refuses.
+//
 // The comparison, the write and the remembering are one critical
 // section. Two turns that rendered different manifests must not write
 // their annotations in the other order, which would leave the session's
@@ -972,7 +1132,8 @@ func guardParts(ctx context.Context, c guard.Chain, parts []Part) ([]Part, error
 // that failed must be attempted again next turn rather than remembered
 // as done.
 func (k *Kit) record(ctx context.Context, man agentmemory.Manifest) error {
-	if k.rec == nil {
+	rec := k.recorderFor(ctx)
+	if rec == nil {
 		return nil
 	}
 	hash := man.Hash()
@@ -983,29 +1144,138 @@ func (k *Kit) record(ctx context.Context, man agentmemory.Manifest) error {
 	// does not is keyed as the recorder's own session.
 	sid := session.SessionIDFromContext(ctx)
 	if sid == "" {
-		sid = k.rec.SessionID()
+		sid = rec.SessionID()
 	}
 
 	k.recmu.Lock()
 	defer k.recmu.Unlock()
-	if hash == k.recorded[sid] {
+	prev, seen := k.recorded[sid]
+	// A path the kit can read that no longer ends in its last record, a
+	// Rebase or a /clear, gets the render again even when it did not
+	// move, so the path still says what the block holds. A last write
+	// that landed elsewhere, a child's session a run without
+	// ChildContext wrote, is not read against this path.
+	last, lastData, visible := k.lastManifestOnPath(rec, sid)
+	visible = visible && (!seen || prev.inSess)
+	onPath := seen && (!visible || last == prev.entry)
+	if onPath && hash == prev.man.Hash() {
 		return nil
 	}
+	if visible && !onPath && last != "" {
+		// Another writer's record is last, a second kit of a handoff or
+		// the kit's own before a Rebase. When it is whole and says what
+		// this render says, it is adopted rather than written again.
+		if other, err := agentmemory.ApplyManifestRecord(agentmemory.Manifest{}, lastData); err == nil && other.Hash() == hash {
+			k.rememberManifest(sid, recordedManifest{man: man, entry: last, inSess: true})
+			return nil
+		}
+	}
 	ns, data := man.Record()
-	if _, err := k.rec.Annotate(ctx, ns, json.RawMessage(data)); err != nil {
+	if onPath && visible {
+		ns, data = man.RecordSince(prev.man)
+	}
+	entry, err := rec.Annotate(ctx, ns, json.RawMessage(data))
+	if err != nil {
 		return fmt.Errorf("agentkit: recording the memory manifest: %w", err)
 	}
-	if k.recorded == nil || len(k.recorded) >= recordedSessions {
-		k.recorded = map[string]string{}
+	inSess := false
+	if k.sess != nil && rec == k.rec {
+		_, inSess = k.sess.Entry(entry)
 	}
-	k.recorded[sid] = hash
+	k.rememberManifest(sid, recordedManifest{man: man, entry: entry, inSess: inSess})
 	return nil
 }
 
+// rememberManifest keeps the manifest last recorded in session sid. The caller
+// holds recmu.
+func (k *Kit) rememberManifest(sid string, r recordedManifest) {
+	if k.recorded == nil || len(k.recorded) >= recordedSessions {
+		k.recorded = map[string]recordedManifest{}
+	}
+	k.recorded[sid] = r
+}
+
+// lastManifestOnPath returns the ID and data of the last memory manifest
+// record on the path to the leaf of the session sid, "" for none, and
+// true, when that is the session the kit opened and rec writes it.
+// Otherwise the kit cannot see the path and it returns false, which
+// makes the next write whole.
+func (k *Kit) lastManifestOnPath(rec *session.Recorder, sid string) (string, []byte, bool) {
+	if !k.ownRec || rec != k.rec || k.sess == nil || sid != rec.SessionID() {
+		return "", nil, false
+	}
+	path := k.sess.Path(k.sess.Leaf())
+	for i := len(path) - 1; i >= 0; i-- {
+		if c, ok := path[i].(*agentsession.CustomEntry); ok && c.NS == agentmemory.ManifestNS {
+			return c.ID, c.Data, true
+		}
+	}
+	return "", nil, true
+}
+
+// recorderKey is the context key of [ContextWithRecorder].
+type recorderKey struct{}
+
+// ContextWithRecorder returns ctx carrying rec as the recorder of the
+// conversation a run prompted with it belongs to. A front that serves
+// one kit to many conversations, each recorded as a session of its own,
+// prompts each run with it, and everything the kit records for that run
+// goes to rec rather than to the kit's own recorder: the engine's and
+// the guards' verdicts, the memory manifest, a fold, a tool's question
+// and its answer, and a child agent's run. Without it they go to the
+// kit's recorder, or nowhere when the kit has none.
+//
+// It is what the RecorderFor of agentturn/front/a2a's WithRecorderFor
+// returns, beside pointing the agent's ToolRecorder at rec:
+//
+//	fronta2a.WithRecorderFor(func(ctx context.Context, contextID string, a *agentturn.Agent) (context.Context, func(), error) {
+//		rec, err := openRecorder(ctx, store, contextID) // session.WithInstructionsParts(kit.PartsFor)
+//		if err != nil {
+//			return nil, nil, err
+//		}
+//		cfg := a.Config()
+//		cfg.ToolRecorder = rec.RecordFunc()
+//		if err := a.SetConfig(cfg); err != nil {
+//			return nil, nil, err
+//		}
+//		ctx = session.ContextWithSessionID(ctx, rec.SessionID())
+//		return agentkit.ContextWithRecorder(ctx, rec), rec.Attach(a), nil
+//	})
+//
+// The engine, the guards' chain and the per-turn hooks are bound once,
+// at [New], so a recorder a front sets with SetConfig cannot reach them;
+// the context is the one thing every one of them is handed. An engine
+// the product built, [WithEngine], has no observer of the kit's, so its
+// verdicts follow the recorder on the context only if the product's own
+// agentpolicy.WithObserver reads it with [RecorderFromContext]. A nil
+// rec returns ctx as it is.
+func ContextWithRecorder(ctx context.Context, rec *session.Recorder) context.Context {
+	if rec == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, recorderKey{}, rec)
+}
+
+// RecorderFromContext returns the recorder [ContextWithRecorder] put on
+// ctx, or nil.
+func RecorderFromContext(ctx context.Context) *session.Recorder {
+	rec, _ := ctx.Value(recorderKey{}).(*session.Recorder)
+	return rec
+}
+
+// recorderFor is the recorder a run on ctx records into: the one on the
+// context, or the kit's own, or nil.
+func (k *Kit) recorderFor(ctx context.Context) *session.Recorder {
+	if rec := RecorderFromContext(ctx); rec != nil {
+		return rec
+	}
+	return k.rec
+}
+
 // observeVerdicts is the observer the kit gives the engine it builds
-// and the guard chain: it writes each verdict to the session, when
-// there is one, under [agentpolicy.VerdictNS], and hands it to the
-// product's observer. A guard's bare allow is not written, as a hook's
+// and the guard chain: it writes each verdict to the run's session, when
+// there is one, [Kit.recorderFor], under [agentpolicy.VerdictNS], and
+// hands it to the product's observer. A guard's bare allow is not written, as a hook's
 // allow with no reason is not: guards run on every part and every
 // message, and their silence would outweigh the run.
 //
@@ -1015,14 +1285,95 @@ func (k *Kit) record(ctx context.Context, man agentmemory.Manifest) error {
 func (k *Kit) observeVerdicts(s *settings, guards bool) func(context.Context, agentpolicy.Verdict) {
 	product := s.verdicts
 	return func(ctx context.Context, v agentpolicy.Verdict) {
-		if k.rec != nil && (!guards || v.Action != agentturn.Allow || v.Reason != "") {
+		if !guards && k.memory && v.Tool == agentmemory.SaveTool && v.CallID != "" {
+			k.keepSaveBase(ctx, v)
+		}
+		if rec := k.recorderFor(ctx); rec != nil && (!guards || v.Action != agentturn.Allow || v.Reason != "") {
 			ns, data := v.Record()
-			_, _ = k.rec.Annotate(ctx, ns, json.RawMessage(data))
+			_, _ = rec.Annotate(ctx, ns, json.RawMessage(data))
 		}
 		if product != nil {
 			product(ctx, v)
 		}
 	}
+}
+
+// keepSaveBase keeps, for a memory_save call the engine decided, the
+// render of the run that made it, whenever it is decided in a run that
+// rendered. A Resume decides a call again before any render, and that
+// decision keeps nothing, so the render the held call was decided under
+// stands.
+func (k *Kit) keepSaveBase(ctx context.Context, v agentpolicy.Verdict) {
+	run := v.RunID
+	if run == "" {
+		run = agentturn.RunIDFromContext(ctx)
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if man, ok := k.rendered.get(run); ok {
+		k.saveBase.put(saveKey(ctx, v.CallID), man)
+	}
+}
+
+// saveKey keys a memory_save call's base by the session on the context
+// and the call's ID. A call ID names one call in one conversation only:
+// two conversations a kit serves, whose provider numbers its calls, both
+// have a call_0, and each run of a conversation served under a recorder
+// of its own carries that session's ID.
+func saveKey(ctx context.Context, callID string) string {
+	return session.SessionIDFromContext(ctx) + "\x00" + callID
+}
+
+// pendingSaveBases fills saveBase, at New, for the memory_save calls
+// pending at the session's leaf: each is based on the manifest in force
+// on the path where the model made it, folded from the path's
+// [agentmemory.ManifestNS] records, so an approval after a restart saves
+// over the block the model read and not New's fresh render. A call
+// before the path's first whole manifest, or after a record that does
+// not fold, is left to the kit's last render.
+func (k *Kit) pendingSaveBases() error {
+	leaf := k.sess.Leaf()
+	if leaf == "" {
+		return nil
+	}
+	pending, err := k.sess.PendingCalls(leaf)
+	if err != nil {
+		return fmt.Errorf("agentkit: reading the session's pending calls: %w", err)
+	}
+	want := map[string]bool{}
+	for _, c := range pending {
+		if c.Call != nil && c.Call.Name == agentmemory.SaveTool {
+			want[c.Call.CallID] = true
+		}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	var (
+		man   agentmemory.Manifest
+		valid bool
+	)
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for _, e := range k.sess.Path(leaf) {
+		switch e := e.(type) {
+		case *agentsession.CustomEntry:
+			if e.NS != agentmemory.ManifestNS {
+				continue
+			}
+			next, err := agentmemory.ApplyManifestRecord(man, e.Data)
+			man, valid = next, err == nil
+		case *agentsession.ItemEntry:
+			if fc, ok := e.Item.(*openresponses.FunctionCall); ok && valid && want[fc.CallID] {
+				// Under both keys a run of this session may carry: none,
+				// or the session's own ID, as a host that puts it on the
+				// context for agentmemory's journal does.
+				k.saveBase.put(saveKey(context.Background(), fc.CallID), man)
+				k.saveBase.put(saveKey(session.ContextWithSessionID(context.Background(), k.sess.ID()), fc.CallID), man)
+			}
+		}
+	}
+	return nil
 }
 
 // revokeOnUserMessage is the BeforeTurn hook WithSkillGrantScope
@@ -1196,14 +1547,20 @@ func (k *Kit) PartsFor(_ context.Context, req openresponses.Request) ([]agentses
 // each kit is asked in turn, and the first whose [Kit.PartsFor] joins to
 // the request answers. It is how one session records a handoff between
 // two agents, or a parent and a child kit built under [WithRecorder],
-// with each agent's instructions as its own parts. A nil kit is passed
-// over, so a function that builds it from variables assigned after the
-// recorder is opened works before they are.
-func PartsFrom(kits ...*Kit) func(context.Context, openresponses.Request) ([]agentsession.InstructionPart, []agentsession.OmittedPart) {
-	kits = append([]*Kit(nil), kits...)
+// with each agent's instructions as its own parts.
+//
+// It takes the kits' variables, not the kits: the recorder is opened
+// before the kits that record into it are built, so the kits do not
+// exist when this is called. Each variable is read on every request,
+// and one still nil is passed over.
+func PartsFrom(kits ...**Kit) func(context.Context, openresponses.Request) ([]agentsession.InstructionPart, []agentsession.OmittedPart) {
+	kits = append([]**Kit(nil), kits...)
 	return func(ctx context.Context, req openresponses.Request) ([]agentsession.InstructionPart, []agentsession.OmittedPart) {
-		for _, k := range kits {
-			if parts, omitted := k.PartsFor(ctx, req); parts != nil {
+		for _, kp := range kits {
+			if kp == nil {
+				continue
+			}
+			if parts, omitted := (*kp).PartsFor(ctx, req); parts != nil {
 				return parts, omitted
 			}
 		}
@@ -1347,7 +1704,9 @@ func (k *Kit) Transcript() agentturn.Transcript {
 // AgentOptions are the options that seed an agent with the session at
 // its leaf, [session.AgentOptions]: the transcript [Kit.Transcript]
 // returns and the calls pending there, so an approval after a restart
-// runs a call again only when its tool says it may. It is nil for no
+// runs a call again only when its tool says it may. The skill grants
+// the task had are the engine's, and [New] made them again, under
+// [WithSkillGrants], from the session's records. It is nil for no
 // session and under [WithRecorder], whose owner seeds the agent, so a
 // caller need not branch:
 //
@@ -1375,9 +1734,11 @@ func (k *Kit) Attach(a *agentturn.Agent) func() {
 	return k.rec.Attach(a)
 }
 
-// MemoryManifest is what the last render put in the memory block, and
-// the hash a product compares to record the render only when it moved.
-// The kit records it itself when a session is configured.
+// MemoryManifest is what the last render put in the memory block, of
+// whichever run rendered last, and the hash a product compares to record
+// the render only when it moved. The kit records it itself when a
+// session is configured. memory_save is based on its own run's render,
+// and on this only in a run that has not rendered.
 func (k *Kit) MemoryManifest() agentmemory.Manifest {
 	k.mu.Lock()
 	defer k.mu.Unlock()

@@ -3,6 +3,7 @@ package agentkit_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -557,10 +558,11 @@ func callTurnID(id, name, args string) func(*openresponses.Emitter) error {
 func TestAHandoffBetweenTwoKitsRecordsBothAsParts(t *testing.T) {
 	sessions := agentsession.NewMemoryStore()
 	var triage, billing *agentkit.Kit
+	// The direct form: PartsFrom is called before either kit exists,
+	// which with kits rather than their variables recorded neither's
+	// parts. (#30)
 	rec, _, err := session.Start(t.Context(), sessions, agentsession.Header{CWD: t.TempDir()},
-		session.WithInstructionsParts(func(ctx context.Context, req openresponses.Request) ([]agentsession.InstructionPart, []agentsession.OmittedPart) {
-			return agentkit.PartsFrom(triage, billing)(ctx, req)
-		}))
+		session.WithInstructionsParts(agentkit.PartsFrom(&triage, &billing)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -742,4 +744,361 @@ func TestASaveOverAWriteAfterTheRenderIsALostUpdate(t *testing.T) {
 	if len(lost) != 1 {
 		t.Fatalf("lost updates = %d, want the write the save discarded", len(lost))
 	}
+}
+
+// Two runs off one kit: run A renders, another session writes the
+// entry, run B renders, and then A's model saves. The save is based on
+// A's render, so the write in between is a lost update; based on the
+// kit's last render, B's, it was discarded with nothing reported. (#34)
+func TestTwoRunsOffOneKitEachSaveOverTheirOwnRender(t *testing.T) {
+	store := memStore(t, agentmemory.Entry{Scope: "user", Name: "profile", Content: "Chris. Timezone Europe/London."})
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithMemory(store, "user"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	cfg := kit.Config()
+	render := func(ctx context.Context) {
+		t.Helper()
+		if err := cfg.BeforeModelCall(ctx, &openresponses.Request{Instructions: cfg.Instructions}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runA := agentturn.ContextWithRunID(t.Context(), "run-a")
+	runB := agentturn.ContextWithRunID(t.Context(), "run-b")
+	render(runA)
+	other := agentmemory.WithSession(context.Background(), "telegram")
+	if _, err := store.Put(other, agentmemory.Entry{Scope: "user", Name: "profile", Content: "Chris. Timezone Europe/London. Prefers Go."}); err != nil {
+		t.Fatal(err)
+	}
+	render(runB)
+
+	cfg.ResolveTools(t.Context())
+	save, ok := kit.LookupTool(agentmemory.SaveTool)
+	if !ok {
+		t.Fatal("no memory_save in the union")
+	}
+	if _, err := save.Execute(runA, agenttool.Call{ID: "c1", Args: json.RawMessage(`{"scope":"user","name":"profile","content":"Chris. Timezone Europe/London. Lives in Bristol."}`)}); err != nil {
+		t.Fatal(err)
+	}
+	lost, err := agentmemory.LostUpdates(t.Context(), store, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lost) != 1 {
+		t.Fatalf("lost updates = %d, want the write run A's save discarded", len(lost))
+	}
+}
+
+// A kit served per conversation, each conversation a session of its
+// own: a run prompted under ContextWithRecorder files its verdicts and
+// its memory manifest in that conversation's session, not at the root
+// of the kit's, where they sat beside no run. (#31)
+func TestARunUnderARecorderOnItsContextIsRecordedThere(t *testing.T) {
+	for _, ownSession := range []bool{true, false} {
+		t.Run(fmt.Sprintf("kit session %v", ownSession), func(t *testing.T) {
+			root := t.TempDir()
+			skills := skillDir(t, filepath.Join(root, "skills"), "digging", "how to dig", "dig with care")
+			sessions := agentsession.NewMemoryStore()
+			model := &scriptModel{turns: []func(*openresponses.Emitter) error{
+				callTurn("skill", `{"name":"digging"}`),
+			}}
+			opts := []agentkit.Option{
+				agentkit.WithModel(model, "test-model"),
+				agentkit.WithSkills(skills),
+				agentkit.WithMemory(memStore(t, agentmemory.Entry{Scope: "user", Name: "a", Content: "remembered"}), "user"),
+				agentkit.WithPolicy(agentpolicy.FullAuto(agentpolicy.Tools{Read: []string{agentskill.ToolName}}), nil),
+			}
+			if ownSession {
+				opts = append(opts, agentkit.WithSession(sessions, agentsession.Header{CWD: root}))
+			}
+			kit, err := agentkit.New(t.Context(), opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer kit.Close()
+
+			// The conversation's recorder, as a front's RecorderFor opens it.
+			conv, _, err := session.Start(t.Context(), sessions, agentsession.Header{CWD: root},
+				session.WithInstructionsParts(kit.PartsFor))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := kit.Config()
+			cfg.ToolRecorder = conv.RecordFunc()
+			agent := agentturn.New(cfg)
+			defer conv.Attach(agent)()
+			ctx := agentkit.ContextWithRecorder(session.ContextWithSessionID(t.Context(), conv.SessionID()), conv)
+			if _, err := agent.Prompt(ctx, openresponses.UserText("dig")); err != nil {
+				t.Fatal(err)
+			}
+
+			got := openSession(t, sessions, conv.SessionID())
+			for _, ns := range []string{agentpolicy.VerdictNS, agentmemory.ManifestNS} {
+				if len(customEntries(got, ns)) == 0 {
+					t.Errorf("the conversation's session holds no %s", ns)
+				}
+			}
+			if ownSession {
+				own := openSession(t, sessions, kit.SessionID())
+				for _, ns := range []string{agentpolicy.VerdictNS, agentmemory.ManifestNS} {
+					if n := len(customEntries(own, ns)); n != 0 {
+						t.Errorf("the kit's own session holds %d %s entries for a run it did not record", n, ns)
+					}
+				}
+			}
+		})
+	}
+}
+
+// foldManifests folds the memory manifest records on the path to the
+// session's leaf, as a reader would, and fails on one that does not
+// apply.
+func foldManifests(t *testing.T, s *agentsession.Session) agentmemory.Manifest {
+	t.Helper()
+	var m agentmemory.Manifest
+	for _, e := range s.Path(s.Leaf()) {
+		c, ok := e.(*agentsession.CustomEntry)
+		if !ok || c.NS != agentmemory.ManifestNS {
+			continue
+		}
+		var err error
+		if m, err = agentmemory.ApplyManifestRecord(m, c.Data); err != nil {
+			t.Fatalf("a manifest record on the path does not fold: %v", err)
+		}
+	}
+	return m
+}
+
+// Two kits with memory under one recorder, a handoff, each write their
+// manifest into one session. A delta is written only on the manifest in
+// force on the path, so every record folds; a delta on the kit's own
+// last record, with the other kit's between, was refused.
+func TestManifestRecordsFoldAcrossAHandoff(t *testing.T) {
+	sessions := agentsession.NewMemoryStore()
+	var triage, billing *agentkit.Kit
+	rec, _, err := session.Start(t.Context(), sessions, agentsession.Header{CWD: t.TempDir()},
+		session.WithInstructionsParts(agentkit.PartsFrom(&triage, &billing)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	triageStore := memStore(t, manyFacts("triage")...)
+	build := func(store agentmemory.Store, prompt string) *agentkit.Kit {
+		kit, err := agentkit.New(t.Context(),
+			agentkit.WithModel(&scriptModel{}, "m"),
+			agentkit.WithInstructions(prompt),
+			agentkit.WithMemory(store, "user"),
+			agentkit.WithRecorder(rec),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = kit.Close() })
+		return kit
+	}
+	triage = build(triageStore, "You triage.")
+	billing = build(memStore(t, agentmemory.Entry{Scope: "user", Name: "b", Content: "billing remembers"}), "You bill.")
+
+	agent := agentturn.New(triage.Config())
+	defer rec.Attach(agent)()
+	prompt := func(text string) {
+		t.Helper()
+		if _, err := agent.Prompt(t.Context(), openresponses.UserText(text)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prompt("one")
+	if err := agent.SetConfig(billing.Config()); err != nil {
+		t.Fatal(err)
+	}
+	prompt("two")
+	if err := agent.SetConfig(triage.Config()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := triageStore.Put(t.Context(), agentmemory.Entry{Scope: "user", Name: "a", Content: "triage learned more"}); err != nil {
+		t.Fatal(err)
+	}
+	prompt("three")
+
+	got := foldManifests(t, openSession(t, sessions, rec.SessionID()))
+	if got.Hash() != triage.MemoryManifest().Hash() {
+		t.Fatalf("the path folds to %s, want triage's last render %s", got.Hash(), triage.MemoryManifest().Hash())
+	}
+}
+
+// A /clear, Rebase to "", leaves the kit's last manifest record off the
+// new path, so the next is written whole and the new path folds.
+func TestManifestRecordsFoldAfterARebase(t *testing.T) {
+	sessions := agentsession.NewMemoryStore()
+	store := memStore(t, manyFacts("mine")...)
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(&scriptModel{}, "m"),
+		agentkit.WithMemory(store, "user"),
+		agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	agent := agentturn.New(kit.Config())
+	defer kit.Attach(agent)()
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := kit.Recorder().Rebase(kit.Session(), ""); err != nil {
+		t.Fatal(err)
+	}
+	// The render has not moved, and the new path still gets it.
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("unchanged")); err != nil {
+		t.Fatal(err)
+	}
+	if got := foldManifests(t, kit.Session()); got.Hash() != kit.MemoryManifest().Hash() {
+		t.Fatalf("the new path folds to %s before any write, want the render in force %s", got.Hash(), kit.MemoryManifest().Hash())
+	}
+	if _, err := store.Put(t.Context(), agentmemory.Entry{Scope: "user", Name: "a", Content: "second"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("two")); err != nil {
+		t.Fatal(err)
+	}
+	got := foldManifests(t, kit.Session())
+	if got.Hash() != kit.MemoryManifest().Hash() {
+		t.Fatalf("the new path folds to %s, want the last render %s", got.Hash(), kit.MemoryManifest().Hash())
+	}
+}
+
+// manyFacts is a memory large enough that a one-entry write records as
+// a delta: RecordSince writes whole when that is no larger.
+func manyFacts(who string) []agentmemory.Entry {
+	var out []agentmemory.Entry
+	for i := range 20 {
+		out = append(out, agentmemory.Entry{Scope: "user", Name: fmt.Sprintf("%s-%02d", who, i), Content: who + " knows a fact"})
+	}
+	out = append(out, agentmemory.Entry{Scope: "user", Name: "a", Content: who + " remembers"})
+	return out
+}
+
+// A memory_save held for approval runs in the Resume, a run of its own
+// that has not rendered. It is based on the render its model composed
+// from, kept when the engine held it, so a write another session made
+// while it waited is a lost update: in process with another run
+// rendering in between, and after a restart, where New renders afresh.
+// (#34)
+func TestAHeldSaveIsBasedOnTheRenderItWasComposedFrom(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		t.Run(fmt.Sprintf("restart %v", restart), func(t *testing.T) {
+			store := memStore(t, agentmemory.Entry{Scope: "user", Name: "profile", Content: "Chris."})
+			sessions := agentsession.NewMemoryStore()
+			build := func(model agentturn.Model, sess agentkit.Option) *agentkit.Kit {
+				kit, err := agentkit.New(t.Context(),
+					agentkit.WithModel(model, "m"),
+					agentkit.WithMemory(store, "user"),
+					agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{Execute: []string{agentmemory.SaveTool}}), nil),
+					sess,
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = kit.Close() })
+				return kit
+			}
+			first := build(&scriptModel{turns: []func(*openresponses.Emitter) error{
+				callTurn(agentmemory.SaveTool, `{"scope":"user","name":"profile","content":"Chris. Lives in Bristol."}`),
+			}}, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))
+			agent := agentturn.New(first.Config(), first.AgentOptions()...)
+			unsubscribe := first.Attach(agent)
+			end, err := agent.Prompt(t.Context(), openresponses.UserText("I moved to Bristol"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if end.Reason != agentturn.ReasonInputRequired {
+				t.Fatalf("reason = %q, want the save held", end.Reason)
+			}
+
+			// While it waits another session writes the entry.
+			other := agentmemory.WithSession(context.Background(), "telegram")
+			if _, err := store.Put(other, agentmemory.Entry{Scope: "user", Name: "profile", Content: "Chris. Prefers Go."}); err != nil {
+				t.Fatal(err)
+			}
+
+			kit := first
+			if restart {
+				unsubscribe()
+				kit = build(&scriptModel{}, agentkit.WithResumedSession(sessions, first.SessionID()))
+				agent = agentturn.New(kit.Config(), kit.AgentOptions()...)
+				unsubscribe = kit.Attach(agent)
+			} else {
+				// Another run off the kit renders the write.
+				cfg := kit.Config()
+				if err := cfg.BeforeModelCall(agentturn.ContextWithRunID(t.Context(), "another-run"), &openresponses.Request{Instructions: cfg.Instructions}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			defer unsubscribe()
+			pending := agent.State().Pending
+			if len(pending) != 1 {
+				t.Fatalf("pending = %+v, want the held save", pending)
+			}
+			if _, err := agent.Resume(t.Context(), agentturn.Approve(pending[0].Call.CallID).WithBy(agentpolicy.ByHuman)); err != nil {
+				t.Fatal(err)
+			}
+			lost, err := agentmemory.LostUpdates(t.Context(), store, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(lost) != 1 {
+				t.Fatalf("lost updates = %d, want the write the approved save discarded", len(lost))
+			}
+		})
+	}
+}
+
+// Two kits of a handoff over one memory render the same manifest. The
+// kit that opened the session adopts the other's record when it says
+// the same, where it wrote a whole manifest at every handoff back.
+func TestAHandoffOverOneMemoryDoesNotRewriteTheManifest(t *testing.T) {
+	sessions := agentsession.NewMemoryStore()
+	store := memStore(t, manyFacts("shared")...)
+	a, err := agentkit.New(t.Context(),
+		agentkit.WithModel(&scriptModel{}, "m"),
+		agentkit.WithMemory(store, "user"),
+		agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := agentkit.New(t.Context(),
+		agentkit.WithModel(&scriptModel{}, "m"),
+		agentkit.WithInstructions("You are the other agent."),
+		agentkit.WithMemory(store, "user"),
+		agentkit.WithRecorder(a.Recorder()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	agent := agentturn.New(a.Config())
+	defer a.Attach(agent)()
+	for i := range 6 {
+		kit := a
+		if i%2 == 1 {
+			kit = b
+		}
+		if err := agent.SetConfig(kit.Config()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := agent.Prompt(t.Context(), openresponses.UserText(fmt.Sprint("turn ", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := manifestEntries(t, sessions, a.SessionID()); n > 2 {
+		t.Fatalf("manifest records = %d over six handoffs of one memory, want at most one per kit", n)
+	}
+	foldManifests(t, a.Session())
 }

@@ -32,15 +32,36 @@ privately", the kit has become a framework and the rule is broken.
 | `AfterToolCall` | `WithAfterToolCall` | assign it; the kit contests nothing here |
 | `OutputGuard` | `WithGuards`, `WithOutputGuard` | `agentturn.ChainOutputGuard(chain.OutputGuard(), yours...)` |
 | `ShouldStopAfterTurn` | `WithGuards`, `WithShouldStopAfterTurn` | `agentturn.ChainShouldStopAfterTurn(chain.ShouldStopAfterTurn(), yours...)` |
-| `Transform` | `WithCompaction`, `WithCompactor`, `WithTransform`, `WithFoldObserver` | `agentturn.ChainTransform(yours, compact.NewLocal(model, compact.WithModel(name), compact.WithBudget(n), compact.WithOnFold(fold)).Transform)`, where `fold` is `rec.Fold` and then the observer — see below |
+| `Transform` | `WithCompaction`, `WithCompactionModel`, `WithCompactor`, `WithTransform`, `WithFoldObserver` | `agentturn.ChainTransform(yours, compact.NewLocal(model, compact.WithModel(name), compact.WithBudget(n), compact.WithOnFold(fold)).Transform)`, or `compact.New(compactor, ...)` with the same options for `WithCompactor`, where `fold` is `rec.Fold` and then the observer — see below |
 | `ToolRecorder` | `WithSession`, `WithResumedSession`, `WithRecorder` | `rec.RecordFunc()`; without a session the kit leaves it nil, and the loop honours a recorder the product installs with `agenttool.ContextWithRecorder` on the prompt's context |
-| `ToolElicitor` | `WithToolElicitor` | `rec.Elicitor(by, fn)` with a session, `fn` without one; without the option the kit leaves it nil, and an elicitor on the prompt's context applies |
+| `ToolElicitor` | `WithToolElicitor` | a function that calls `rec.Elicitor(by, fn)` for the run's recorder, `recorderFor(ctx)` below, and `fn` without one; without the option the kit leaves it nil, and an elicitor on the prompt's context applies |
 
 `chain` in the rows above is one `guard.Chain{Guards: gs, Observer:
 observe}`, where `observe` is the verdict observer described under
-[`BeforeModelCall`](#beforemodelcall-in-full); with no session and no
-`WithVerdictObserver` it has no observer, which is what the package
-functions `guard.BeforeModelCall(gs...)` and friends build.
+[`BeforeModelCall`](#beforemodelcall-in-full). With no recorder and no
+`WithVerdictObserver` the observer does nothing, and the chain is what
+the package functions `guard.BeforeModelCall(gs...)` and friends build.
+
+`recorderFor(ctx)`, in the blocks below, is the recorder a run records
+into: the one a front put on the run's context, then the kit's own,
+then none.
+
+```go
+recorderFor := func(ctx context.Context) *session.Recorder {
+	if r := agentkit.RecorderFromContext(ctx); r != nil { // your own key, without the kit
+		return r
+	}
+	return rec // WithSession, WithResumedSession or WithRecorder; nil without
+}
+```
+
+A front that serves one kit to many conversations, a session each,
+prompts each run with `agentkit.ContextWithRecorder(ctx, convRec)`.
+The engine, the guards and the hooks are bound once, so a recorder a
+front sets with `SetConfig` cannot reach them. The context is the one
+thing every one of them is handed. A product without the kit puts the
+recorder on the context under a key of its own and reads it the same
+way.
 
 A field no option named is left at its zero value, so the loop's own
 default applies. `chain1` returns the one hook unchanged when there is
@@ -62,6 +83,33 @@ cfg.Instructions = strings.Join([]string{
 }, "\n\n")
 ```
 
+With `WithGuards` the text is not that join but the guards' pass over
+each of its parts, the same pass each turn's hook makes
+([below](#beforemodelcall-in-full)):
+
+```go
+layers := []agentsession.InstructionPart{
+	{ID: "product", Text: prompt},
+	{ID: "skills", Text: cat.Prompt() + "\n\n" + cat.Usage()},
+	// one part per agentmemory.RenderParts piece, then memory:usage
+	{ID: "agentsmd", Text: agentsmd.Render(chain.Files)},
+}
+first, err := guardParts(ctx, guard.Chain{Guards: guards}, layers)
+if err != nil {
+	return err // names the part: "instructions/memory/user/aws: ..."
+}
+cfg.Instructions = agentsession.JoinInstructions(first)
+```
+
+`guardParts` is the loop in the `BeforeModelCall` block, and `first` is
+kept: it is what the parts function falls back to
+([`partsFor`](#what-the-kit-does-that-no-line-here-covers)). The
+recorder settles a run's first config entry from `cfg.Instructions`
+before any hook runs, so without this pass a secret `guard.Redact` keeps
+from the model is written to the session in that entry. There is no
+observer on this pass: there is no run to record a verdict under, and
+the first turn's pass reports the same verdicts.
+
 `"\n\n"` is `agentkit.Separator`, which is `agentsession.PartSeparator`:
 the session format's own, so the joined text of `Kit.Parts()` is what
 the request carried and what its hash covers.
@@ -74,9 +122,10 @@ recorder see, so a write to one entry is recorded as that entry's part
 and the summary. The scopes rendered are `WithMemory`'s and then any
 `WithMemoryReadScopes` it does not name.
 
-With `WithGuards`, `New` runs the input guards over each part before
-the join, as each turn's hook does (below), so `Instructions` is the
-text they leave.
+`dirs` are `WithSkills`' and `WithOptionalSkills`' in the order given;
+an optional one is passed over when `agentskill.Dir` fails with
+`fs.ErrNotExist`, and refused otherwise, as a `WithSkills` one always
+is.
 
 `cat.Usage()` is appended only when `cat.Tool()` is offered, since it
 tells the model to reach the listed skills through that tool.
@@ -96,16 +145,57 @@ them itself and leaves the kit's budget at zero.
 ```go
 tools := append([]agenttool.Tool(nil), productTools...)
 tools = append(tools, childagent.New(childCfg,
-	childagent.WithObserver(rec.Observe),
+	childagent.WithObserver(func(ctx context.Context, ev agentturn.Event) {
+		if r := recorderFor(ctx); r != nil {
+			r.Observe(ctx, ev)
+		}
+	}),
 	childagent.WithRunContext(func(ctx context.Context, callID string) context.Context {
-		ctx = rec.ChildContext(ctx, callID)
-		return agentmemory.WithSession(ctx, session.SessionIDFromContext(ctx))
+		r := recorderFor(ctx)
+		if r == nil {
+			return ctx
+		}
+		ctx = r.ChildContext(ctx, callID)
+		if id := session.SessionIDFromContext(ctx); id != "" && withMemory {
+			ctx = agentmemory.WithSession(ctx, id)
+		}
+		return ctx
 	})))
 tools = append(tools, cat.Tool())
-tools = append(tools, agentmemory.Tools(store, writable,
-	agentmemory.WithRendered(kit.MemoryManifest), // the block the model read
-	agentmemory.WithReadScopes(read...),          // WithMemoryReadScopes
-)...)
+
+// memory_save is based on the render its call was composed from:
+// saveBase[call], kept when the engine decided the call, then
+// rendered[run], which the BeforeModelCall hook keeps, then the last.
+based := func(m func() agentmemory.Manifest) []agenttool.Tool {
+	return agentmemory.Tools(store, writable,
+		agentmemory.WithRendered(m),         // the block the model read
+		agentmemory.WithReadScopes(read...), // WithMemoryReadScopes
+	)
+}
+memTools := based(func() agentmemory.Manifest { return last })
+for i, t := range memTools {
+	if t.Name() == agentmemory.SaveTool {
+		memTools[i] = agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+			key := sessionID(ctx) + "\x00" + call.ID // a call ID names a call in one conversation
+			m, ok := saveBase[key]
+			if ok {
+				delete(saveBase, key)
+			} else {
+				m, ok = rendered[agentturn.RunIDFromContext(ctx)]
+			}
+			if !ok {
+				return t.Execute(ctx, call) // based on last
+			}
+			for _, own := range based(func() agentmemory.Manifest { return m }) {
+				if own.Name() == agentmemory.SaveTool {
+					return own.Execute(ctx, call)
+				}
+			}
+			return t.Execute(ctx, call)
+		})
+	}
+}
+tools = append(tools, memTools...)
 for i, t := range tools {
 	tools[i] = wrap(sourceOf(t), t) // WithToolWrap
 	if t.Name() == agentskill.ToolName {
@@ -130,11 +220,27 @@ is the field.
 
 `agentmemory.WithRendered` bases a `memory_save` on the hash the block
 showed the model, so a write another session made after the render is
-a lost update `agentmemory.LostUpdates` reports; the kit re-renders
-before every model call, so `Kit.MemoryManifest` is that render. The
-read scopes are left out of `writable`, since `agentmemory.Tools`
-panics on a scope that is both; `New` reports that panic, and a memory
-with no writable scope, as an error.
+a lost update `agentmemory.LostUpdates` reports. The render is the
+save's own run's: the hook keeps each run's last render under
+`agentturn.RunIDFromContext(ctx)`, and the save is built per call over
+it (`based(...)[0]` is `memory_save`, the first tool `agentmemory.Tools`
+returns). Two runs off one kit render in turn, and a save based on the
+other run's render, which may already hold a write a third session made
+in between, discards that write with nothing reported. A save held for
+approval runs in the `Resume`, a run of its own that has not rendered,
+so `saveBase` keeps its run's render: the engine's observer puts it
+there each time it decides a `memory_save` call in a run that rendered,
+keyed by the session on the context and the call ID, since two
+conversations whose provider numbers its calls both have a `call_0`.
+After a restart `New` folds the path's manifest records up to each
+pending save's call. `last`, what `Kit.MemoryManifest` returns, is the
+base for anything else. `rendered` and `saveBase` keep their newest
+1,024 keys. The kit's observer is on the engine `WithPolicy` builds and
+nowhere else, so a save held by an engine the product built for
+`WithEngine`, or deferred by a product `BeforeToolCall` hook, falls
+back to `last` unless the product keeps the base itself. The read scopes are left out of `writable`, since
+`agentmemory.Tools` panics on a scope that is both; `New` reports that
+panic, and a memory with no writable scope, as an error.
 
 `remote` is `mcpclient.Connect(ctx, t, opts...)`, and the kit adds two
 things there. For a command `WithMCP` builds, `cmd.Stderr` is set to
@@ -144,8 +250,8 @@ error `New` returns when the server fails to start. With
 `opts`, since a client offers elicitation only when asked.
 
 `WithChildAgent` is the line above with `childagent.New`: the kit binds
-`WithObserver` and `WithRunContext` to the recorder, the memory bridge
-only when `WithMemory` is configured, and adds nothing else, so a
+`WithObserver` and `WithRunContext` to the run's recorder, the memory
+bridge only when `WithMemory` is configured, and adds nothing else, so a
 product that builds its own child hands it to `WithTools` and the
 result is the same tool. `WithDeferredTools` is the same again for a
 tool that needs the engine, the catalogue or the session; both exist
@@ -171,42 +277,65 @@ Two things the kit adds that the `append` above does not:
 
 ```go
 observe := func(ctx context.Context, v agentpolicy.Verdict) {
-	if v.Guard == "" || v.Action != agentturn.Allow || v.Reason != "" {
+	if r := recorderFor(ctx); r != nil && (v.Guard == "" || v.Action != agentturn.Allow || v.Reason != "") {
 		ns, data := v.Record()
-		rec.Annotate(ctx, ns, json.RawMessage(data))
+		r.Annotate(ctx, ns, json.RawMessage(data))
 	}
 	productObserver(ctx, v) // WithVerdictObserver
 }
 chain := guard.Chain{Guards: guards, Observer: observe}
+
+// guardParts runs the input guards over each part alone. A refusal
+// names its part, and the kit's observer sets each verdict's Subject
+// to the same name.
+guardParts := func(ctx context.Context, c guard.Chain, parts []agentsession.InstructionPart) ([]agentsession.InstructionPart, error) {
+	out := make([]agentsession.InstructionPart, 0, len(parts))
+	for _, p := range parts {
+		one := openresponses.Request{Instructions: p.Text}
+		if err := c.BeforeModelCall()(ctx, &one); err != nil {
+			return nil, fmt.Errorf("instructions/%s: %w", p.ID, err)
+		}
+		if one.Instructions != "" {
+			p.Text = one.Instructions
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
 
 instructions := func(ctx context.Context, req *openresponses.Request) error {
 	pieces, m, err := agentmemory.RenderParts(ctx, store, scopes)
 	if err != nil {
 		return err
 	}
-	parts = replaceMemoryGroup(parts, pieces) // each piece a part, then memory:usage
-	sid := session.SessionIDFromContext(ctx)   // the child's, under ChildContext
-	if sid == "" {
-		sid = rec.SessionID()
-	}
-	if h := m.Hash(); h != recorded[sid] {
-		ns, data := m.Record()
-		if _, err := rec.Annotate(ctx, ns, json.RawMessage(data)); err != nil {
-			return err
+	// The memory group's parts replaced by one part per piece and then
+	// memory:usage, in the position the first of them held.
+	layers = withMemoryGroup(layers, pieces)
+	if r := recorderFor(ctx); r != nil {
+		sid := session.SessionIDFromContext(ctx) // the child's, under ChildContext
+		if sid == "" {
+			sid = r.SessionID()
 		}
-		recorded[sid] = h
-	}
-	sent := make([]agentsession.InstructionPart, 0, len(parts))
-	for _, p := range parts {
-		one := openresponses.Request{Instructions: p.Text}
-		if err := chain.BeforeModelCall()(ctx, &one); err != nil {
-			return err
+		prev, seen := recorded[sid]
+		// Only the session the kit opened is read: its path, live.
+		last, visible := lastManifestOnPath(r, sid)
+		onPath := seen && (!visible || last == prev.entry)
+		if !onPath || prev.man.Hash() != m.Hash() {
+			ns, data := m.Record()
+			if onPath && visible {
+				ns, data = m.RecordSince(prev.man) // a delta on the one in force
+			}
+			entry, err := r.Annotate(ctx, ns, json.RawMessage(data))
+			if err != nil {
+				return err
+			}
+			recorded[sid] = recordedManifest{m, entry}
 		}
-		if one.Instructions != "" {
-			p.Text = one.Instructions
-			sent = append(sent, p)
-		}
 	}
+	if sent, err = guardParts(ctx, chain, layers); err != nil {
+		return err
+	}
+	last, rendered[agentturn.RunIDFromContext(ctx)] = m, m // memory_save's base
 	req.Instructions = agentsession.JoinInstructions(sent)
 	return nil
 }
@@ -237,8 +366,27 @@ recorder writes several: a kit under `WithRecorder` inside a parent's
 child agent annotates a new child session on each call, and each of
 them carries the manifest of the render its run was shown.
 
+A manifest is written as `agentmemory.Manifest.RecordSince` the one
+before only where the kit can see that it will fold: the session is the
+one `New` opened, which `kit.Session()` holds live, and the last
+manifest record on the path to its leaf is the kit's own last write.
+`lastManifestOnPath` walks that path back to the last `agentmemory:render`
+entry. Anywhere else the write is whole: a session two kits of a handoff
+both record into, a path a `Rebase` or a `/clear` moved, a child's
+session, a recorder on the context. A delta on a manifest that is not
+the one in force is a record `agentmemory.ApplyManifestRecord` refuses.
+A path the kit can see that no longer ends in its record gets the render
+again even when it did not move, unless the record that is last there
+is whole and says the same, a second kit of a handoff over one memory,
+in which case the kit adopts it. A write the recorder filed in another
+session, a child run without `ChildContext`, is not read against this
+path. `sent` is
+shared with the parts function below, under a lock in real code.
+
 The engine the kit builds is given the same `observe`, through
-`agentpolicy.WithObserver` ahead of the product's own options. That is
+`agentpolicy.WithObserver` ahead of the product's own options, whether
+or not the kit has a session, since a run may bring one on its
+context. That is
 an engine option, not a config field. The engine keeps every observer
 it is given (agentpolicy v0.0.6), so a product's own
 `agentpolicy.WithObserver` runs beside the kit's recording.
@@ -272,19 +420,27 @@ them, and chains the product's hooks after the engine's with
 
 ```go
 fold := func(ctx context.Context, f compact.Fold) error {
-	if err := rec.Fold(ctx, f); err != nil { // with a session
-		return err
+	if r := recorderFor(ctx); r != nil {
+		if err := r.Fold(ctx, f); err != nil {
+			return err
+		}
 	}
 	observer(ctx, f) // WithFoldObserver
 	return nil
 }
+opts := append([]compact.Option{compact.WithModel(name), compact.WithBudget(n)}, yours...)
+t := compact.NewLocal(model, append(opts, compact.WithOnFold(fold))...) // WithCompaction
+t = compact.New(compactor, append(opts, compact.WithOnFold(fold))...)   // WithCompactor
 ```
 
-`compact.WithOnFold` holds one function, so the kit writes the one
-that calls both, and passes it after the product's `compact.Option`s.
-A `compact.WithOnFold` among those is therefore replaced when there is a
-session or an observer, which `WithCompaction` says; with neither, the
-kit passes no `WithOnFold` and the product's stands.
+The agent's model name comes first under either, so a
+`compact.WithModel` of the product's wins, and a compactor's request
+names a model as a summary's does. `compact.WithOnFold` holds one
+function, so the kit writes the one that calls both and passes it after
+the product's `compact.Option`s, whether or not there is a session: a
+run may bring a recorder on its context. A `compact.WithOnFold` among
+the product's is therefore always replaced, which `WithCompaction`
+says; `WithFoldObserver` is how a product hears of a fold.
 
 ## `BeforeTurn`
 
@@ -329,7 +485,7 @@ approval keeps the grant.
 
 ## What the kit does that no line here covers
 
-Six things, all outside `agentturn.Config`:
+Seven things, all outside `agentturn.Config`:
 
 - `Kit.Attach(agent)` is `rec.Attach(agent)`, and returns the same
   unsubscribe. It cannot be a config field because the recorder
@@ -359,13 +515,54 @@ Six things, all outside `agentturn.Config`:
   `session.WithInstructionsParts(kit.PartsFor)`, so its config entries
   carry `instructions_parts` and `instructions_omitted`. `PartsFor` is
   exported and has that option's signature, so a recorder opened
-  elsewhere takes it the same way, and `agentkit.PartsFrom(kits...)`
-  asks several kits in turn for a recorder they share.
+  elsewhere takes it the same way, and
+  `agentkit.PartsFrom(&triage, &billing)` asks several kits in turn for
+  a recorder they share, reading each variable on every request, since
+  the recorder is opened before the kits exist. By hand it is:
+
+  ```go
+  partsFor := func(_ context.Context, req openresponses.Request) ([]agentsession.InstructionPart, []agentsession.OmittedPart) {
+  	for _, parts := range [][]agentsession.InstructionPart{sent, first} {
+  		if agentsession.JoinInstructions(parts) == req.Instructions {
+  			return parts, omitted
+  		}
+  	}
+  	return nil, nil // a request some other hook rewrote: recorded as a string
+  }
+  ```
+
+  `sent` is what the last turn's hook sent and `first` is `New`'s
+  guarded render, which the recorder asks about for a run's first
+  config entry. Never the layers' own render: that is text a guard kept
+  from the model.
 - `Kit.AgentOptions()` is `session.AgentOptions(sess)`, read in `New`:
   the transcript at the leaf and the calls pending there, for
   `agentturn.New`.
 - `Kit.LookupTool(name)` reads the union the provider last returned,
   and is what the kit's engine is given through `agentpolicy.WithTools`.
+- With `WithSkillGrants` and a session `New` opened, `New` grants
+  again what the session's journal left in force. It replays the path
+  forward: an `agentskill:read` record of a skill's own instructions
+  grants that skill's source, and a verdict whose reason is `revoked the
+  rules granted by <source>` ends it. `agentpolicy.Engine.Revoke`
+  records that verdict when it removed a rule, and the kit records it
+  for a source whose set held none, an untrusted skill's or one whose
+  rules were all refused, whether the scope or `Kit.RevokeSkillGrants`
+  revoked it. A record whose name the catalogue now gives a skill at
+  another `Location` is passed over. What is left is granted with
+  `grant(read.Name)`, under the catalogue's rules as they stand now.
+  Under `WithSkillGrantScope` the replay also starts after the path's
+  last user message, so the scope holds where the journal is silent: an
+  engine the product built for `WithEngine`, or a verdict whose write
+  failed. A grant lives in the engine, so a restart between a held call
+  and its approval lost it. The grants are made through the engine, so
+  each restart records its `GrantSet` verdicts again and tells
+  `WithSkillGrantReport` again. The journal matches a revocation to a
+  read by the source name the source function gives now, so one that
+  renames its sources loses the match; and a revocation that races a
+  read in flight may be journaled before the read's record, which the
+  replay then grants. Without the scope, a product that needs either
+  ruled out revokes after the restart.
 
 None of them changes a field of the config, so none can make the manual
 path a different path.

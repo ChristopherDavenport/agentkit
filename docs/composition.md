@@ -54,8 +54,20 @@ The card's name and description are `Config.Name` and
 why `WithName` exists — and its skills are the tools the kit unioned
 from the product, the skill catalogue, memory and every MCP server.
 
-`examples/a2a` wraps both as `Peer` and `Serve`, and `Both` is the
-round trip: an agent that calls a peer and is one.
+A front that records each conversation as a session of its own,
+`fronta2a.WithRecorderFor` with a recorder per context ID, puts that
+recorder on the run's context with `agentkit.ContextWithRecorder` as
+well as pointing `ToolRecorder` at it. `ToolRecorder` reaches only what
+a tool writes. The policy's and the guards' verdicts, the memory
+manifest, a fold and a tool's question are written by hooks the kit
+bound at `New`, and those follow the recorder on the context. Without
+it they land in the kit's own session, or nowhere, and the
+conversation's session holds the calls but not the rules that let them
+run.
+
+`examples/a2a` wraps both as `Peer` and `Serve`, `RecordEach` is the
+per-conversation recording, and `Both` is the round trip: an agent that
+calls a peer and is one.
 
 ### Why there is no `WithPeer`
 

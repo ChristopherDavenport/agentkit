@@ -10,7 +10,8 @@ kit, err := agentkit.New(ctx,
 	agentkit.WithModel(model, "gpt-5"),
 	agentkit.WithInstructions("Be brief."),
 	agentkit.WithAgentsMD(cwd, agentsmd.Options{Root: repoRoot}),
-	agentkit.WithSkills(".dex/skills", filepath.Join(home, ".dex", "skills")),
+	agentkit.WithSkills(".dex/skills"),
+	agentkit.WithOptionalSkills(filepath.Join(home, ".dex", "skills")),
 	agentkit.WithMemory(store, "user", "project"),
 	agentkit.WithPolicy(policy, matchers),
 	agentkit.WithTools(read, write, edit, bash),
@@ -170,7 +171,8 @@ A front needs things a `Config` cannot carry: `kit.Engine()` for
 that says whether the render moved. A front resuming a session seeds
 the agent with `kit.AgentOptions()`, the transcript at the leaf and the
 calls pending there, so a call held before a restart can still be
-approved:
+approved. Under `WithSkillGrants`, `New` has already granted again what
+the session's skill reads granted, so the task goes on under them:
 
 ```go
 agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
@@ -218,7 +220,12 @@ design, none for a peer — because a peer does not need one. `Config()`
 returns a plain `agentturn.Config`, so a remote peer is an ordinary
 tool through `WithTools`, and serving the agent as a peer is
 `fronta2a.New(kit.Config())`. If a peer needed an option, the kit
-would have a seam.
+would have a seam. A front that records each conversation as its own
+session prompts each run with `agentkit.ContextWithRecorder(ctx, rec)`,
+so the verdicts, the memory manifest and the folds the kit's hooks
+write land in that conversation's session and not in the kit's. An
+engine a product built for `WithEngine` records its verdicts there only
+if its own observer reads `agentkit.RecorderFromContext`.
 
 `WithChildAgent` is the in-process one, and it exists for a different
 reason than a seam: it binds the child's observer and run context to
@@ -251,13 +258,13 @@ a2a.
 | library | version |
 |---|---|
 | `openresponses` | v0.0.12 |
-| `agenttool`, `agenttool/mcpclient` | v0.0.10 |
-| `agentturn`, `agentturn/session` | v0.0.11 |
-| `agentsession` | v0.0.11 |
+| `agenttool`, `agenttool/mcpclient` | v0.0.11 |
+| `agentturn`, `agentturn/session` | v0.0.12 |
+| `agentsession` | v0.0.15 |
 | `agentsmd` | v0.0.2 |
-| `agentskill` | v0.0.7 |
-| `agentmemory` | v0.0.6 |
-| `agentpolicy` | v0.0.7 |
+| `agentskill` | v0.0.8 |
+| `agentmemory` | v0.0.7 |
+| `agentpolicy` | v0.0.8 |
 
 Every sibling is required at a released version with no `replace`, and
 `make no-replace` enforces it: the kit is the module that proves the

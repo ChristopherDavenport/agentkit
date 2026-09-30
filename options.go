@@ -65,7 +65,7 @@ type settings struct {
 	// separately, rather than as one flag and its value, so that asking
 	// for the tool and withholding it is a contradiction New can refuse
 	// instead of a silent last-one-wins.
-	skillDirs        []string
+	skillDirs        []skillDir
 	skillToolWith    bool
 	skillToolWithout bool
 	skillToolOpt     []agentskill.ToolOption
@@ -109,6 +109,10 @@ type settings struct {
 	compactModel openresponses.Streamer
 	compactOpts  []compact.Option
 	compactSet   bool
+	// compactLocal records WithCompaction apart from compactSet, so a
+	// compactor beside it, which folds another way under another budget,
+	// is a contradiction New can refuse.
+	compactLocal bool
 	foldObserver func(context.Context, compact.Fold)
 
 	beforeTurn      []func(context.Context, agentturn.TurnStartInfo) (openresponses.Items, error)
@@ -247,7 +251,39 @@ func WithAgentsMD(path string, opts agentsmd.Options) Option {
 // model to reach the listed skills through a tool, so it is written
 // only when that tool is there.
 func WithSkills(dirs ...string) Option {
-	return func(s *settings) { s.skillDirs = append(s.skillDirs, dirs...) }
+	return func(s *settings) {
+		for _, d := range dirs {
+			s.skillDirs = append(s.skillDirs, skillDir{path: d})
+		}
+	}
+}
+
+// WithOptionalSkills is [WithSkills] for a directory the user may not
+// have made, such as ~/.dex/skills: one that does not exist is passed
+// over, and one that exists and cannot be read is still an error from
+// [New]. The directories take their place among WithSkills' in the
+// order the options were given, since that order decides which of two
+// skills of one name shadows the other.
+//
+// Keep WithSkills for the directory the product configures, where a
+// misspelling that silently offers no skills is the failure to refuse.
+// A directory passed over is not reported, since it held nothing to
+// leave out; a product that shows it stats the path itself. When every
+// skill directory was optional and none is there, and no
+// [WithSkillSources] were given, there is no catalogue: no skills part
+// and no skill tool, as if skills were not configured.
+func WithOptionalSkills(dirs ...string) Option {
+	return func(s *settings) {
+		for _, d := range dirs {
+			s.skillDirs = append(s.skillDirs, skillDir{path: d, optional: true})
+		}
+	}
+}
+
+// skillDir is one directory WithSkills or WithOptionalSkills named.
+type skillDir struct {
+	path     string
+	optional bool
 }
 
 // WithSkillSources adds skill sources that are not local directories:
@@ -286,7 +322,11 @@ func WithoutSkillTool() Option {
 // too: a root "deploy" and a qualified "apps/web:deploy" share Name,
 // and two skills given one source name share one grant.
 //
-// A grant lasts until something revokes it. [WithSkillGrantScope]
+// A grant lasts until something revokes it, and a restart does not: with
+// a session [New] opened, New replays the session's journal and grants
+// again each skill read no recorded revocation ended, under the
+// catalogue's rules as they stand, so an approval after a restart goes
+// on under the grants the task had. [WithSkillGrantScope]
 // revokes every skill's grant when the user's next message arrives, which is the lifetime
 // Claude Code gives allowed-tools; without it a grant lasts the life of
 // the engine unless the product calls [Kit.RevokeSkillGrants]. A skill
@@ -319,7 +359,8 @@ func WithSkillGrants(source func(*agentskill.Skill) agentpolicy.Source) Option {
 // answer through [agentturn.Agent.FollowUp], be steered in between
 // turns, or come with a developer note after it; each revokes. A run
 // that Resume starts after an approval, or that Continue starts, is
-// the same task going on and keeps them. It is a
+// the same task going on and keeps them, after a restart too, since the
+// scope's revocations are in the session's journal. It is a
 // [agentturn.Config.BeforeTurn] hook that calls [Kit.RevokeSkillGrants]
 // on every turn whose transcript's tail, back to the last item the
 // model or a tool produced, holds a user message, ahead of the
@@ -357,14 +398,20 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 // each entry and the summary line, so a write to one entry is recorded
 // as that entry's part and the summary rather than the whole block.
 //
-// memory_save is given [agentmemory.WithRendered] with
-// [Kit.MemoryManifest], ahead of [WithMemoryTools]: a save is based on
-// the entry the block showed the model, so a write another session made
-// after the render is reported by [agentmemory.LostUpdates] and the
-// model is told, rather than silently discarded. Concurrent runs off
-// one kit share the last render, so the base is the render that
-// happened last. A [WithMemoryTools] option of the same kind replaces
-// the kit's.
+// memory_save is given [agentmemory.WithRendered] with the render its
+// own run's model was shown, ahead of [WithMemoryTools]: a save is based
+// on the entry the block showed the model, so a write another session
+// made after the render is reported by [agentmemory.LostUpdates] and the
+// model is told, rather than silently discarded. The render is looked up
+// by [agentturn.RunIDFromContext], so concurrent runs off one kit each
+// save over their own; a call in a run that has not rendered, a
+// Resume's first batch, is based on [Kit.MemoryManifest], the last
+// render. A [WithMemoryTools] option of the same kind replaces the
+// kit's.
+//
+// With a session, each render that moved is recorded under
+// [agentmemory.ManifestNS]: the kit's first in a session whole, and each
+// later one as [agentmemory.Manifest.RecordSince] the one before.
 func WithMemory(store agentmemory.Store, scopes ...agentmemory.Scope) Option {
 	return func(s *settings) { s.memStore, s.memScopes = store, scopes }
 }
@@ -594,11 +641,11 @@ func WithDeferredTools(fn func(*Kit) []agenttool.Tool) Option {
 // tool is named [agentturn.Config.Name] unless childagent.WithToolName
 // says otherwise.
 //
-// When a session is configured the child's run is recorded into it,
-// live and linked to the parent's, because the kit binds
-// childagent.WithObserver to the recorder, and the child runs under
-// the recorder's [session.Recorder.ChildContext] through
-// childagent.WithRunContext, so what the child's tools attribute to a
+// When the parent's run has a recorder, the kit's or one a front put on
+// its context with [ContextWithRecorder], the child's run is recorded
+// into it, live and linked to the parent's, because the kit binds
+// childagent.WithObserver to that recorder, and the child runs under
+// its [session.Recorder.ChildContext] through childagent.WithRunContext, so what the child's tools attribute to a
 // session names the child's. With [WithMemory] as well, the same
 // context carries the child's session ID under
 // [agentmemory.WithSession], which is the key the memory journal
@@ -626,11 +673,9 @@ func WithChildAgent(cfg agentturn.Config, opts ...childagent.Option) Option {
 				// A fresh slice: appending to opts would grow the
 				// caller's array and make two child agents share it.
 				all := make([]childagent.Option, 0, len(opts)+2)
-				if rec := k.Recorder(); rec != nil {
-					all = append(all,
-						childagent.WithObserver(rec.Observe),
-						childagent.WithRunContext(childContext(rec, k.memory)))
-				}
+				all = append(all,
+					childagent.WithObserver(k.observeChild),
+					childagent.WithRunContext(k.childContext))
 				all = append(all, opts...)
 				return []agenttool.Tool{childagent.New(cfg, all...)}
 			},
@@ -649,11 +694,12 @@ func WithChildAgent(cfg agentturn.Config, opts ...childagent.Option) Option {
 //     is not held for a sibling the engine could not see. The union
 //     does not exist when the engine is built, so a product cannot hand
 //     it in; an agentpolicy.WithTools in opts replaces the kit's.
-//   - When a session is configured, or [WithVerdictObserver] is,
-//     [agentpolicy.WithObserver]: it records each verdict and hands it
-//     to [WithVerdictObserver]. The engine keeps every observer it is
-//     given, so an agentpolicy.WithObserver in opts runs beside the
-//     kit's, after it, and the recording stays either way.
+//   - [agentpolicy.WithObserver]: it records each verdict into the
+//     run's recorder, the one [ContextWithRecorder] put on its context
+//     or the kit's own, and hands it to [WithVerdictObserver]. The
+//     engine keeps every observer it is given, so an
+//     agentpolicy.WithObserver in opts runs beside the kit's, after it,
+//     and the recording stays either way.
 //   - [agentpolicy.WithHooks] with the [WithBeforeToolCall] hooks, which
 //     the engine folds into its decision before the batch hold.
 func WithPolicy(p agentpolicy.Policy, matchers map[string]agentpolicy.ToolMatcher, opts ...agentpolicy.Option) Option {
@@ -698,9 +744,13 @@ func WithEngine(e *agentpolicy.Engine) Option {
 // there is no run to record under; the first turn's pass reports the
 // same verdicts.
 //
+// A refusal names the part, "instructions/<id>", in New's error and in
+// a turn's, so a line saved to memory and the same line in AGENTS.md are
+// told apart.
+//
 // The chain's observer records each verdict that blocked or gave a
-// reason when a session is configured, and hands every verdict to
-// [WithVerdictObserver].
+// reason into the run's recorder, when there is one, and hands every
+// verdict to [WithVerdictObserver].
 //
 // [WithInstructionBudget] measures the parts before the guards run, so
 // a guard that makes a part longer, a redaction whose placeholder is
@@ -717,7 +767,8 @@ func WithGuards(gs ...guard.Guard) Option {
 // also reach an agentpolicy.WithObserver passed to [WithPolicy], so a
 // product that passes both is told each engine verdict twice.
 //
-// With a session configured the kit writes each of the engine's
+// With a recorder, the kit's or one a front put on the run's context
+// with [ContextWithRecorder], the kit writes each of the engine's
 // verdicts, and each guard verdict that blocked or gave a reason,
 // through [session.Recorder.Annotate] under [agentpolicy.VerdictNS], in
 // the shape [agentpolicy.Verdict.Record] gives. A guard's bare allow is
@@ -748,7 +799,9 @@ func WithSession(store agentsession.Store, h agentsession.Header, opts ...sessio
 // WithResumedSession continues the session with the given ID at its
 // leaf, through [session.Resume]. [Kit.Session] then holds the session,
 // whose Context().Items is what the agent should be seeded with. The
-// recorder takes the kit's parts as under [WithSession].
+// recorder takes the kit's parts as under [WithSession]. Under
+// [WithSkillGrants], the grants the session's skill reads made are
+// granted again.
 func WithResumedSession(store agentsession.Store, id string, opts ...session.Option) Option {
 	return func(s *settings) {
 		s.sessionStore, s.sessionID, s.sessionSet = store, id, true
@@ -779,16 +832,17 @@ func WithRecorder(rec *session.Recorder) Option {
 
 // WithCompaction folds the transcript with the model the kit was given
 // when it grows past budget tokens. When a session is recorded, the
-// fold is recorded with it.
+// fold is recorded with it. Summary requests name the agent's model,
+// [compact.WithModel] ahead of opts.
 //
 // The kit records the fold through compact.WithOnFold, which holds one
-// function, so a compact.WithOnFold in opts is replaced whenever a
-// session is recorded or [WithFoldObserver] is set. A product that
-// wants to hear of a fold uses [WithFoldObserver], which is called
-// with or without a session.
+// function, so a compact.WithOnFold in opts is always replaced: the
+// recorder may arrive on a run's context, [ContextWithRecorder], after
+// New. A product that wants to hear of a fold uses [WithFoldObserver],
+// which is called with or without a session.
 func WithCompaction(budget int, opts ...compact.Option) Option {
 	return func(s *settings) {
-		s.compactSet = true
+		s.compactSet, s.compactLocal = true, true
 		s.compactOpts = append(s.compactOpts, compact.WithBudget(budget))
 		s.compactOpts = append(s.compactOpts, opts...)
 	}
@@ -809,10 +863,21 @@ func WithCompactionModel(m openresponses.Streamer) Option {
 	return func(s *settings) { s.compactSet, s.compactModel = true, m }
 }
 
-// WithCompactor folds with a compactor the product built.
-func WithCompactor(c compact.Compactor, opts ...compact.Option) Option {
+// WithCompactor folds through a compactor the product built, a
+// provider's compaction endpoint, when the transcript grows past budget
+// tokens. It is [WithCompaction] with the fold made elsewhere, and
+// takes the same budget and the same default: every request is sent
+// under the agent's model name, [compact.WithModel] ahead of opts, so a
+// compact.WithModel in opts still wins. The fold is recorded, and
+// [WithFoldObserver] told, as under WithCompaction.
+//
+// A compactor and a local summary are two ways to fold, so [New]
+// refuses WithCompactor beside WithCompaction or
+// [WithCompactionModel].
+func WithCompactor(c compact.Compactor, budget int, opts ...compact.Option) Option {
 	return func(s *settings) {
 		s.compactSet, s.compactor = true, c
+		s.compactOpts = append(s.compactOpts, compact.WithBudget(budget))
 		s.compactOpts = append(s.compactOpts, opts...)
 	}
 }
@@ -858,9 +923,10 @@ func WithAfterToolCall(fn func(context.Context, agentturn.ToolResultInfo) (*agen
 
 // WithToolElicitor sets the elicitor a tool's question to the user
 // reaches mid-call, an MCP server's elicitation among them, as
-// [agentturn.Config.ToolElicitor]. With a session configured the kit
-// sets the recorder's [session.Recorder.Elicitor] around fn, so each
-// question and its answer are written under the call that asked; by
+// [agentturn.Config.ToolElicitor]. With a recorder, the kit's or the
+// one on the run's context, the kit puts that recorder's
+// [session.Recorder.Elicitor] around fn, so each question and its
+// answer are written under the call that asked; by
 // names who answers, in the session format's words, such as
 // [agentpolicy.ByHuman]. Without the option the field stays nil and an
 // elicitor on the prompt's context applies.
@@ -900,19 +966,30 @@ func WithFilter(fn func(agentturn.Transcript) agentturn.Transcript) Option {
 	return func(s *settings) { s.filter = fn }
 }
 
+// observeChild is the observer WithChildAgent gives a child: the Observe
+// of the recorder the parent's run records into, or nothing without one.
+func (k *Kit) observeChild(ctx context.Context, ev agentturn.Event) {
+	if rec := k.recorderFor(ctx); rec != nil {
+		rec.Observe(ctx, ev)
+	}
+}
+
 // childContext is the run context WithChildAgent gives a child: the
-// recorder's ChildContext, which puts the child's session ID on the
-// context under the session package's key, and, with memory
-// configured, the same ID under agentmemory's, since the memory journal
-// reads its own key and neither package imports the other.
-func childContext(rec *session.Recorder, memory bool) func(context.Context, string) context.Context {
-	return func(ctx context.Context, callID string) context.Context {
-		ctx = rec.ChildContext(ctx, callID)
-		if memory {
-			if id := session.SessionIDFromContext(ctx); id != "" {
-				ctx = agentmemory.WithSession(ctx, id)
-			}
-		}
+// ChildContext of the recorder the parent's run records into, which
+// puts the child's session ID on the context under the session
+// package's key, and, with memory configured, the same ID under
+// agentmemory's, since the memory journal reads its own key and neither
+// package imports the other. Without a recorder it is ctx.
+func (k *Kit) childContext(ctx context.Context, callID string) context.Context {
+	rec := k.recorderFor(ctx)
+	if rec == nil {
 		return ctx
 	}
+	ctx = rec.ChildContext(ctx, callID)
+	if k.memory {
+		if id := session.SessionIDFromContext(ctx); id != "" {
+			ctx = agentmemory.WithSession(ctx, id)
+		}
+	}
+	return ctx
 }
