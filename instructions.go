@@ -2,7 +2,9 @@ package agentkit
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"strings"
 
 	"github.com/ChristopherDavenport/agentmemory"
@@ -151,17 +153,27 @@ func checkOrder(order []string, configured map[string]bool) error {
 
 // skillPart discovers the skills and renders the catalogue. The usage
 // paragraph is appended only when the catalogue's tool is offered,
-// since it tells the model to reach the skills through that tool.
+// since it tells the model to reach the skills through that tool. It
+// returns a nil catalogue when no source is left, every directory
+// having been optional and absent.
 func skillPart(s *settings, withTool bool) (*agentskill.Catalog, Part, []Omission, error) {
 	sources := make([]agentskill.Source, 0, len(s.skillDirs)+len(s.skillSources))
 	for _, dir := range s.skillDirs {
-		src, err := agentskill.Dir(dir)
+		src, err := agentskill.Dir(dir.path)
+		if dir.optional && errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
 		if err != nil {
-			return nil, Part{}, nil, fmt.Errorf("agentkit: skills %s: %w", dir, err)
+			return nil, Part{}, nil, fmt.Errorf("agentkit: skills %s: %w", dir.path, err)
 		}
 		sources = append(sources, src)
 	}
 	sources = append(sources, s.skillSources...)
+	if len(sources) == 0 {
+		// Every directory was optional and none is there: no catalogue,
+		// so no part, no usage paragraph and no tool that serves nothing.
+		return nil, Part{}, nil, nil
+	}
 
 	cat, err := agentskill.Discover(sources...)
 	if err != nil {
@@ -189,26 +201,15 @@ func skillPart(s *settings, withTool bool) (*agentskill.Catalog, Part, []Omissio
 			Reason: unlistedReason(sk, cat.Problems[sk.Location]),
 		})
 	}
-	// The skill a shadowed one lost to is the one the catalogue lists
-	// under the name it wanted. Skills holds others of that name, a
-	// qualified apps/web:deploy or one that is not listed and so claims
-	// nothing, so the winner is read from Listed, first claim first.
-	// Discover clears a shadowed skill's Qualifier, so one shadowed
-	// under a qualified name already taken is blamed on the bare name's
-	// winner; agentskill does not say which qualified skill it lost to.
-	winner := map[string]string{}
-	for _, sk := range cat.Listed() {
-		if _, ok := winner[sk.ListedName()]; !ok {
-			winner[sk.ListedName()] = skillKey(sk)
-		}
-	}
+	// Discover names the skill that holds the name a shadowed one
+	// wanted, qualified or not, so By is agentskill's answer.
 	for _, sk := range cat.Shadowed {
 		omitted = append(omitted, Omission{
 			Part:   PartSkills,
 			Source: SourceSkills,
 			What:   skillKey(sk),
 			Reason: "shadowed",
-			By:     winner[sk.ListedName()],
+			By:     sk.ShadowedBy,
 		})
 	}
 	return cat, Part{ID: PartSkills, Text: text, Source: SourceSkills}, omitted, nil

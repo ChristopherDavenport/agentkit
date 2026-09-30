@@ -3,6 +3,119 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+The round 5 findings (#28 to #35), and the siblings' round 5 releases
+taken up.
+
+### Security
+
+- A skill's `allowed-tools` grant survives a restart. A grant lives in
+  the engine, so a kit rebuilt over `WithResumedSession` between a held
+  call and its approval lost it, and the approval's `Resume` held every
+  later call the skill had been granted. Under `WithSkillGrants`, `New`
+  now replays the session's path forward. An `agentskill:read` record
+  of a skill's own instructions grants its source, and a recorded
+  revocation ends it: the engine's when it removed a rule, and one the
+  kit now records for a set that held none, an untrusted skill's, since
+  the engine reports nothing there and a skill trusted by the next
+  start would otherwise be granted again. Under `WithSkillGrantScope`
+  the replay also starts after the path's last user message. What is
+  left is granted under the catalogue's rules as they stand now. A
+  record whose name another skill now holds is passed over. Each restart
+  records the grants' verdicts again. (#35)
+- Two runs off one kit each base `memory_save` on their own render.
+  Every run shared the kit's last render, so a save in run A after run
+  B rendered was based on B's view, which already held a write a third
+  session made in between. The save discarded that write,
+  `agentmemory.LostUpdates` reported nothing and the model was not told.
+  The kit now keeps each run's last render under
+  `agentturn.RunIDFromContext` and builds the save over it. A save held
+  for approval runs in the `Resume`, which has not rendered, so the
+  kit also keeps a save's render when the engine it built decides the
+  call, keyed by the session on the context and the call ID, and after
+  a restart `New` folds the path's manifest records up to each pending
+  save. Anything else, a save held by a `WithEngine` engine or a
+  product hook, falls back to the last render. Both maps keep their
+  newest 1,024 keys.
+  `agentmemory.WithRenderedContext`, the seam the issue proposed, does
+  not exist yet; this is the same thing from exported calls. (#34)
+- A kit served per conversation files what it records in that
+  conversation's session. The new `ContextWithRecorder` and
+  `RecorderFromContext` put a recorder on a run's context, and the
+  engine's and guards' verdicts, the memory manifest, a fold, a tool's
+  question and a child agent's run go to it rather than to the kit's
+  own recorder, where they sat at the root beside no run. The engine
+  observer, the guard chain's observer and the fold callback are now
+  bound with or without a session. `examples/a2a` gains `RecordEach`,
+  a `WithRecorderFor` that opens a session per a2a context ID and uses
+  it. (#31)
+
+### Changed
+
+- **Breaking**: requires agenttool and agenttool/mcpclient v0.0.11,
+  agentturn and agentturn/session v0.0.12, agentsession v0.0.15,
+  agentskill v0.0.8, agentmemory v0.0.7 and agentpolicy v0.0.8.
+  Sessions are written as `agentsession/0.9`, which v0.0.11 of
+  agentsession refuses. agentturn v0.0.12's `Resume` now puts an
+  approval of a call that never started to `BeforeToolCall`, so the
+  engine decides it, and agentpolicy v0.0.8 decides again a call it
+  would run again. `examples/a2a` requires front/a2a and tools/a2a
+  v0.0.12.
+- **Breaking**: `WithCompactor(c, budget, opts...)` takes a budget, as
+  `WithCompaction` does, and sends the agent's model name ahead of
+  `opts`. It folded at `compact.DefaultBudget` and sent every
+  `CompactRequest` with an empty `model`, which a provider that
+  requires it refuses. `New` refuses `WithCompactor` beside
+  `WithCompaction` or `WithCompactionModel`. Add the budget you gave
+  `WithCompaction`. (#28)
+- **Breaking**: `PartsFrom` takes the kits' variables, `PartsFrom(&triage,
+  &billing)`, and reads each one on every request. The recorder is
+  opened before the kits exist, so `PartsFrom(triage, billing)` passed
+  as the parts function held two nils and recorded neither agent's
+  parts, and the handoff still verified. (#30)
+- **Breaking**: a `compact.WithOnFold` in `WithCompaction`'s or
+  `WithCompactor`'s options is always replaced, since a run may bring
+  its recorder on its context after `New`. `WithFoldObserver` is how a
+  product hears of a fold.
+- A guard that refuses an instructions part names it,
+  `instructions/<id>: ...`, in `New`'s error and a turn's alike, where
+  `New`'s said only that a guard refused the instructions.
+  `errors.Is(err, agentturn.ErrGuard)` still holds. (#33)
+- The memory manifest is recorded as a delta, agentmemory v0.0.7's
+  `Manifest.RecordSince`, when the kit can see that it will fold: in
+  the session `New` opened, when the last manifest record on its path
+  is the kit's own. A write to one entry of 600 then costs that entry,
+  not 84 KB. Everywhere else it is whole, since a delta on a manifest
+  not in force on the path is one `ApplyManifestRecord` refuses: two
+  kits of a handoff, a `Rebase` or `/clear`, a child's session, a
+  recorder on the context. A path a `Rebase` moved off the kit's last
+  record now gets the render again even when it did not move, unless
+  its last record is whole and says the same, which the kit adopts, so
+  two kits of a handoff over one memory do not rewrite it at every
+  turn.
+- A shadowed skill's omission names the skill that holds its name from
+  agentskill v0.0.8's `Skill.ShadowedBy`. One shadowed under a
+  qualified name was blamed on the bare name's winner.
+
+### Added
+
+- `WithOptionalSkills(dirs...)`: a skills directory that does not exist
+  is passed over, and one that exists and cannot be read is still an
+  error. The README's example uses it for `~/.dex/skills`, which failed
+  `New` for every user who had not written a skill. When none of the
+  directories exists and no other source is given, there is no skills
+  part and no skill tool. `WithSkills` stays strict. (#29)
+
+### Documentation
+
+- `docs/manual.md` writes out the guard pass over `New`'s render, the
+  parts function's fallback to that guarded render, the manifest
+  `memory_save` is based on, the recorder on the context, the compactor
+  and the re-grant. The undefined `replaceMemoryGroup` is now
+  `withMemoryGroup`, described where it is called. `TestTheManualPathKeepsARedactedSecretOutOfTheRecord` runs the
+  manual path under `guard.Redact` and reads every config entry. (#32)
+
 ## v0.0.2 - 2026-09-29
 
 The round 4 findings (#15 to #26), and the siblings' round 4 releases

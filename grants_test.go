@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/ChristopherDavenport/agentkit"
 	"github.com/ChristopherDavenport/agentpolicy"
+	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentskill"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
@@ -486,5 +488,241 @@ func TestAQualifiedSkillIsAGrantOfItsOwn(t *testing.T) {
 	}
 	if !sources["agentskill:deploy"] || !sources["agentskill:apps/web:deploy"] {
 		t.Fatalf("withheld rules come from %v, want one source per skill", sources)
+	}
+}
+
+// A restart between a held call and its approval keeps the grant the
+// skill read before it: the kit over the resumed session grants the
+// skill again at New, so the approval's Resume goes on under it, as it
+// does without the restart. (#35)
+func TestASkillGrantSurvivesARestartBeforeTheApproval(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "release", "Bash(git:*)")
+	sessions := agentsession.NewMemoryStore()
+	var ran []string
+	bash := agenttool.New("Bash", "run a command",
+		func(_ context.Context, in struct {
+			Command string `json:"command"`
+		}) (string, error) {
+			ran = append(ran, in.Command)
+			return "", nil
+		})
+	build := func(model agentturn.Model, sess agentkit.Option) *agentkit.Kit {
+		kit, err := agentkit.New(t.Context(),
+			agentkit.WithModel(model, "m"),
+			agentkit.WithSkills(skills),
+			agentkit.WithTools(bash),
+			agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{
+				Read:    []string{agentskill.ToolName},
+				Execute: []string{"Bash"},
+			}), map[string]agentpolicy.ToolMatcher{
+				"Bash": {Match: agentpolicy.PrefixMatcher("command")},
+			}),
+			agentkit.WithSkillGrants(func(sk *agentskill.Skill) agentpolicy.Source {
+				return agentpolicy.Source{Name: "skill:" + sk.Name, Path: sk.Location, Trusted: true}
+			}),
+			agentkit.WithSkillGrantScope(),
+			sess,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = kit.Close() })
+		return kit
+	}
+
+	first := build(&scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn(agentskill.ToolName, `{"name":"release"}`),
+		callTurn("Bash", `{"command":"rm -rf build"}`),
+	}}, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))
+	agent := agentturn.New(first.Config(), first.AgentOptions()...)
+	unsubscribe := first.Attach(agent)
+	end, err := agent.Prompt(t.Context(), openresponses.UserText("cut the release"))
+	unsubscribe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if end.Reason != agentturn.ReasonInputRequired {
+		t.Fatalf("reason = %q, want rm -rf held", end.Reason)
+	}
+
+	// The restart: a new kit over the session, and the approval.
+	second := build(&scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn("Bash", `{"command":"git status"}`),
+	}}, agentkit.WithResumedSession(sessions, first.SessionID()))
+	if got := len(second.Engine().Grants()); got != 1 {
+		t.Fatalf("grants in force after the restart = %d, want the skill's", got)
+	}
+	resumed := agentturn.New(second.Config(), second.AgentOptions()...)
+	defer second.Attach(resumed)()
+	pending := resumed.State().Pending
+	if len(pending) != 1 {
+		t.Fatalf("pending = %+v, want the held rm", pending)
+	}
+	end, err = resumed.Resume(t.Context(), agentturn.Approve(pending[0].Call.CallID).WithBy(agentpolicy.ByHuman))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if end.Reason == agentturn.ReasonInputRequired {
+		t.Fatalf("git status was held after the restart; ran %v", ran)
+	}
+	if !slices.Equal(ran, []string{"rm -rf build", "git status"}) {
+		t.Fatalf("ran %v, want the approved rm and then git status under the grant", ran)
+	}
+}
+
+// Under the scope, a read before the path's last user message is not
+// granted again at New: that message revoked it.
+func TestARestartDoesNotRegrantAReadTheScopeRevoked(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "release", "Bash(git:*)")
+	sessions := agentsession.NewMemoryStore()
+	for _, scoped := range []bool{true, false} {
+		opts := func(model agentturn.Model, sess agentkit.Option) []agentkit.Option {
+			o := []agentkit.Option{
+				agentkit.WithModel(model, "m"),
+				agentkit.WithSkills(skills),
+				agentkit.WithPolicy(agentpolicy.FullAuto(agentpolicy.Tools{Read: []string{agentskill.ToolName}}),
+					map[string]agentpolicy.ToolMatcher{"Bash": {Match: agentpolicy.PrefixMatcher("command")}}),
+				agentkit.WithSkillGrants(func(sk *agentskill.Skill) agentpolicy.Source {
+					return agentpolicy.Source{Name: "skill:" + sk.Name, Trusted: true}
+				}),
+				sess,
+			}
+			if scoped {
+				o = append(o, agentkit.WithSkillGrantScope())
+			}
+			return o
+		}
+		first, err := agentkit.New(t.Context(), opts(&scriptModel{turns: []func(*openresponses.Emitter) error{
+			callTurn(agentskill.ToolName, `{"name":"release"}`),
+		}}, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		agent := agentturn.New(first.Config(), first.AgentOptions()...)
+		unsubscribe := first.Attach(agent)
+		for _, msg := range []string{"cut the release", "thanks"} {
+			if _, err := agent.Prompt(t.Context(), openresponses.UserText(msg)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		unsubscribe()
+		_ = first.Close()
+
+		second, err := agentkit.New(t.Context(), opts(&scriptModel{}, agentkit.WithResumedSession(sessions, first.SessionID()))...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := 1
+		if scoped {
+			want = 0
+		}
+		if got := len(second.Engine().Grants()); got != want {
+			t.Errorf("scoped=%v: grants after the restart = %d, want %d", scoped, got, want)
+		}
+		_ = second.Close()
+	}
+}
+
+// A restart does not bring back a grant the product revoked, nor grant
+// a skill the model never read that now holds the name it read.
+func TestARestartRegrantsOnlyWhatTheJournalLeftInForce(t *testing.T) {
+	root := t.TempDir()
+	repo := skillWithTools(t, filepath.Join(root, "repo"), "release", "Bash(git:*)")
+	other := skillWithTools(t, filepath.Join(root, "other"), "release", "Bash(rm:*)")
+	sessions := agentsession.NewMemoryStore()
+	opts := func(model agentturn.Model, sess agentkit.Option, dirs ...string) []agentkit.Option {
+		return []agentkit.Option{
+			agentkit.WithModel(model, "m"),
+			agentkit.WithSkills(dirs...),
+			agentkit.WithPolicy(agentpolicy.FullAuto(agentpolicy.Tools{Read: []string{agentskill.ToolName}}),
+				map[string]agentpolicy.ToolMatcher{"Bash": {Match: agentpolicy.PrefixMatcher("command")}}),
+			agentkit.WithSkillGrants(func(sk *agentskill.Skill) agentpolicy.Source {
+				return agentpolicy.Source{Name: "skill:" + sk.Name, Trusted: true}
+			}),
+			sess,
+		}
+	}
+	readOnce := func(revoke bool) string {
+		t.Helper()
+		kit, err := agentkit.New(t.Context(), opts(&scriptModel{turns: []func(*openresponses.Emitter) error{
+			callTurn(agentskill.ToolName, `{"name":"release"}`),
+		}}, agentkit.WithSession(sessions, agentsession.Header{CWD: root}), repo)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer kit.Close()
+		agent := agentturn.New(kit.Config())
+		defer kit.Attach(agent)()
+		if _, err := agent.Prompt(t.Context(), openresponses.UserText("cut the release")); err != nil {
+			t.Fatal(err)
+		}
+		if revoke && kit.RevokeSkillGrants(t.Context()) == 0 {
+			t.Fatal("the revoke removed nothing")
+		}
+		return kit.SessionID()
+	}
+	grantsAfterRestart := func(id string, dirs ...string) int {
+		t.Helper()
+		kit, err := agentkit.New(t.Context(), opts(&scriptModel{}, agentkit.WithResumedSession(sessions, id), dirs...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer kit.Close()
+		return len(kit.Engine().Grants())
+	}
+
+	if got := grantsAfterRestart(readOnce(false), repo); got != 1 {
+		t.Errorf("a read left in force: grants after the restart = %d, want 1", got)
+	}
+	if got := grantsAfterRestart(readOnce(true), repo); got != 0 {
+		t.Errorf("a read the product revoked: grants after the restart = %d, want 0", got)
+	}
+	if got := grantsAfterRestart(readOnce(false), other, repo); got != 0 {
+		t.Errorf("the name now held by a skill the model never read: grants after the restart = %d, want 0", got)
+	}
+}
+
+// A read under the default untrusted source grants a set that holds no
+// rules, and the engine records no revocation of it. The kit records
+// one, so a restart after the product revoked, with the skill now
+// trusted, does not grant the read's rules.
+func TestARevokeOfASetWithNoRulesSurvivesARestart(t *testing.T) {
+	root := t.TempDir()
+	skills := skillWithTools(t, filepath.Join(root, "skills"), "release", "Bash(git:*)")
+	sessions := agentsession.NewMemoryStore()
+	build := func(model agentturn.Model, sess agentkit.Option, source func(*agentskill.Skill) agentpolicy.Source) *agentkit.Kit {
+		kit, err := agentkit.New(t.Context(),
+			agentkit.WithModel(model, "m"),
+			agentkit.WithSkills(skills),
+			agentkit.WithPolicy(agentpolicy.FullAuto(agentpolicy.Tools{Read: []string{agentskill.ToolName}}),
+				map[string]agentpolicy.ToolMatcher{"Bash": {Match: agentpolicy.PrefixMatcher("command")}}),
+			agentkit.WithSkillGrants(source),
+			sess,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = kit.Close() })
+		return kit
+	}
+	first := build(&scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn(agentskill.ToolName, `{"name":"release"}`),
+	}}, agentkit.WithSession(sessions, agentsession.Header{CWD: root}), nil)
+	agent := agentturn.New(first.Config())
+	unsubscribe := first.Attach(agent)
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("cut the release")); err != nil {
+		t.Fatal(err)
+	}
+	first.RevokeSkillGrants(t.Context())
+	unsubscribe()
+
+	trusted := func(sk *agentskill.Skill) agentpolicy.Source {
+		return agentpolicy.Source{Name: "agentskill:" + sk.ListedName(), Path: sk.Location, Trusted: true}
+	}
+	second := build(&scriptModel{}, agentkit.WithResumedSession(sessions, first.SessionID()), trusted)
+	for _, g := range second.Engine().Grants() {
+		if len(g.Allow) > 0 {
+			t.Fatalf("a restart granted %v for a read the product revoked", g.Allow)
+		}
 	}
 }

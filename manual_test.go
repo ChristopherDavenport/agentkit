@@ -2,19 +2,25 @@ package agentkit_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ChristopherDavenport/agentkit"
 	"github.com/ChristopherDavenport/agentmemory"
 	"github.com/ChristopherDavenport/agentpolicy"
+	"github.com/ChristopherDavenport/agentpolicy/guard"
+	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentskill"
 	"github.com/ChristopherDavenport/agentsmd"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/agentturn/session"
+	"github.com/ChristopherDavenport/openresponses"
 )
 
 // TestTheManualPathIsTheSamePath is the test of the package's one rule:
@@ -235,4 +241,158 @@ func readDoc(t *testing.T, path string) string {
 		t.Fatalf("reading %s: %v", path, err)
 	}
 	return string(b)
+}
+
+// The manual path under guard.Redact, written as docs/manual.md now
+// writes it: the guard pass over New's render, the per-turn hook, and a
+// parts function that falls back to the guarded render and never to
+// the layers'. A secret saved to memory reaches neither path's requests
+// nor any config entry of either path's session, and the two send the
+// same instructions. Without the pass at New the session's first config
+// entry held the key the model never saw. (#32)
+func TestTheManualPathKeepsARedactedSecretOutOfTheRecord(t *testing.T) {
+	const secret = "AKIAABCDEFGHIJKLMNOP"
+	store := memStore(t, agentmemory.Entry{Scope: "user", Name: "aws", Content: "the key is " + secret})
+	scopes := []agentmemory.Scope{"user"}
+	guards := []guard.Guard{guard.Redact()}
+	sessions := agentsession.NewMemoryStore()
+
+	// The kit's side.
+	kitModel := &scriptModel{}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(kitModel, "m"),
+		agentkit.WithInstructions("Be brief."),
+		agentkit.WithMemory(store, scopes...),
+		agentkit.WithGuards(guards...),
+		agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	kitAgent := agentturn.New(kit.Config(), kit.AgentOptions()...)
+	unsubscribe := kit.Attach(kitAgent)
+	if _, err := kitAgent.Prompt(t.Context(), openresponses.UserText("hi")); err != nil {
+		t.Fatal(err)
+	}
+	unsubscribe()
+
+	// The manual side, as docs/manual.md writes it.
+	chain := guard.Chain{Guards: guards}
+	guardParts := func(ctx context.Context, parts []agentsession.InstructionPart) ([]agentsession.InstructionPart, error) {
+		out := make([]agentsession.InstructionPart, 0, len(parts))
+		for _, p := range parts {
+			one := openresponses.Request{Instructions: p.Text}
+			if err := chain.BeforeModelCall()(ctx, &one); err != nil {
+				return nil, err
+			}
+			if one.Instructions != "" {
+				p.Text = one.Instructions
+				out = append(out, p)
+			}
+		}
+		return out, nil
+	}
+	layers := func(ctx context.Context) ([]agentsession.InstructionPart, error) {
+		pieces, _, err := agentmemory.RenderParts(ctx, store, scopes)
+		if err != nil {
+			return nil, err
+		}
+		parts := []agentsession.InstructionPart{{ID: agentkit.PartProduct, Text: "Be brief.", Source: agentkit.SourceProduct}}
+		for _, p := range pieces {
+			parts = append(parts, agentsession.InstructionPart{ID: p.ID, Text: p.Text, Source: agentkit.SourceMemory})
+		}
+		return append(parts, agentsession.InstructionPart{ID: agentkit.PartMemoryUsage, Text: agentmemory.Usage(), Source: agentkit.SourceMemory}), nil
+	}
+	rendered, err := layers(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := guardParts(t.Context(), rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		mu   sync.Mutex
+		sent = first
+	)
+	partsFor := func(_ context.Context, req openresponses.Request) ([]agentsession.InstructionPart, []agentsession.OmittedPart) {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, parts := range [][]agentsession.InstructionPart{sent, first} {
+			if agentsession.JoinInstructions(parts) == req.Instructions {
+				return parts, nil
+			}
+		}
+		return nil, nil
+	}
+	manualModel := &scriptModel{}
+	cfg := agentturn.Config{
+		Model:        manualModel,
+		ModelName:    "m",
+		Instructions: agentsession.JoinInstructions(first),
+		BeforeModelCall: agentturn.ChainBeforeModelCall(
+			func(ctx context.Context, req *openresponses.Request) error {
+				parts, err := layers(ctx)
+				if err != nil {
+					return err
+				}
+				guarded, err := guardParts(ctx, parts)
+				if err != nil {
+					return err
+				}
+				mu.Lock()
+				sent = guarded
+				mu.Unlock()
+				req.Instructions = agentsession.JoinInstructions(guarded)
+				return nil
+			},
+			chain.BeforeModelCall(),
+		),
+		OutputGuard:         chain.OutputGuard(),
+		ShouldStopAfterTurn: chain.ShouldStopAfterTurn(),
+	}
+	rec, _, err := session.Start(t.Context(), sessions, agentsession.Header{CWD: t.TempDir()},
+		session.WithInstructionsParts(partsFor))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ToolRecorder = rec.RecordFunc()
+	manualAgent := agentturn.New(cfg)
+	unsubscribe = rec.Attach(manualAgent)
+	if _, err := manualAgent.Prompt(t.Context(), openresponses.UserText("hi")); err != nil {
+		t.Fatal(err)
+	}
+	unsubscribe()
+
+	if kit.Config().Instructions != cfg.Instructions {
+		t.Errorf("Instructions differ:\n--- kit ---\n%s\n--- by hand ---\n%s", kit.Config().Instructions, cfg.Instructions)
+	}
+	kitSent, manualSent := kitModel.requests(), manualModel.requests()
+	if len(kitSent) == 0 || len(kitSent) != len(manualSent) || kitSent[0].Instructions != manualSent[0].Instructions {
+		t.Errorf("the two paths sent different requests")
+	}
+	for _, req := range append(kitSent, manualSent...) {
+		if strings.Contains(req.Instructions, secret) {
+			t.Fatal("a request carried the secret")
+		}
+	}
+	for name, id := range map[string]string{"kit": kit.SessionID(), "manual": rec.SessionID()} {
+		entries := configEntries(openSession(t, sessions, id))
+		if len(entries) == 0 {
+			t.Fatalf("the %s session holds no config entry", name)
+		}
+		for i, c := range entries {
+			if len(c.InstructionsParts) == 0 && c.Instructions != nil && *c.Instructions != "" {
+				t.Errorf("%s config entry %d records the instructions as one string", name, i)
+			}
+			b, err := json.Marshal(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(b), secret) {
+				t.Errorf("%s config entry %d holds the secret the guard kept from the model", name, i)
+			}
+		}
+	}
 }

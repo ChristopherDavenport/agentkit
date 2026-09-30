@@ -17,11 +17,14 @@ package a2a
 
 import (
 	"context"
+	"sync"
 
 	"github.com/ChristopherDavenport/agentkit"
+	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
 	fronta2a "github.com/ChristopherDavenport/agentturn/front/a2a"
+	"github.com/ChristopherDavenport/agentturn/session"
 	toola2a "github.com/ChristopherDavenport/agentturn/tools/a2a"
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
@@ -57,6 +60,55 @@ func Peer(ctx context.Context, card *a2a.AgentCard, opts ...toola2a.Option) (age
 func Serve(ctx context.Context, kit *agentkit.Kit, url, version string, opts ...fronta2a.Option) (*a2a.AgentCard, *fronta2a.Executor) {
 	cfg := kit.Config()
 	return fronta2a.AgentCard(ctx, cfg, url, version), fronta2a.New(cfg, opts...)
+}
+
+// RecordEach records every conversation the executor serves as a
+// session of its own in store, for [Serve]'s opts: the first message of
+// an a2a context starts one, and each later message resumes it.
+//
+// Pointing the agent's ToolRecorder at the conversation's recorder, as
+// fronta2a's RecorderFor doc shows, reaches the records a tool writes.
+// The rest of what a kit records, the policy's and the guards'
+// verdicts, the memory manifest, a fold, a question a tool asked, is
+// written by hooks the kit bound at New, and those follow the recorder
+// [agentkit.ContextWithRecorder] puts on the run's context. Without it
+// they land in the kit's own session, or nowhere, and the
+// conversation's session has the calls but not the rules that let them
+// run.
+func RecordEach(kit *agentkit.Kit, store agentsession.Store, cwd string) fronta2a.Option {
+	var (
+		mu       sync.Mutex
+		sessions = map[string]string{} // a2a context ID to session ID
+	)
+	return fronta2a.WithRecorderFor(func(ctx context.Context, contextID string, a *agentturn.Agent) (context.Context, func(), error) {
+		parts := session.WithInstructionsParts(kit.PartsFor)
+		// Held across the open, so two first messages of one context do
+		// not each start a session.
+		mu.Lock()
+		defer mu.Unlock()
+		id, seen := sessions[contextID]
+		var (
+			rec *session.Recorder
+			err error
+		)
+		if seen {
+			rec, _, err = session.Resume(ctx, store, id, parts)
+		} else {
+			rec, _, err = session.Start(ctx, store, agentsession.Header{CWD: cwd}, parts)
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		sessions[contextID] = rec.SessionID()
+
+		cfg := a.Config()
+		cfg.ToolRecorder = rec.RecordFunc()
+		if err := a.SetConfig(cfg); err != nil {
+			return nil, nil, err
+		}
+		ctx = session.ContextWithSessionID(ctx, rec.SessionID())
+		return agentkit.ContextWithRecorder(ctx, rec), rec.Attach(a), nil
+	})
 }
 
 // Both is the round trip: an agent that calls a peer and is one.
