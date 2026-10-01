@@ -856,22 +856,21 @@ func TestARunUnderARecorderOnItsContextIsRecordedThere(t *testing.T) {
 }
 
 // foldManifests folds the memory manifest records on the path to the
-// session's leaf, as a reader would, and fails on one that does not
-// apply.
+// session's leaf, as a reader would, with agentmemory.ManifestFold, and
+// fails on one that does not apply.
 func foldManifests(t *testing.T, s *agentsession.Session) agentmemory.Manifest {
 	t.Helper()
-	var m agentmemory.Manifest
+	var f agentmemory.ManifestFold
 	for _, e := range s.Path(s.Leaf()) {
 		c, ok := e.(*agentsession.CustomEntry)
 		if !ok || c.NS != agentmemory.ManifestNS {
 			continue
 		}
-		var err error
-		if m, err = agentmemory.ApplyManifestRecord(m, c.Data); err != nil {
+		if err := f.Apply(c.Data); err != nil {
 			t.Fatalf("a manifest record on the path does not fold: %v", err)
 		}
 	}
-	return m
+	return f.Manifest()
 }
 
 // Two kits with memory under one recorder, a handoff, each write their
@@ -1439,5 +1438,55 @@ func TestASaveHeldUnderAContextRecorderKeepsItsBaseAcrossARestart(t *testing.T) 
 	}
 	if len(lost) != 1 {
 		t.Fatalf("lost updates = %d, want the write the approved save discarded", len(lost))
+	}
+}
+
+// A kit handed back to writes its manifest as a delta on its own last
+// one, which the fold still resolves, rather than whole on the other
+// kit's, which shares nothing with it: 84 KB per hand-back at 600
+// entries. (#55)
+func TestAHandBackRecordsADeltaOnTheKitsOwnManifest(t *testing.T) {
+	sessions := agentsession.NewMemoryStore()
+	var a, b *agentkit.Kit
+	rec, _, err := session.Start(t.Context(), sessions, agentsession.Header{CWD: t.TempDir()},
+		session.WithInstructionsParts(agentkit.PartsFrom(&a, &b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func(who string) *agentkit.Kit {
+		kit, err := agentkit.New(t.Context(),
+			agentkit.WithModel(&scriptModel{}, "m"),
+			agentkit.WithInstructions("You are "+who+"."),
+			agentkit.WithMemory(memStore(t, manyFacts(who)...), "user"),
+			agentkit.WithRecorder(rec),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = kit.Close() })
+		return kit
+	}
+	a, b = build("triage"), build("billing")
+	agent := agentturn.New(a.Config())
+	defer rec.Attach(agent)()
+	for i, kit := range []*agentkit.Kit{a, b, a, b, a, b} {
+		if err := agent.SetConfig(kit.Config()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := agent.Prompt(t.Context(), openresponses.UserText(fmt.Sprint("turn ", i))); err != nil {
+			t.Fatal(err)
+		}
+		if got := foldManifests(t, openSession(t, sessions, rec.SessionID())); got.Hash() != kit.MemoryManifest().Hash() {
+			t.Fatalf("after turn %d the path folds to %s, want %s", i, got.Hash(), kit.MemoryManifest().Hash())
+		}
+	}
+	sizes := manifestSizes(openSession(t, sessions, rec.SessionID()))
+	if len(sizes) != 6 {
+		t.Fatalf("manifest records = %v, want one per hand-back", sizes)
+	}
+	for i, n := range sizes[2:] {
+		if n*4 > sizes[i%2] {
+			t.Fatalf("hand-back %d wrote %d bytes against a whole manifest of %d: %v", i+2, n, sizes[i%2], sizes)
+		}
 	}
 }

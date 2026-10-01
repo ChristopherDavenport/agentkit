@@ -74,7 +74,8 @@ session it has served, and no other process can open one.
 Two things stay the kit's however the front records: a skill grant,
 which is a rule set on the kit's one engine and belongs to one
 conversation, so the kit revokes its grants the first time it serves a
-second (`agentkit.ErrSkillGrantConversation`); and an MCP server's
+second (`agentkit.ErrSkillGrantConversation`), and says so in the owner's
+session and to `WithSkillGrantReport`; and an MCP server's
 connection, dialed once at `New`, whose identity, an OAuth token among
 it, every conversation shares. A front that needs either per
 conversation or per user builds a kit for each. For an OAuth-protected

@@ -15,6 +15,17 @@ kit's.
 If a line here ever has to say "and then something the kit does
 privately", the kit has become a framework and the rule is broken.
 
+The blocks below are written against the versions the README's table
+names, and need agentturn and agentturn/session **v0.0.15 or later**.
+The fold block relies on `compact.WithOnFold` adding a callback, which
+v0.0.14 brought, and the resume on `session.CompactOptions` and the
+reasoning attribution `session.AgentOptions` returns, which v0.0.15
+did. agentpolicy v0.0.10 and agentmemory v0.0.9 require v0.0.15, so a
+product on the siblings without the kit selects it; one that pins an
+older agentpolicy runs `go get github.com/ChristopherDavenport/agentturn@v0.0.15`.
+At v0.0.13 a product's `WithOnFold` after the recorder's replaces it,
+and no fold is recorded.
+
 ## The fields
 
 | field | the kit's option | what a product writes instead |
@@ -130,8 +141,11 @@ is.
 `cat.Usage()` is appended only when `cat.Tool()` is offered, since it
 tells the model to reach the listed skills through that tool.
 `WithoutSkillTool` drops both. `agentmemory.Usage()` is always appended
-to a memory block that is sent, since `WithMemory` always offers
-`agentmemory.Tools`; a block the budget drops takes it along.
+to a memory block that is sent, since `WithMemory` offers
+`agentmemory.Tools`; a block the budget drops takes it along, and the
+writes with it: the request that block was dropped from is not offered
+`memory_save`, `memory_patch` or `memory_forget`, and the run refuses
+them (below).
 
 Under `WithInstructionBudget`, the layers that take a bound are given
 one: `agentsmd.Options.Budget` and `agentmemory.WithMaxTotalBytes`, in
@@ -161,7 +175,11 @@ tools = append(tools, childagent.New(childCfg,
 		}
 		return ctx
 	})))
-tools = append(tools, cat.Tool())
+// The catalogue's tool as it stands: ReloadSkills puts another
+// catalogue's in its place, and every run sees it from its next call.
+tools = append(tools, agenttool.Wrap(cat.Tool(), func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+	return currentCat().Tool().Execute(ctx, call) // under a lock in real code
+}))
 
 // memory_save is based on the render its call was composed from:
 // saveBase[call], kept by keepSaveBase when the call was decided, then
@@ -183,8 +201,8 @@ for i, t := range memTools {
 			m, ok := saveBase[key]
 			if ok {
 				delete(saveBase, key)
-			} else {
-				m, ok = rendered[run]
+			} else if r, found := rendered[run]; found {
+				m, ok = r.man, true
 			}
 			if !ok {
 				m, ok = manifestAtCall(ctx, call.ID) // below
@@ -199,6 +217,17 @@ for i, t := range memTools {
 				if own.Name() == agentmemory.SaveTool {
 					return own.Execute(ctx, call)
 				}
+			}
+			return t.Execute(ctx, call)
+		})
+	}
+	// The writes are refused in a run whose last render the budget
+	// dropped: the request did not offer them, and the model was shown no
+	// block to write over.
+	if t := memTools[i]; t.Name() == agentmemory.SaveTool || t.Name() == agentmemory.PatchTool || t.Name() == agentmemory.ForgetTool {
+		memTools[i] = agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+			if r, ok := rendered[agentturn.RunIDFromContext(ctx)]; ok && r.dropped {
+				return agenttool.Result{}, errMemoryDropped // "... memory_search still reads it"
 			}
 			return t.Execute(ctx, call)
 		})
@@ -247,7 +276,8 @@ one built for `WithEngine` or a product hook, so the base is kept
 whoever holds it. After a restart, or once the bounded maps have
 dropped the run, `manifestAtCall` folds the manifest records on the
 path of the run's session, `recorderFor(ctx)`'s, read through
-`rec.Store().Open`, up to the call:
+`rec.Store().Open`, up to the call, and takes what is in force there
+only when no other run's render can be the last record:
 
 ```go
 manifestAtCall := func(ctx context.Context, callID string) (agentmemory.Manifest, bool) {
@@ -259,24 +289,44 @@ manifestAtCall := func(ctx context.Context, callID string) (agentmemory.Manifest
 	if err != nil {
 		return agentmemory.Manifest{}, false
 	}
-	var m agentmemory.Manifest
-	valid := false
+	var (
+		f          agentmemory.ManifestFold
+		folded, ok bool
+		mixed      bool
+		open       = map[string]bool{}
+	)
 	for _, e := range sess.Path(sess.Leaf()) {
 		switch e := e.(type) {
 		case *agentsession.CustomEntry:
 			if e.NS == agentmemory.ManifestNS {
-				next, err := agentmemory.ApplyManifestRecord(m, e.Data)
-				m, valid = next, err == nil
+				ok = f.Apply(e.Data) == nil
+				folded = true
+			}
+		case *agentsession.RunEntry:
+			if e.IsStart() {
+				mixed = len(open) > 0 // a run started while another was open
+				open[e.RunID] = true
+			} else if e.IsEnd() {
+				delete(open, e.RunID)
 			}
 		case *agentsession.ItemEntry:
-			if fc, ok := e.Item.(*openresponses.FunctionCall); ok && fc.CallID == callID {
-				return m, valid
+			if fc, isCall := e.Item.(*openresponses.FunctionCall); isCall && fc.CallID == callID {
+				if mixed || len(open) > 1 {
+					return agentmemory.Manifest{}, false // may be another run's render
+				}
+				return f.Manifest(), folded && ok
 			}
 		}
 	}
 	return agentmemory.Manifest{}, false
 }
 ```
+
+Two runs off one kit may share a session, and a render the second run
+recorded between the first run's start and its call is the last record
+before the call. Each run's renders are recorded inside it, so when no
+other run started in that window and none is open at the call, every
+record since the call's run started is that run's.
 
 A call in a run that finds no base is refused with a result telling the
 model to search for the entry and save again: a save based on another
@@ -396,7 +446,7 @@ guardParts := func(ctx context.Context, c guard.Chain, parts []agentsession.Inst
 }
 
 instructions := func(ctx context.Context, req *openresponses.Request) error {
-	pieces, m, err := agentmemory.RenderParts(ctx, store, scopes)
+	pieces, m, dropped, err := renderUnder(ctx, store, scopes, share) // RenderParts under the budget; see Instructions
 	if err != nil {
 		return err
 	}
@@ -411,8 +461,14 @@ instructions := func(ctx context.Context, req *openresponses.Request) error {
 	if sent, err = guardParts(ctx, chain, layers); err != nil {
 		return err
 	}
-	last, rendered[agentturn.RunIDFromContext(ctx)] = m, m // memory_save's base
+	last, rendered[agentturn.RunIDFromContext(ctx)] = m, render{m, dropped} // memory_save's base
 	req.Instructions = agentsession.JoinInstructions(sent)
+	if dropped {
+		req.Tools = slices.DeleteFunc(slices.Clone(req.Tools), func(t openresponses.Tool) bool {
+			f, ok := t.(*openresponses.FunctionTool)
+			return ok && (f.Name == agentmemory.SaveTool || f.Name == agentmemory.PatchTool || f.Name == agentmemory.ForgetTool)
+		})
+	}
 	return nil
 }
 cfg.BeforeModelCall = agentturn.ChainBeforeModelCall(
@@ -428,20 +484,12 @@ cfg.BeforeModelCall = agentturn.ChainBeforeModelCall(
 record := func(ctx context.Context, r *session.Recorder, m agentmemory.Manifest) error {
 	sid := runSessionID(ctx, r) // session.SessionIDFromContext, the child's under ChildContext, else r.SessionID()
 	prev, seen := recorded[sid]
-	var inForce agentmemory.Manifest
+	var f *fold
 	folds := false
 	if sess, err := r.Store().Open(ctx, sid); err == nil { // the live session the store holds
-		path := sess.Path(sess.Leaf())
-		last := lastManifest(path) // the last agentmemory:render entry's ID, "" for none
-		switch {
-		case last == "":
-		case seen && last == prev.entry:
-			inForce, folds = prev.man, true // our own record is still last
-		default:
-			inForce, folds = foldManifests(path) // another kit's, or a Rebase's
-		}
-		if folds && inForce.Hash() == m.Hash() {
-			recorded[sid] = recordedManifest{m, last}
+		f = folded[sid].upTo(sess.Path(sess.Leaf())) // an agentmemory.ManifestFold, from the record it last reached
+		if folds = f.inForce() != ""; folds && f.inForce() == m.Hash() {
+			recorded[sid] = recordedManifest{m, f.at}
 			return nil // nothing moved
 		}
 	} else if seen && prev.man.Hash() == m.Hash() && lastWritten[r, sid] == prev.entry {
@@ -449,7 +497,12 @@ record := func(ctx context.Context, r *session.Recorder, m agentmemory.Manifest)
 	}
 	ns, data := m.Record()
 	if folds {
-		ns, data = m.RecordSince(inForce) // a delta on the one in force
+		ns, data = m.RecordSince(f.Manifest()) // a delta on the one in force
+		if seen && prev.man.Hash() != f.inForce() && f.holds(prev.man.Hash()) {
+			if ns2, own := m.RecordSince(prev.man); len(own) < len(data) {
+				ns, data = ns2, own // after a handoff: a delta on this kit's own last one
+			}
+		}
 	}
 	entry, err := r.Annotate(ctx, ns, json.RawMessage(data))
 	if err != nil {
@@ -459,6 +512,13 @@ record := func(ctx context.Context, r *session.Recorder, m agentmemory.Manifest)
 	return nil
 }
 ```
+
+`fold` is an `agentmemory.ManifestFold` kept per session with the ID of
+the last record it folded and the hashes of the distinct manifests it
+holds in force, the last `agentmemory.ManifestFoldDepth`: `upTo` folds
+the records after that one on the path, or the whole path again when it
+is no longer there, after a `Rebase`; `holds` says whether a delta on a
+manifest resolves.
 
 This is what `WithMemory`, `WithGuards`, `WithVerdictObserver` and
 `WithBeforeModelCall` compose to, and it is the whole of it. The
@@ -482,18 +542,25 @@ them carries the manifest of the render its run was shown.
 
 A manifest is written whenever the render differs from the manifest in
 force on the path of the session it lands in, and as
-`agentmemory.Manifest.RecordSince` that one: whole only where nothing is
-in force, a new session or a child's. The path is read through the
+`agentmemory.Manifest.RecordSince` that one or, where it is smaller,
+this kit's own last manifest while the fold still resolves it: whole
+only where nothing is in force, a new session or a child's. In a
+handoff the manifest in force is the other kit's, which shares nothing
+with this one, and a delta on it was the whole manifest at every
+hand-back. Such a delta is refused by `agentmemory.ApplyManifestRecord`,
+so a reader of the session folds with `agentmemory.ManifestFold`
+(agentmemory v0.0.9), as the kit does. The path is read through the
 recorder's store: `Open` on a session a store holds hands back the live
 session it holds, which is how the recorder itself reopens one, so the
 session `New` opened, one on a run's context and a child's are read
-alike. What is in force is the kit's own last record while that is last
-on the path, and otherwise the fold of the path's records: another
-kit's of a handoff, a `Rebase` or `/clear`, a restart. So a kit handed
+alike. What is in force is the fold of the path's records, whoever
+wrote them: another kit's of a handoff, a `Rebase` or `/clear`, a
+restart. So a kit handed
 back to after another kit wrote records its render again even when it
-did not move, a render that says what the path already says is not
-written, and a delta is always on the manifest a reader folds to, never
-one `agentmemory.ApplyManifestRecord` refuses. A store that cannot open
+did not move, and a render that says what the path already says is not
+written. The fold is kept per session and brought up from the record it
+last reached, so a turn reads only what was written since the last, not
+every record from the root. A store that cannot open
 the session gets whole writes, and `lastWritten`, shared by every kit
 in the process, is what tells a kit that another kit wrote there since
 its own record. `sent` is
@@ -523,8 +590,8 @@ engine, err := agentpolicy.Build(policy, matchers,
 // run it, and decides nothing (WithMemory).
 keepSaveBase := func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
 	if info.Call.Name == agentmemory.SaveTool {
-		if m, ok := rendered[info.RunID]; ok {
-			saveBase[sessionID(ctx)+"\x00"+info.Call.CallID] = m
+		if r, ok := rendered[info.RunID]; ok {
+			saveBase[sessionID(ctx)+"\x00"+info.Call.CallID] = r.man
 		}
 	}
 	return nil, nil
@@ -534,11 +601,15 @@ keepSaveBase := func(ctx context.Context, info agentturn.ToolCallInfo) (*agenttu
 // in a conversation the grants do not belong to, and decides nothing
 // (WithSkillGrants).
 grantGuard := func(ctx context.Context, _ agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
-	if conv := conversation(ctx); owned && !shared && conv != owner { // recorderFor(ctx).SessionID()
-		shared = true
+	if conv := conversation(ctx); owned && !shared && conv != owner { // below
+		shared, tripBy = true, conv
+		octx := agentkit.ContextWithRecorder(context.Background(), ownerRec)
+		observe(octx, agentpolicy.Verdict{Action: agentturn.Block, By: agentpolicy.ByPolicy,
+			Reason: fmt.Sprintf("skill grants ended: the kit decided a call in session %q, ...", conv)})
 		for _, name := range granted {
-			engine.Revoke(agentkit.ContextWithRecorder(context.Background(), ownerRec), name)
+			engine.Revoke(octx, name)
 		}
+		report(agentkit.SkillGrant{Err: ...}) // wraps ErrSkillGrantConversation, names conv and owner
 	}
 	return nil, nil
 }
@@ -573,7 +644,19 @@ fold := func(ctx context.Context, f compact.Fold) error {
 	observer(ctx, f) // WithFoldObserver
 	return nil
 }
-opts := append([]compact.Option{compact.WithModel(name), compact.WithOnFold(fold), compact.WithBudget(n)}, yours...)
+opts := []compact.Option{compact.WithModel(name), compact.WithOnFold(fold)}
+if !reasoning.IsZero() { // WithReasoning's, else WithRequest's Reasoning
+	opts = append(opts, compact.WithRequest(func(r *openresponses.Request) { r.Reasoning = reasoning }))
+}
+opts = append(opts, compact.WithBudget(n))
+opts = append(opts, yours...)
+if sess != nil { // the session WithSession or WithResumedSession opened
+	failed, err := session.CompactOptions(sess)
+	if err != nil {
+		return err
+	}
+	opts = append(opts, failed...)
+}
 t := compact.NewLocal(model, opts...) // WithCompaction
 t = compact.New(compactor, opts...)   // WithCompactor
 ```
@@ -585,18 +668,39 @@ callback (agentturn v0.0.14), so the kit passes `fold` ahead of the
 product's `compact.Option`s, whether or not there is a session, since a
 run may bring a recorder on its context, and a `compact.WithOnFold`
 among the product's is called after it, once the fold is recorded.
-`WithFoldObserver` is the kit's own way to hear of a fold.
+`WithFoldObserver` is the kit's own way to hear of a fold, and it hears
+a failed one too, with `Fold.Err` set and no summary: a front that says
+the model has forgotten something says it for a fold whose `Err` is
+nil.
+
+The summary request is sent under the agent's reasoning: a thinking
+model left at its server's default reasons through the summary's cap
+and answers no text. `compact.WithRequest` is one function, so a
+product's replaces the kit's and sets the reasoning itself.
+`session.CompactOptions` is the last fold on the resumed session's path
+that failed, so a restart does not ask again for a summary that failed
+before it; a product that records under `WithRecorder` or a recorder on
+the context passes it in `yours`.
 
 ## `BeforeTurn`
 
 ```go
 revokeOnUserMessage := func(ctx context.Context, info agentturn.TurnStartInfo) (openresponses.Items, error) {
-	if newUserMessage(info.Transcript) && owned && !shared && conversation(ctx) == owner {
-		for _, name := range granted { // the sources the grants were made under
-			engine.Revoke(ctx, name)
-		}
+	if !newUserMessage(info.Transcript) || !owned || shared || conversation(ctx) != owner {
+		return nil, nil
 	}
-	return nil, nil
+	ended := live // the grants in force, by skill, with the rules the engine took
+	for _, name := range granted { // the sources the grants were made under
+		engine.Revoke(ctx, name)
+	}
+	live = nil
+	if len(ended) == 0 {
+		return nil, nil
+	}
+	// "The tools these skills granted ended with the user's new message:
+	// sysinfo (bash(uptime:*)). ... read the skill again with the skill
+	// tool, even if its instructions are already above."
+	return openresponses.Items{openresponses.DeveloperText(grantsEndedNote(ended))}, nil
 }
 
 // newUserMessage: the transcript's tail, back to the last item the model
@@ -622,7 +726,10 @@ newUserMessage := func(tr agentturn.Transcript) bool {
 ```
 
 This is `WithSkillGrantScope`, and `kit.RevokeSkillGrants(ctx)` is the
-loop in it. It runs on every turn, not only the first: a follow-up
+loop in it. The note is a fact on the transcript, so the record holds
+it: a model with the skill's text above from the message before goes
+straight to the tool, and without it the call is refused as an
+ordinary ask with no word of the grant that ended. It runs on every turn, not only the first: a follow-up
 continues the run it joins and a steer arrives between turns, and
 either is a new message that must end the last request's grant. A
 `Resume`'s first turn ends with the answered calls' outputs, so an
@@ -631,7 +738,7 @@ belong to revokes nothing, since nothing was granted there.
 
 ## What the kit does that no line here covers
 
-Eight things, all outside `agentturn.Config`:
+Nine things, all outside `agentturn.Config`:
 
 - `Kit.Attach(agent)` is `rec.Attach(agent)`, and returns the same
   unsubscribe. It cannot be a config field because the recorder
@@ -681,21 +788,47 @@ Eight things, all outside `agentturn.Config`:
   guarded render, which the recorder asks about for a run's first
   config entry. Never the layers' own render: that is text a guard kept
   from the model.
-- `Kit.AgentOptions()` is `session.AgentOptions(sess)`, read in `New`:
-  the transcript at the leaf and the calls pending there, for
-  `agentturn.New`.
+- `Kit.AgentOptions()` is `session.AgentOptions(sess, rec.ReadOptions()...)`,
+  read in `New`: the transcript at the leaf, `session.Transcript`, with
+  the items the filter kept from the model put back; the model each
+  reasoning item came from, `agentturn.WithReasoningModels`; and the
+  calls pending there, read through a fork's origin, for
+  `agentturn.New`. `Kit.Transcript()` is `session.Transcript(sess)`.
 - `Kit.LookupTool(name)` reads the union the provider last returned,
   and is what the kit's engine is given through `agentpolicy.WithTools`.
 - `WithSkillGrants`' grants belong to one conversation, since
   `GrantSet` adds a rule set the engine applies to every decision: the
   session the kit opened or was given, or, for a kit with none, the
-  conversation of the first grant, named by
-  `recorderFor(ctx).SessionID()`. A read in any other conversation is
-  not granted and is reported with `agentkit.ErrSkillGrantConversation`,
-  and `grantGuard` above revokes every grant, in the owner's session,
-  the first time a call is decided elsewhere, after which the kit grants
-  nothing. A front that grants skills to many conversations gives each
-  its own kit.
+  conversation of the first grant. A run's conversation is:
+
+  ```go
+  conversation := func(ctx context.Context) string {
+  	if r := agentkit.RecorderFromContext(ctx); r != nil {
+  		return r.SessionID()
+  	}
+  	if sid := session.SessionIDFromContext(ctx); sid != "" {
+  		if c, ok := childOf[sid]; ok { // a child of a run the kit served: childContext
+  			return c
+  		}
+  		if rec == nil || opened && sid != rec.SessionID() { // not under WithRecorder
+  			return sid
+  		}
+  	}
+  	if rec != nil {
+  		return rec.SessionID()
+  	}
+  	return ""
+  }
+  ```
+
+  so a front that names its conversations with
+  `session.ContextWithSessionID` alone is several conversations, not
+  one. A read in any other conversation is not granted and is reported
+  with `agentkit.ErrSkillGrantConversation`, and `grantGuard` above
+  revokes every grant, in the owner's session, the first time a call is
+  decided elsewhere, records why and reports it, after which the kit
+  grants nothing. A front that grants skills to many conversations
+  gives each its own kit.
 - With `WithSkillGrants` and a session `New` opened, `New` grants
   again what the session's journal left in force, and
   `Kit.RegrantSkills(ctx, sess)` does the same for a session a front
@@ -707,13 +840,22 @@ Eight things, all outside `agentturn.Config`:
   none, an untrusted skill's or one whose rules were all refused,
   whether the scope or `Kit.RevokeSkillGrants` revoked it. A record
   whose name the catalogue now gives a skill at another `Location` is
-  passed over, and so is one whose `SHA256` is not what `cat.Tool()`
-  serves for the name now. What is granted again is the rules the
-  `granted <rule> by <source>` verdicts written just before the read's
-  record name, among the rules `agentskill.Skill.Rules()` gives now, so a
-  restart may narrow a grant and never widens one, nor trusts a read the
-  engine withheld; under `WithEngine` the kit records no verdict, and the
-  catalogue's rules are granted as they stand. The replay's `GrantSet`
+  passed over, and so is one whose `SHA256` is not the digest of
+  `agentskill.Skill.Instructions()` now, or whose `FrontmatterSHA256` is
+  not `Skill.FrontmatterSHA256()`. What is granted again is the rules
+  the `granted <rule> by <source>` verdicts written just before the
+  read's record name. When the record carries the frontmatter's digest,
+  the skill's `allowed-tools` are as they were, so those rules are
+  granted as the engine recorded them, after `agentpolicy.WithAliases`
+  expanded them, each whose specifier one of the skill's rules has;
+  otherwise only those spelled as `agentskill.Skill.Rules()` spells
+  them, which under an alias is none, and the report says so. A grant
+  the engine took wider than recorded is revoked. So a restart may
+  narrow a grant and never widens one, nor trusts a read the engine
+  withheld; under `WithEngine` the kit records no verdict, and the
+  catalogue's rules are granted as they stand. The default source names
+  `Skill.FrontmatterSHA256()` as its `Hash`, so every verdict about a
+  grant says what it was built from. The replay's `GrantSet`
   runs under a context the kit's observer passes over, so it records no
   verdict, the ones it repeats being on the path already, and
   `WithSkillGrantReport` is told with `SkillGrant.Replayed` set. Under
@@ -727,6 +869,15 @@ Eight things, all outside `agentturn.Config`:
   flight may be journaled before the read's record, which the replay
   then grants. Without the scope, a product that needs either ruled out
   revokes after the restart.
+
+- `Kit.ReloadSkills(ctx)` discovers the skills again over the same
+  sources and puts the new catalogue behind the skill tool (`currentCat`
+  above) and its part in place of the old, guarded as `New` guarded the
+  first. It sets the next `Config()`'s `Instructions`; a config already
+  handed out keeps its own, which `partsFor` still recognises, and its
+  agent takes the new one with `SetConfig` between runs, unless the
+  instructions hook re-renders each request, under `WithMemory` or
+  `WithGuards`.
 
 None of them changes a field of the config, so none can make the manual
 path a different path.

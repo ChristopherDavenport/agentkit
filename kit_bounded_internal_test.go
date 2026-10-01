@@ -50,7 +50,7 @@ func TestTwoConversationsCallsOfOneIDKeepTheirOwnBase(t *testing.T) {
 	for _, conv := range []string{"conv-a", "conv-b"} {
 		ctx := session.ContextWithSessionID(agentturn.ContextWithRunID(t.Context(), "run-"+conv), conv)
 		k.mu.Lock()
-		k.rendered.put("run-"+conv, agentmemory.Manifest{Entries: []agentmemory.ManifestEntry{{Scope: "user", Name: conv}}})
+		k.rendered.put("run-"+conv, memoryRender{man: agentmemory.Manifest{Entries: []agentmemory.ManifestEntry{{Scope: "user", Name: conv}}}})
 		k.mu.Unlock()
 		call := &openresponses.FunctionCall{Name: agentmemory.SaveTool, CallID: "call_0"}
 		if _, err := k.keepSaveBase(ctx, agentturn.ToolCallInfo{RunID: "run-" + conv, Call: call}); err != nil {

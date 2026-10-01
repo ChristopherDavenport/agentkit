@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -79,13 +80,16 @@ type Kit struct {
 	origins []ToolOrigin
 
 	engine  *agentpolicy.Engine
-	catalog *agentskill.Catalog
 	grants  *skillGrants
 	rec     *session.Recorder
 	sess    *agentsession.Session
 	seed    agentturn.Transcript
 	seedOps []agentturn.Option
-	remotes []*mcpclient.Remote
+	// failedFold is session.CompactOptions of the session New opened:
+	// the last fold on its path that failed, which the fold backs off
+	// from.
+	failedFold []compact.Option
+	remotes    []*mcpclient.Remote
 
 	// tools is the union the config's ToolProvider reads, which a server
 	// AddMCP connects joins; nil when the kit has no tool source.
@@ -119,22 +123,41 @@ type Kit struct {
 	// the batch hold before the loop hands it their calls.
 	union atomic.Pointer[map[string]agenttool.Tool]
 
-	// mu guards the parts, the memory manifest and the memory
+	// mu guards the skill catalogue and its tool, which ReloadSkills
+	// replaces, and the parts, the memory manifest and the memory
 	// omissions, which the per-turn hook replaces. base is the parts as
 	// the layers rendered them; parts is what the last request was sent,
 	// base with each part as the guards left it; first is the parts of
 	// the configuration's own instructions, as the guards left New's
 	// render, which never changes. They are the same slice until a
 	// guard runs or memory re-renders.
-	mu    sync.Mutex
-	base  []Part
-	parts []Part
-	first []Part
+	mu        sync.Mutex
+	catalog   *agentskill.Catalog
+	skillTool agenttool.Tool
+	base      []Part
+	parts     []Part
+	first     []Part
+	// earlier are the firsts of the configs Kit.Config returned before a
+	// ReloadSkills, newest first, which an agent not yet handed the new
+	// config still starts its runs with.
+	earlier [][]Part
+	// reload re-discovers the skills for ReloadSkills, over the sources
+	// New was given; nil without skills.
+	reload func() (*agentskill.Catalog, Part, []Omission, error)
+	// skillToolOpts, budget and guards are WithSkillTool's options,
+	// WithInstructionBudget and the input guards, which ReloadSkills
+	// builds and checks the new catalogue's tool and part with.
+	skillToolOpts []agentskill.ToolOption
+	budget        int64
+	guards        []guard.Guard
 	// firstOmitted is the memory omissions of New's render, which go
 	// with first.
 	firstOmitted []Omission
 	manifest     agentmemory.Manifest
 	memOmitted   []Omission
+	// memDropped is true when the last render's block was dropped by the
+	// budget, which withholds the memory writes; see memoryPart.
+	memDropped bool
 	// rendered is each run's last render, keyed by the run's ID, which is
 	// what memory_save is based on for a call in that run: the block its
 	// model composed from, not whichever run rendered last. saveBase is
@@ -143,7 +166,7 @@ type Kit struct {
 	// so a save held for approval, by any engine or hook, and run by a
 	// Resume, a run of its own that has not rendered, is still based on
 	// it.
-	rendered bounded[agentmemory.Manifest]
+	rendered bounded[memoryRender]
 	saveBase bounded[agentmemory.Manifest]
 
 	// recmu guards recorded, the manifest last written to each session
@@ -160,6 +183,17 @@ type Kit struct {
 	// block Kit.Parts on a front's own thread.
 	recmu    sync.Mutex
 	recorded map[string]recordedManifest
+	// folds is the manifest records of each session's path folded as far
+	// as the kit has read it, keyed by session ID like recorded and
+	// guarded by recmu; see Kit.foldPath.
+	folds map[string]*manifestFold
+}
+
+// memoryRender is one run's last render of the memory block: what it
+// put in the block, and whether the budget dropped the block.
+type memoryRender struct {
+	man     agentmemory.Manifest
+	dropped bool
 }
 
 // recordedManifest is a manifest the kit wrote to a session, or found in
@@ -381,6 +415,13 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 	}
 
 	if len(s.skillDirs)+len(s.skillSources) > 0 {
+		k.reload = func() (*agentskill.Catalog, Part, []Omission, error) {
+			cat, part, om, err := skillPart(s, offersSkillTool(s))
+			if err == nil && cat != nil && s.skillGrants {
+				om = append(om, skillRuleProblems(cat)...)
+			}
+			return cat, part, om, err
+		}
 		cat, part, om, err := skillPart(s, offersSkillTool(s))
 		if err != nil {
 			return err
@@ -439,12 +480,12 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 		}
 	}
 	if s.memStore != nil {
-		group, man, om, err := memoryPart(ctx, s, share(s.budget, avail))
+		group, man, om, dropped, err := memoryPart(ctx, s, share(s.budget, avail))
 		if err != nil {
 			return err
 		}
 		parts[PartMemory] = group
-		k.manifest = man
+		k.manifest, k.memDropped = man, dropped
 		k.memOmitted, k.firstOmitted = om, om
 	}
 
@@ -464,6 +505,7 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 		text = agentsession.JoinInstructions(sent)
 	}
 	k.base, k.parts, k.first, k.order = kept, sent, sent, order
+	k.skillToolOpts, k.budget, k.guards = s.skillToolOpt, s.budget, s.guards
 	k.cfg.Instructions = text
 	return nil
 }
@@ -667,17 +709,23 @@ func (k *Kit) openSession(ctx context.Context, s *settings) error {
 	}
 	k.rec, k.sess, k.ownRec = rec, sess, true
 
-	// The items in force at the leaf, and the calls pending there, are
-	// what an agent continuing this conversation must be seeded with.
-	// Reading them can fail, and New is where the failures are
-	// reported, so they are read here and not in the accessors.
-	sctx, err := sess.Context()
-	if err != nil {
+	// The items in force at the leaf, with the ones the filter kept from
+	// the model put back, which model each reasoning item came from, and
+	// the calls pending there, are what an agent continuing this
+	// conversation must be seeded with. Reading them can fail, and New is
+	// where the failures are reported, so they are read here and not in
+	// the accessors. The recorder's read options read a fork's origin, so
+	// a call the fork's prefix holds is read with its dispatch there.
+	if k.seed, err = session.Transcript(sess); err != nil {
 		return fmt.Errorf("agentkit: reading the session's context: %w", err)
 	}
-	k.seed = sctx.Items
-	if k.seedOps, err = session.AgentOptions(sess); err != nil {
+	if k.seedOps, err = session.AgentOptions(sess, rec.ReadOptions()...); err != nil {
 		return fmt.Errorf("agentkit: reading the session's pending calls: %w", err)
+	}
+	if s.compactSet {
+		if k.failedFold, err = session.CompactOptions(sess); err != nil {
+			return fmt.Errorf("agentkit: reading the session's last failed fold: %w", err)
+		}
 	}
 	return nil
 }
@@ -739,10 +787,19 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 		}
 	}
 	if k.catalog != nil && offersSkillTool(s) {
-		src := source{name: "WithSkills", tools: []agenttool.Tool{k.catalog.Tool(s.skillToolOpt...)}}
+		// The catalogue's tool as it stands, which ReloadSkills replaces,
+		// behind the one New built, which keeps its name and properties.
+		k.skillTool = k.catalog.Tool(s.skillToolOpt...)
+		tool := agenttool.Wrap(k.skillTool, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+			k.mu.Lock()
+			t := k.skillTool
+			k.mu.Unlock()
+			return t.Execute(ctx, call)
+		})
+		src := source{name: "WithSkills", tools: []agenttool.Tool{tool}}
 		if s.skillGrants && k.engine != nil {
 			k.grants = &skillGrants{
-				cat:    k.catalog,
+				cat:    k.Catalog,
 				engine: k.engine,
 				source: s.skillSource,
 				report: s.skillGrant,
@@ -846,8 +903,33 @@ func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
 		if t.Name() == agentmemory.SaveTool {
 			tools[i] = k.saveAsRendered(t, based)
 		}
+		if memoryWrites[t.Name()] {
+			tools[i] = k.refuseWhenDropped(tools[i])
+		}
 	}
 	return tools, nil
+}
+
+// refuseWhenDropped refuses a memory write in a run whose last render
+// the budget dropped, or, outside any run, when the last render was
+// dropped. The request did not offer the tool, so only a model that
+// calls it anyway, or a run that never rendered, reaches this; a run
+// with no render of its own, a Resume running a held call, is let
+// through to the base saveAsRendered finds.
+func (k *Kit) refuseWhenDropped(t agenttool.Tool) agenttool.Tool {
+	return agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+		k.mu.Lock()
+		dropped := k.memDropped
+		if run := agentturn.RunIDFromContext(ctx); run != "" {
+			r, ok := k.rendered.get(run)
+			dropped = ok && r.dropped
+		}
+		k.mu.Unlock()
+		if dropped {
+			return agenttool.Result{}, errMemoryDropped
+		}
+		return t.Execute(ctx, call)
+	})
 }
 
 // saveAsRendered runs a memory_save call against a memory_save based on
@@ -877,7 +959,9 @@ func (k *Kit) saveAsRendered(t agenttool.Tool, based func(func() agentmemory.Man
 		if ok {
 			k.saveBase.delete(key)
 		} else {
-			man, ok = k.rendered.get(run)
+			var r memoryRender
+			r, ok = k.rendered.get(run)
+			man = r.man
 		}
 		k.mu.Unlock()
 		if !ok {
@@ -904,10 +988,11 @@ func (k *Kit) saveAsRendered(t agenttool.Tool, based func(func() agentmemory.Man
 // model is told to look at the entry again.
 var errSaveBase = errors.New("the memory block this save was composed from is no longer known, so the save could overwrite a change you have not seen; search for the entry with " + agentmemory.SearchTool + " and save again")
 
-// manifestAtCall is the manifest in force on the path of the run's
-// session at the memory_save call callID, folded from the path's
-// manifest records, and false when the run has no session the kit can
-// read, the call is not on its path, or no whole manifest precedes it.
+// manifestAtCall is the manifest the model was shown when it made the
+// memory_save call callID, folded from the manifest records on the path
+// of the run's session, and false when the run has no session the kit
+// can read, the call is not on its path, or the path cannot say which
+// render was the call's run's; see [foldAtCall].
 func (k *Kit) manifestAtCall(ctx context.Context, callID string) (agentmemory.Manifest, bool) {
 	rec := k.recorderFor(ctx)
 	if rec == nil || callID == "" {
@@ -917,36 +1002,128 @@ func (k *Kit) manifestAtCall(ctx context.Context, callID string) (agentmemory.Ma
 	if sess == nil {
 		return agentmemory.Manifest{}, false
 	}
-	return foldManifests(sess.Path(sess.Leaf()), callID)
+	return foldAtCall(sess.Path(sess.Leaf()), callID)
 }
 
-// foldManifests folds the manifest records on path, up to the function
-// call callID when it is not "", and returns what is in force there:
-// false when there is no record, the last one does not fold onto what
-// came before, or callID is not on the path.
-func foldManifests(path []agentsession.Entry, callID string) (agentmemory.Manifest, bool) {
+// foldAtCall folds the manifest records on path up to the function call
+// callID and returns what was in force there, for the run that made the
+// call. It is false when no record folds there or callID is not on the
+// path, and when the render in force may be another run's: another run
+// was open at the call, or one started after the call's run did and
+// before the call, so a record between the two may be that run's. Each
+// run's renders are recorded inside it, so with neither, every record
+// since the call's run started is that run's, and the last is the block
+// its model composed the call from. A path with no run entries is read
+// as one run.
+func foldAtCall(path []agentsession.Entry, callID string) (agentmemory.Manifest, bool) {
 	var (
-		man   agentmemory.Manifest
-		valid bool
+		f     manifestFold
+		open  = map[string]bool{}
+		mixed bool
 	)
 	for _, e := range path {
 		switch e := e.(type) {
 		case *agentsession.CustomEntry:
-			if e.NS != agentmemory.ManifestNS {
-				continue
+			if e.NS == agentmemory.ManifestNS {
+				f.apply(e)
 			}
-			next, err := agentmemory.ApplyManifestRecord(man, e.Data)
-			man, valid = next, err == nil
+		case *agentsession.RunEntry:
+			switch {
+			case e.IsStart():
+				// A run starting while another is open interleaves with it;
+				// one starting after the others ended begins a new window.
+				mixed = len(open) > 0
+				open[e.RunID] = true
+			case e.IsEnd():
+				delete(open, e.RunID)
+			}
 		case *agentsession.ItemEntry:
-			if callID == "" {
-				continue
-			}
 			if fc, ok := e.Item.(*openresponses.FunctionCall); ok && fc.CallID == callID {
-				return man, valid
+				if mixed || len(open) > 1 {
+					return agentmemory.Manifest{}, false
+				}
+				return f.fold.Manifest(), f.at != "" && f.valid
 			}
 		}
 	}
-	return man, valid && callID == ""
+	return agentmemory.Manifest{}, false
+}
+
+// manifestFold is the memory manifest records of a session's path folded
+// with [agentmemory.ManifestFold], which resolves a delta on any of the
+// last [agentmemory.ManifestFoldDepth] manifests in force, as far as the
+// record at.
+type manifestFold struct {
+	fold agentmemory.ManifestFold
+	// at is the ID of the last record folded, "" before any.
+	at string
+	// valid is false while the last record would not fold, so what is in
+	// force is not known.
+	valid bool
+	// recent are the hashes of the distinct manifests in force, most
+	// recent first, as the fold holds them: the bases a delta may name.
+	recent []string
+}
+
+// apply folds the manifest record e.
+func (f *manifestFold) apply(e *agentsession.CustomEntry) {
+	f.at = e.ID
+	if f.fold.Apply(e.Data) != nil {
+		f.valid = false
+		return
+	}
+	f.valid = true
+	h := f.fold.Manifest().Hash()
+	f.recent = slices.DeleteFunc(f.recent, func(r string) bool { return r == h })
+	f.recent = slices.Insert(f.recent, 0, h)
+	if len(f.recent) > agentmemory.ManifestFoldDepth {
+		f.recent = f.recent[:agentmemory.ManifestFoldDepth]
+	}
+}
+
+// inForce is the hash of the manifest in force, and false when nothing
+// is known to be.
+func (f *manifestFold) inForce() (string, bool) {
+	if f.at == "" || !f.valid || len(f.recent) == 0 {
+		return "", false
+	}
+	return f.recent[0], true
+}
+
+// foldPath brings the fold kept for session sid up to path's end and
+// returns it. A fold is kept per session, so a turn folds only the
+// records written since the turn before, not every record from the
+// root: in a handoff the path's last record is the other kit's at every
+// turn, and folding from the root, whole hand-back records among them,
+// cost more with every hand-back. When the record the fold reached is
+// no longer on the path, after a Rebase, the path is folded from the
+// root again. The caller holds recmu.
+func (k *Kit) foldPath(sid string, path []agentsession.Entry) *manifestFold {
+	f := k.folds[sid]
+	from := -1
+	if f != nil {
+		if f.at == "" {
+			from = 0
+		}
+		for i := len(path) - 1; i >= 0 && from < 0; i-- {
+			if c, ok := path[i].(*agentsession.CustomEntry); ok && c.NS == agentmemory.ManifestNS && c.ID == f.at {
+				from = i + 1
+			}
+		}
+	}
+	if from < 0 {
+		f, from = &manifestFold{}, 0
+		if k.folds == nil || len(k.folds) >= recordedSessions {
+			k.folds = map[string]*manifestFold{}
+		}
+		k.folds[sid] = f
+	}
+	for _, e := range path[from:] {
+		if c, ok := e.(*agentsession.CustomEntry); ok && c.NS == agentmemory.ManifestNS {
+			f.apply(c)
+		}
+	}
+	return f
 }
 
 // buildHooks fills the contested fields, in the order the package
@@ -1030,7 +1207,18 @@ func (k *Kit) buildHooks(s *settings) {
 		// a provider that requires it. compact.WithOnFold adds a callback,
 		// so the kit's goes first and a fold is recorded before a
 		// compact.WithOnFold of the product's hears of it.
-		opts := append([]compact.Option{compact.WithModel(s.modelName), compact.WithOnFold(k.onFold(s))}, s.compactOpts...)
+		opts := []compact.Option{compact.WithModel(s.modelName), compact.WithOnFold(k.onFold(s))}
+		// The summary is asked under the agent's reasoning, as every
+		// other request is: a thinking model left at its server's default
+		// reasons through the summary's token cap and answers no text.
+		// compact.WithRequest is one field, so the product's replaces it.
+		if r := s.summaryReasoning(); !r.IsZero() {
+			opts = append(opts, compact.WithRequest(func(req *openresponses.Request) { req.Reasoning = r }))
+		}
+		// A resumed session's last failed fold, after the product's
+		// options, so a restart does not ask again for the summary that
+		// failed before it.
+		opts = append(append(opts, s.compactOpts...), k.failedFold...)
 		var t *compact.Transform
 		if s.compactor != nil {
 			t = compact.New(s.compactor, opts...)
@@ -1096,34 +1284,34 @@ func chain1[T any](fns []T, chain func(...T) T) T {
 func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context, *openresponses.Request) error {
 	return func(ctx context.Context, req *openresponses.Request) error {
 		k.mu.Lock()
-		base, first := k.base, k.first
+		base, ours := k.base, k.ownInstructions(req.Instructions)
 		k.mu.Unlock()
 
-		// Without memory the parts never change, so a request whose
-		// instructions are neither the configuration's nor the layers'
-		// join is one a product rewrote, through Agent.SetConfig or a
-		// hook of its own, and the guards see it whole, after this, as
-		// they would without the kit.
-		if s.memStore == nil && req.Instructions != agentsession.JoinInstructions(first) &&
-			req.Instructions != agentsession.JoinInstructions(base) {
+		// Without memory the parts change only on a ReloadSkills, so a
+		// request whose instructions are neither a configuration's the kit
+		// returned nor the layers' join is one a product rewrote, through
+		// Agent.SetConfig or a hook of its own, and the guards see it
+		// whole, after this, as they would without the kit.
+		if s.memStore == nil && !ours && req.Instructions != agentsession.JoinInstructions(base) {
 			return nil
 		}
 
 		var (
-			man    agentmemory.Manifest
-			memOm  []Omission
-			render = s.memStore != nil
+			man     agentmemory.Manifest
+			memOm   []Omission
+			dropped bool
+			render  = s.memStore != nil
 		)
 		if render {
 			// The same render, the same bound and the same drop as the
 			// first one, so the block cannot grow past the budget
 			// between turns and cannot come back at its floor after the
 			// budget dropped it.
-			group, m, om, err := memoryPart(ctx, s, k.memoryShare(s))
+			group, m, om, drop, err := memoryPart(ctx, s, k.memoryShare(s))
 			if err != nil {
 				return err
 			}
-			base, man, memOm = withGroup(base, PartMemory, group, k.order), m, om
+			base, man, memOm, dropped = withGroup(base, PartMemory, group, k.order), m, om, drop
 			// Recorded before the guards run: the manifest says what the
 			// render put in the block, which a guard that blocks the
 			// request does not change.
@@ -1143,14 +1331,19 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 		k.mu.Lock()
 		k.base, k.parts = base, sent
 		if render {
-			k.manifest, k.memOmitted = man, memOm
+			k.manifest, k.memOmitted, k.memDropped = man, memOm, dropped
 			if id := agentturn.RunIDFromContext(ctx); id != "" {
-				k.rendered.put(id, man)
+				k.rendered.put(id, memoryRender{man: man, dropped: dropped})
 			}
 		}
 		k.mu.Unlock()
 
 		req.Instructions = agentsession.JoinInstructions(sent)
+		if dropped {
+			// No block and no word on the tools, so no tool that writes
+			// over what the block would have shown.
+			req.Tools = withoutMemoryWrites(req.Tools)
+		}
 		return nil
 	}
 }
@@ -1219,17 +1412,19 @@ func guardParts(ctx context.Context, c guard.Chain, parts []Part) ([]Part, error
 // The path is read through the recorder's store, [session.Recorder.Store],
 // whose Open hands back the live session it holds, so any recorder's
 // session is read the same way: the one New opened, one on the context,
-// [ContextWithRecorder], a child's. What is in force is the kit's own
-// last record when that is still last on the path, and otherwise the
-// fold of the path's records, which is what another kit of a handoff, a
-// Rebase or a restart left. A render that hashes as what is in force is
-// not written; any other is written as a delta on it,
-// [agentmemory.Manifest.RecordSince], so a write to one entry of a large
-// memory records that entry, and whole only when nothing folds there.
-// When the store cannot open the session the write is whole, and is
-// skipped only while the render has not moved and the last manifest any
-// kit in the process wrote to that session through that recorder is this
-// kit's.
+// [ContextWithRecorder], a child's. What is in force is the fold of the
+// path's records with [agentmemory.ManifestFold], kept per session and
+// brought up to date each turn from the record it reached, so a turn
+// reads only the records written since the last. A render that hashes as
+// what is in force is not written; any other is written as a delta,
+// [agentmemory.Manifest.RecordSince], on what is in force or, when that
+// is smaller, on this kit's own last manifest while the fold still
+// resolves it: after a handoff the manifest in force is the other kit's,
+// and a delta on it would be the whole manifest. Whole only when nothing
+// folds there. When the store cannot open the session the write is
+// whole, and is skipped only while the render has not moved and the last
+// manifest any kit in the process wrote to that session through that
+// recorder is this kit's.
 //
 // The comparison, the write and the remembering are one critical
 // section. Two turns that rendered different manifests must not write
@@ -1249,22 +1444,15 @@ func (k *Kit) record(ctx context.Context, man agentmemory.Manifest) error {
 	defer k.recmu.Unlock()
 	prev, seen := k.recorded[sid]
 	var (
-		inForce agentmemory.Manifest
-		folds   bool
+		f     *manifestFold
+		folds bool
 	)
 	sess := k.sessionOf(ctx, rec, sid)
 	if sess != nil {
-		path := sess.Path(sess.Leaf())
-		last := lastManifest(path)
-		switch {
-		case last == "":
-		case seen && last == prev.entry:
-			inForce, folds = prev.man, true
-		default:
-			inForce, folds = foldManifests(path, "")
-		}
-		if folds && inForce.Hash() == hash {
-			k.rememberManifest(sid, recordedManifest{man: man, entry: last})
+		f = k.foldPath(sid, sess.Path(sess.Leaf()))
+		var inForce string
+		if inForce, folds = f.inForce(); folds && inForce == hash {
+			k.rememberManifest(sid, recordedManifest{man: man, entry: f.at})
 			return nil
 		}
 	} else if seen && hash == prev.man.Hash() && lastWritten.get(rec, sid) == prev.entry {
@@ -1272,7 +1460,16 @@ func (k *Kit) record(ctx context.Context, man agentmemory.Manifest) error {
 	}
 	ns, data := man.Record()
 	if folds {
-		ns, data = man.RecordSince(inForce)
+		ns, data = man.RecordSince(f.fold.Manifest())
+		// In a handoff the manifest in force is the other kit's, which
+		// shares nothing with this one, so a delta on it is the whole
+		// manifest. This kit's own last one is a base the fold still
+		// resolves while it is among the last few in force.
+		if ph := prev.man.Hash(); seen && ph != f.recent[0] && slices.Contains(f.recent, ph) {
+			if ns2, own := man.RecordSince(prev.man); len(own) < len(data) {
+				ns, data = ns2, own
+			}
+		}
 	}
 	entry, err := rec.Annotate(ctx, ns, json.RawMessage(data))
 	if err != nil {
@@ -1290,17 +1487,6 @@ func (k *Kit) rememberManifest(sid string, r recordedManifest) {
 		k.recorded = map[string]recordedManifest{}
 	}
 	k.recorded[sid] = r
-}
-
-// lastManifest returns the ID of the last memory manifest record on
-// path, "" for none.
-func lastManifest(path []agentsession.Entry) string {
-	for i := len(path) - 1; i >= 0; i-- {
-		if c, ok := path[i].(*agentsession.CustomEntry); ok && c.NS == agentmemory.ManifestNS {
-			return c.ID
-		}
-	}
-	return ""
 }
 
 // runSessionID is the session a run on ctx writes through rec: the
@@ -1414,7 +1600,9 @@ type recorderKey struct{}
 //
 // Two things a kit serves stay the kit's and do not follow the
 // conversation: a skill grant, which is a rule set on the kit's one
-// engine and belongs to one conversation, [ErrSkillGrantConversation];
+// engine and belongs to one conversation, [ErrSkillGrantConversation],
+// which is named by this recorder, or by session.ContextWithSessionID
+// where there is none;
 // and an MCP server's connection, dialed once at New, whose identity
 // every conversation shares, [WithMCP]. A front that needs either per
 // conversation or per user gives each its own kit.
@@ -1433,14 +1621,40 @@ func RecorderFromContext(ctx context.Context) *session.Recorder {
 }
 
 // conversation names the conversation a run on ctx belongs to, for the
-// skill grants: the session its recorder writes, [Kit.recorderFor], or
-// "" for a run recorded nowhere.
+// skill grants: the session of the recorder on the context; else the
+// session the context names, session.ContextWithSessionID, unless it is
+// a child's of a run the kit served, which is that run's conversation,
+// or the kit's own session, or the kit records into a recorder another
+// owns, [WithRecorder], every session of which is one conversation;
+// else the kit's own session, or "" for a run recorded nowhere. A front
+// that records each conversation itself and names it on the context,
+// as agentturn/front/a2a's WithRecorderFor example does, is several
+// conversations to the kit, not one.
 func (k *Kit) conversation(ctx context.Context) string {
-	if rec := k.recorderFor(ctx); rec != nil {
+	if rec := RecorderFromContext(ctx); rec != nil {
 		return rec.SessionID()
+	}
+	if sid := session.SessionIDFromContext(ctx); sid != "" {
+		if c, ok := ctx.Value(childConvKey{}).(childConv); ok && c.sid == sid {
+			return c.conv
+		}
+		if k.rec == nil || k.ownRec && sid != k.rec.SessionID() {
+			return sid
+		}
+	}
+	if k.rec != nil {
+		return k.rec.SessionID()
 	}
 	return ""
 }
+
+// childConvKey is the context key of a childConv.
+type childConvKey struct{}
+
+// childConv is what Kit.childContext puts on a child run's context: the
+// child's session, sid, belongs to the conversation conv of the run
+// that called it.
+type childConv struct{ sid, conv string }
 
 // recorderFor is the recorder a run on ctx records into: the one on the
 // context, or the kit's own, or nil.
@@ -1495,8 +1709,8 @@ func (k *Kit) keepSaveBase(ctx context.Context, info agentturn.ToolCallInfo) (*a
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if man, ok := k.rendered.get(run); ok {
-		k.saveBase.put(saveKey(ctx, info.Call.CallID), man)
+	if r, ok := k.rendered.get(run); ok {
+		k.saveBase.put(saveKey(ctx, info.Call.CallID), r.man)
 	}
 	return nil, nil
 }
@@ -1525,11 +1739,43 @@ func saveKey(ctx context.Context, callID string) string {
 // turn has the answered calls' outputs last, and every other turn the
 // model's own output, so an approval and the task it continues keep the
 // grant.
+//
+// When the revocation ended a grant in force, the turn is given a
+// developer note naming the skills and their rules and saying that a
+// read of the skill restores them. A model that has the skill's text in
+// its transcript from the message before goes straight to the tool, and
+// without the note its call is refused as an ordinary ask with no word
+// of the grant that ended.
 func (k *Kit) revokeOnUserMessage(ctx context.Context, info agentturn.TurnStartInfo) (openresponses.Items, error) {
-	if newUserMessage(info.Transcript) && k.grants.owns(ctx) {
-		k.RevokeSkillGrants(ctx)
+	if !newUserMessage(info.Transcript) || !k.grants.owns(ctx) {
+		return nil, nil
+	}
+	if _, ended := k.grants.revokeLive(ctx); len(ended) > 0 {
+		return openresponses.Items{openresponses.DeveloperText(grantsEndedNote(ended))}, nil
 	}
 	return nil, nil
+}
+
+// grantsEndedNote is the developer note the scope gives the model when a
+// user message ends skill grants in force.
+func grantsEndedNote(ended []liveGrant) string {
+	var b strings.Builder
+	b.WriteString("The tools these skills granted ended with the user's new message: ")
+	for i, lg := range ended {
+		if i > 0 {
+			b.WriteString("; ")
+		}
+		b.WriteString(lg.skill + " (")
+		for j, r := range lg.rules {
+			if j > 0 {
+				b.WriteString(" ")
+			}
+			b.WriteString(r.String())
+		}
+		b.WriteString(")")
+	}
+	b.WriteString(". A call they allowed now needs approval. To use them without it, read the skill again with the " + agentskill.ToolName + " tool, even if its instructions are already above.")
+	return b.String()
 }
 
 // newUserMessage reports whether the tail of tr, the items after the
@@ -1603,7 +1849,11 @@ func insertByOrder(parts []Part, id string, g []Part, order []string) []Part {
 // [agentturn.Config]: every field a product could have set by hand,
 // with the same values, by calling the same exported functions. It is
 // pure and may be called once per run.
-func (k *Kit) Config() agentturn.Config { return k.cfg }
+func (k *Kit) Config() agentturn.Config {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.cfg
+}
 
 // Parts are the instructions as named parts, in the order they were
 // joined, as the last request was sent them: after the memory block
@@ -1659,7 +1909,7 @@ func (k *Kit) PartsFor(_ context.Context, req openresponses.Request) ([]agentses
 		// settles at a run's start before any hook has run, are New's
 		// render as the guards left it. Never the layers' unguarded
 		// render: that is text a guard kept from the model.
-		if parts = k.first; agentsession.JoinInstructions(parts) != req.Instructions {
+		if parts = k.firstFor(req.Instructions); parts == nil {
 			k.mu.Unlock()
 			return nil, nil
 		}
@@ -1802,7 +2052,10 @@ func (k *Kit) Tools() []ToolOrigin {
 // session it resumes, and binds the kit's grants to sess. It is for a
 // front that resumes a conversation itself, with session.Resume under
 // [ContextWithRecorder], so a call held before a restart is approved
-// with the tools its task had. The grants are made silently and
+// with the tools its task had. ctx carries that conversation's
+// recorder, ContextWithRecorder, which is where a later revocation of
+// the grants is written; without one it is written to the kit's own
+// recorder when that writes sess, and otherwise nowhere. The grants are made silently and
 // reported with [SkillGrant.Replayed] set. It refuses, with
 // [ErrSkillGrantConversation], a kit whose grants already belong to
 // another session, and does nothing without skill grants.
@@ -1815,7 +2068,11 @@ func (k *Kit) RegrantSkills(ctx context.Context, sess *agentsession.Session) err
 	defer g.gmu.Unlock()
 	g.mu.Lock()
 	if !g.bound {
-		g.owner, g.ownerRec, g.bound = sess.ID(), RecorderFromContext(ctx), true
+		rec := RecorderFromContext(ctx)
+		if rec == nil && k.rec != nil && k.rec.SessionID() == sess.ID() {
+			rec = k.rec
+		}
+		g.owner, g.ownerRec, g.bound = sess.ID(), rec, true
 	}
 	ok := !g.shared && g.owner == sess.ID()
 	g.mu.Unlock()
@@ -1839,14 +2096,134 @@ func (k *Kit) RevokeSkillGrants(ctx context.Context) int {
 	return k.grants.revoke(ctx)
 }
 
+// ownInstructions reports whether text is the instructions of a config
+// the kit returned, before or after a ReloadSkills. The caller holds mu.
+func (k *Kit) ownInstructions(text string) bool { return k.firstFor(text) != nil }
+
+// firstFor returns the guarded parts of the config whose instructions
+// are text, the current one's or one before a ReloadSkills, or nil. The
+// caller holds mu.
+func (k *Kit) firstFor(text string) []Part {
+	if agentsession.JoinInstructions(k.first) == text {
+		return k.first
+	}
+	for _, f := range k.earlier {
+		if agentsession.JoinInstructions(f) == text {
+			return f
+		}
+	}
+	return nil
+}
+
+// earlierConfigs bounds the configs before a ReloadSkills whose
+// instructions the kit still recognises.
+const earlierConfigs = 8
+
+// ReloadSkills discovers the skills again, over the directories and
+// sources [New] was given, and puts the catalogue it finds in place of
+// the one in force: a skill written since, by the agent or anyone else,
+// is listed and served, and one removed is not. It is for an agent that
+// writes its own skills and uses one in the conversation it wrote it in.
+//
+// The skill tool serves the new catalogue from the next call, in every
+// run of every config the kit returned. The skills part of the
+// instructions is the new catalogue's, and [Kit.Omitted] its omissions,
+// from the next request of a kit that renders its instructions each
+// request, under [WithMemory] or [WithGuards]; otherwise from the next
+// run of an agent given the new [Kit.Config], with SetConfig between
+// runs, since a config is a value and the loop sends its instructions
+// as they are. Either way the recorder writes the new part as a config
+// delta, and the provider's prefix cache misses from that part on.
+//
+// Grants already made stand, by the rules they were made with. A read
+// after the reload grants by the new catalogue's rules, and a restart's
+// replay passes over a read whose skill has changed since.
+//
+// It returns an error, and changes nothing, when discovery fails, when
+// New found no skill source and so offers no skill tool, and when the
+// new catalogue would take the instructions past [WithInstructionBudget]
+// with the parts the kit cannot bound. It does nothing without skills.
+func (k *Kit) ReloadSkills(ctx context.Context) error {
+	if k.reload == nil {
+		return nil
+	}
+	if k.Catalog() == nil {
+		return errors.New("agentkit: ReloadSkills: New found no skill source, so the kit offers no skill tool; build a new kit")
+	}
+	cat, part, om, err := k.reload()
+	if err != nil {
+		return err
+	}
+	if cat == nil {
+		// Every optional directory has gone: an empty catalogue, so the
+		// tool lists no skill and the part is dropped.
+		if cat, err = agentskill.Discover(); err != nil {
+			return fmt.Errorf("agentkit: discovering skills: %w", err)
+		}
+		part = Part{ID: PartSkills, Source: SourceSkills}
+	}
+	tool := cat.Tool(k.skillToolOpts...)
+
+	k.mu.Lock()
+	base := withGroup(k.base, PartSkills, single(part), k.order)
+	if k.budget > 0 {
+		var fixed int64
+		for i, p := range base {
+			if group(p.ID) == PartMemory {
+				continue
+			}
+			if i > 0 {
+				fixed += int64(len(Separator))
+			}
+			fixed += int64(len(p.Text))
+		}
+		if fixed > k.budget {
+			k.mu.Unlock()
+			return fmt.Errorf("agentkit: ReloadSkills: the instruction budget of %d bytes is under the %d bytes the parts other than memory now take", k.budget, fixed)
+		}
+	}
+	k.mu.Unlock()
+
+	// The new part is guarded as New guarded the first render, with no
+	// observer, outside the lock, since a guard may call a model.
+	sentPart := single(part)
+	if len(k.guards) > 0 && len(sentPart) > 0 {
+		if sentPart, err = guardParts(ctx, guard.Chain{Guards: k.guards}, sentPart); err != nil {
+			return fmt.Errorf("agentkit: an input guard refused the reloaded skills: %w", err)
+		}
+	}
+
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.catalog, k.skillTool = cat, tool
+	k.base = withGroup(k.base, PartSkills, single(part), k.order)
+	k.parts = withGroup(k.parts, PartSkills, sentPart, k.order)
+	first := withGroup(k.first, PartSkills, sentPart, k.order)
+	if agentsession.JoinInstructions(first) != agentsession.JoinInstructions(k.first) {
+		k.earlier = append([][]Part{k.first}, k.earlier...)
+		if len(k.earlier) > earlierConfigs {
+			k.earlier = k.earlier[:earlierConfigs]
+		}
+		k.first = first
+	}
+	k.cfg.Instructions = agentsession.JoinInstructions(k.first)
+	k.omitted = append(slices.DeleteFunc(k.omitted, func(o Omission) bool { return o.Part == PartSkills }), om...)
+	return nil
+}
+
 // Engine is the policy engine, or nil when no policy was configured. A
 // front reads [agentpolicy.Engine.Deferred] and calls
 // [agentpolicy.Engine.Release] through it.
 func (k *Kit) Engine() *agentpolicy.Engine { return k.engine }
 
 // Catalog is the skill catalogue, or nil when no skills were
-// configured.
-func (k *Kit) Catalog() *agentskill.Catalog { return k.catalog }
+// configured: the one [New] discovered, or the last [Kit.ReloadSkills]
+// did.
+func (k *Kit) Catalog() *agentskill.Catalog {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.catalog
+}
 
 // Recorder is the session recorder, or nil when no session was
 // configured: the one the kit opened, or the one [WithRecorder] gave
@@ -1855,12 +2232,14 @@ func (k *Kit) Catalog() *agentskill.Catalog { return k.catalog }
 func (k *Kit) Recorder() *session.Recorder { return k.rec }
 
 // Session is the session [New] started or resumed, or nil, as it is
-// under [WithRecorder]. After a resume its Context().Items is what the
-// agent should be seeded with.
+// under [WithRecorder]. After a resume [Kit.AgentOptions] seeds an agent
+// with it.
 func (k *Kit) Session() *agentsession.Session { return k.sess }
 
-// Transcript is the conversation in force at the session's leaf, and
-// what an agent continuing it must be seeded with. It is empty for a new
+// Transcript is the conversation in force at the session's leaf,
+// [session.Transcript]: its context's items with the ones the filter
+// kept from the model put back where the loop held them, which is what
+// an agent continuing it must be seeded with. It is empty for a new
 // session [WithSession] started, the prefix up to the header's Base for
 // a fork WithSession started, and empty for no session at all or under
 // [WithRecorder]. [Kit.AgentOptions] carries it with the calls pending
@@ -1870,9 +2249,12 @@ func (k *Kit) Transcript() agentturn.Transcript {
 }
 
 // AgentOptions are the options that seed an agent with the session at
-// its leaf, [session.AgentOptions]: the transcript [Kit.Transcript]
-// returns and the calls pending there, so an approval after a restart
-// runs a call again only when its tool says it may. The skill grants
+// its leaf, [session.AgentOptions] read with the recorder's
+// [session.Recorder.ReadOptions]: the transcript [Kit.Transcript]
+// returns, the model each reasoning item on it came from, so a request
+// to another model leaves the earlier model's reasoning out as a live
+// agent does, and the calls pending there, so an approval after a
+// restart runs a call again only when its tool says it may. The skill grants
 // the task had are the engine's, and [New] made them again, under
 // [WithSkillGrants], from the session's records. It is nil for no
 // session and under [WithRecorder], whose owner seeds the agent, so a

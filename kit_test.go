@@ -1769,3 +1769,149 @@ func TestAMemoryShareUnderTheBlocksFloorDropsTheBlock(t *testing.T) {
 		t.Fatal("the dropped entries are not reported")
 	}
 }
+
+// noTextSummary answers every request with a function call and no text,
+// as a thinking model does that reasons through a summary's cap, and
+// counts the requests.
+type noTextSummary struct{ calls atomic.Int32 }
+
+func (m *noTextSummary) CreateStream(_ context.Context, req openresponses.Request, sink openresponses.EventSink) error {
+	m.calls.Add(1)
+	e := openresponses.NewEmitter(sink, openresponses.NewResponse(req))
+	if err := e.Start(); err != nil {
+		return err
+	}
+	if err := callTurn("lookup", `{}`)(e); err != nil {
+		return err
+	}
+	return e.Complete()
+}
+
+// The summary request a fold sends carries the agent's reasoning, as
+// every other request does: left at the server's default, a thinking
+// model reasoned through the summary's cap and answered no text. (#60)
+func TestTheSummaryRequestCarriesTheAgentsReasoning(t *testing.T) {
+	r := openresponses.ReasoningConfig{Effort: "none"}
+	summaries := &scriptModel{}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(&scriptModel{}, "m"),
+		agentkit.WithReasoning(r),
+		agentkit.WithCompactionModel(summaries),
+		agentkit.WithCompaction(1, compact.WithKeepLast(1), compact.WithMinFold(0)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	agent := agentturn.New(kit.Config())
+	for _, text := range []string{"one", "two", "three"} {
+		if _, err := agent.Prompt(t.Context(), openresponses.UserText(text)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reqs := summaries.requests()
+	if len(reqs) == 0 {
+		t.Fatal("no summary was asked for")
+	}
+	for _, req := range reqs {
+		if req.Reasoning != r {
+			t.Fatalf("a summary request's reasoning = %+v, want the agent's %+v", req.Reasoning, r)
+		}
+	}
+}
+
+// A fold that failed is on the record, and a kit that resumes the
+// session backs off from it as the process that failed did, rather than
+// asking again for the summary that failed: two summary calls and
+// another compaction_failed on every restart. (#64)
+func TestAResumedKitBacksOffFromAFoldThatFailed(t *testing.T) {
+	sessions := agentsession.NewMemoryStore()
+	over := func(items openresponses.Items) int { return 100 + len(items) }
+	build := func(summary *noTextSummary, sess agentkit.Option) *agentkit.Kit {
+		kit, err := agentkit.New(t.Context(),
+			agentkit.WithModel(&scriptModel{}, "m"),
+			agentkit.WithCompactionModel(summary),
+			agentkit.WithCompaction(100, compact.WithKeepLast(3), compact.WithEstimator(over), compact.WithMinFold(0)),
+			sess,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = kit.Close() })
+		return kit
+	}
+	first := &noTextSummary{}
+	a := build(first, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))
+	agent := agentturn.New(a.Config())
+	detach := a.Attach(agent)
+	for _, text := range []string{"one", "two", "three"} {
+		if _, err := agent.Prompt(t.Context(), openresponses.UserText(text)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	detach()
+	if n := first.calls.Load(); n != 2 {
+		t.Fatalf("summary calls before the restart = %d, want the two of one failed fold", n)
+	}
+
+	second := &noTextSummary{}
+	b := build(second, agentkit.WithResumedSession(sessions, a.SessionID()))
+	resumed := agentturn.New(b.Config(), b.AgentOptions()...)
+	defer b.Attach(resumed)()
+	if _, err := resumed.Prompt(t.Context(), openresponses.UserText("four")); err != nil {
+		t.Fatal(err)
+	}
+	if n := second.calls.Load(); n != 0 {
+		t.Fatalf("summary calls after the restart = %d, want none: the fold failed on this prefix before", n)
+	}
+}
+
+// A memory block the budget drops takes the tools that write memory out
+// of the request, and a write the model makes anyway is refused: shown
+// no block and no word on the tools, it saved over entries it was never
+// shown. (#53)
+func TestADroppedMemoryBlockWithholdsTheWrites(t *testing.T) {
+	const prompt = "be brief"
+	store := memStore(t, agentmemory.Entry{Scope: "user", Name: "go-version", Content: "This project pins Go 1.25. " + strings.Repeat("c", 4000)})
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn(agentmemory.SaveTool, `{"scope":"user","name":"go-version","content":"This project pins Go 1.26."}`),
+	}}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(model, "m"),
+		agentkit.WithInstructions(prompt),
+		agentkit.WithMemory(store, "user"),
+		agentkit.WithInstructionBudget(int64(len(prompt)+len(agentkit.Separator)+40)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	if got := kit.Config().Instructions; got != prompt {
+		t.Fatalf("instructions = %q, want the block dropped", got)
+	}
+	agent := agentturn.New(kit.Config())
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("bump go")); err != nil {
+		t.Fatal(err)
+	}
+	var offered []string
+	for _, tool := range model.requests()[0].Tools {
+		if f, ok := tool.(*openresponses.FunctionTool); ok {
+			offered = append(offered, f.Name)
+		}
+	}
+	for _, name := range []string{agentmemory.SaveTool, agentmemory.PatchTool, agentmemory.ForgetTool} {
+		if slices.Contains(offered, name) {
+			t.Errorf("%s was offered with the block dropped: %v", name, offered)
+		}
+	}
+	if !slices.Contains(offered, agentmemory.SearchTool) {
+		t.Errorf("%s was withheld too: %v", agentmemory.SearchTool, offered)
+	}
+	got, err := store.Get(t.Context(), "user", "go-version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(got.Content, "This project pins Go 1.25.") {
+		t.Fatalf("the save ran with the block dropped: %q", got.Content)
+	}
+}
