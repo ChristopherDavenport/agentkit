@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"slices"
 	"strings"
 
 	"github.com/ChristopherDavenport/agentmemory"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentskill"
 	"github.com/ChristopherDavenport/agentsmd"
+	"github.com/ChristopherDavenport/openresponses"
 )
 
 // Part is one named block of the instructions: its stable id, its text
@@ -261,8 +263,11 @@ func unlistedReason(sk *agentskill.Skill, problems []agentskill.Problem) string 
 // is paid for out of the limit first: it cannot be bounded, and a
 // block without it leaves the model the tools and no word on them. A
 // block the budget drops takes the paragraph with it, as the skill
-// catalogue's usage goes with the catalogue.
-func memoryPart(ctx context.Context, s *settings, limit int64) ([]Part, agentmemory.Manifest, []Omission, error) {
+// catalogue's usage goes with the catalogue, and dropped is true: the
+// tools that write memory are then withheld from the request and
+// refused, [memoryWrites], since a model shown no block and no word on
+// them would save over entries it was never shown. memory_search stays.
+func memoryPart(ctx context.Context, s *settings, limit int64) (group []Part, man agentmemory.Manifest, omitted []Omission, dropped bool, err error) {
 	usage := agentmemory.Usage()
 	if limit > 0 {
 		if limit -= int64(len(Separator) + len(usage)); limit <= 0 {
@@ -273,7 +278,7 @@ func memoryPart(ctx context.Context, s *settings, limit int64) ([]Part, agentmem
 	scopes := s.renderScopes()
 	parts, man, err := agentmemory.RenderParts(ctx, s.memStore, scopes, opts...)
 	if err != nil {
-		return nil, man, nil, fmt.Errorf("agentkit: rendering memory: %w", err)
+		return nil, man, nil, false, fmt.Errorf("agentkit: rendering memory: %w", err)
 	}
 	if limit > 0 && int64(len(agentmemory.JoinParts(parts))) > limit {
 		bounded := append(append([]agentmemory.RenderOption(nil), opts...),
@@ -285,7 +290,7 @@ func memoryPart(ctx context.Context, s *settings, limit int64) ([]Part, agentmem
 			// render's manifest names what the drop below omits.
 			limit = -1
 		case err != nil:
-			return nil, bm, nil, fmt.Errorf("agentkit: rendering memory: %w", err)
+			return nil, bm, nil, false, fmt.Errorf("agentkit: rendering memory: %w", err)
 		default:
 			parts, man = bp, bm
 		}
@@ -296,12 +301,11 @@ func memoryPart(ctx context.Context, s *settings, limit int64) ([]Part, agentmem
 		// heading per scope, so a share below that floor buys nothing.
 		// Report every entry rather than send a block the budget said
 		// there was no room for.
-		parts = nil
+		parts, dropped = nil, true
 		man.Omitted = append(man.Omitted, man.Entries...)
 		man.Entries = nil
 	}
 
-	var group []Part
 	if size > 0 && len(parts) > 0 {
 		group = make([]Part, 0, len(parts)+1)
 		for _, p := range parts {
@@ -310,7 +314,7 @@ func memoryPart(ctx context.Context, s *settings, limit int64) ([]Part, agentmem
 		group = append(group, Part{ID: PartMemoryUsage, Text: usage, Source: SourceMemory})
 	}
 
-	omitted := make([]Omission, 0, len(man.Omitted))
+	omitted = make([]Omission, 0, len(man.Omitted))
 	for _, e := range man.Omitted {
 		reason := e.Reason
 		if reason == "" {
@@ -324,8 +328,35 @@ func memoryPart(ctx context.Context, s *settings, limit int64) ([]Part, agentmem
 			Size:   int64(e.Bytes),
 		})
 	}
-	return group, man, omitted, nil
+	return group, man, omitted, dropped, nil
 }
+
+// memoryWrites are the memory tools that write: withheld from a request
+// whose render the budget dropped, and refused in its run.
+var memoryWrites = map[string]bool{
+	agentmemory.SaveTool:   true,
+	agentmemory.PatchTool:  true,
+	agentmemory.ForgetTool: true,
+}
+
+// withoutMemoryWrites returns tools without the [memoryWrites], tools
+// itself when it holds none.
+func withoutMemoryWrites(tools openresponses.Tools) openresponses.Tools {
+	if !slices.ContainsFunc(tools, isMemoryWrite) {
+		return tools
+	}
+	return slices.DeleteFunc(slices.Clone(tools), isMemoryWrite)
+}
+
+func isMemoryWrite(t openresponses.Tool) bool {
+	f, ok := t.(*openresponses.FunctionTool)
+	return ok && memoryWrites[f.Name]
+}
+
+// errMemoryDropped is what a memory write gets in a run whose render the
+// instruction budget dropped: the model was shown no block, so a write
+// could replace an entry it never saw.
+var errMemoryDropped = errors.New("the memory block is not shown this turn, because the instruction budget has no room for it, so memory cannot be changed: a write could replace an entry you have not seen; " + agentmemory.SearchTool + " still reads it")
 
 // agentsMDPart reads the AGENTS.md chain and renders it, bounded to
 // limit bytes when limit is positive.

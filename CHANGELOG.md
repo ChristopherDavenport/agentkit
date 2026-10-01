@@ -3,6 +3,124 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+The round 7 findings (#52 to #64), and the siblings' round 7 releases
+taken up.
+
+### Security
+
+- A front that names each conversation with
+  `session.ContextWithSessionID` and no `ContextWithRecorder`, as
+  agentturn/front/a2a's `WithRecorderFor` example does, is several
+  conversations to the kit's skill grants, not one. They took every run
+  for the kit's own conversation, so one conversation's skill read
+  granted every other's calls, and #44's leak was open there. A run's
+  conversation is now the recorder on its context, else the session the
+  context names, unless that is the kit's own or a child's of a run the
+  kit served, else the kit's own session. Under `WithRecorder` every
+  session of the recorder is one conversation, as before. (#58)
+- A restart never grants a skill whose frontmatter changed since the
+  read. The replay compared only the digest of the instructions served,
+  which does not cover `allowed-tools`, so a rewrite of `allowed-tools`
+  that left the body alone was granted again. A read now records
+  agentskill's `FrontmatterSHA256`, and the replay passes over one whose
+  skill's frontmatter is no longer that. The default source names the
+  digest as its `Hash`, so every verdict about a grant says what it was
+  built from, and `WithSkillGrants` says how a product binds a person's
+  approval to it. (#63)
+
+### Fixed
+
+- Under `agentpolicy.WithAliases` a restart grants again what a skill's
+  read was granted. The engine records a rule as it granted it, after
+  the alias expanded it, and the replay looked for the skill's own
+  spelling, found nothing, and granted nothing, silently: a task
+  approved after a restart had every call its skill allowed asked
+  about. When the read recorded the frontmatter's digest and the skill
+  still has it, the rules are granted as the engine recorded them; a
+  replay that finds none of a read's rules reports it, and one the
+  engine takes wider than recorded is revoked. (#57)
+- `WithCompaction` sends the summary request under the agent's
+  reasoning, `WithReasoning`'s or `WithRequest`'s, through a
+  `compact.WithRequest` of its own ahead of the product's options. A
+  thinking model left at its server's default reasoned through the
+  summary's cap and answered no text. (#60)
+- A kit that resumes a session seeds the agent with all of agentturn
+  v0.0.15's resume state: `Kit.AgentOptions` is `session.AgentOptions`
+  read with the recorder's `ReadOptions`, so the model each reasoning
+  item came from is known after a restart and a fork's prefix calls are
+  read through its origin; `Kit.Transcript` is `session.Transcript`,
+  with the items the filter kept from the model put back; and under
+  `WithCompaction` the fold is given `session.CompactOptions`, so it
+  backs off from a fold that failed before the restart rather than
+  asking for the same summary again. (#64)
+- A memory block the instruction budget drops takes `memory_save`,
+  `memory_patch` and `memory_forget` out of that request, and the run
+  refuses them, so a model shown no block and no word on the tools no
+  longer saves over entries it never saw. `memory_search` stays. (#53)
+- A held `memory_save` folded from the path after a restart is refused
+  when another run's render may be the last before the call: another
+  run open at the call, or one started between the call's run and the
+  call. Two runs sharing a session based the save on the other run's
+  render, and a write made in between was lost with nothing reported.
+  (#56)
+- Each turn of a kit handed back to reads only the manifest records
+  written since the turn before. The kit folded every record from the
+  session's root whenever the other kit's was last, which in a handoff
+  is every turn: 92 ms at the 100th hand-back, growing. The fold is now
+  `agentmemory.ManifestFold`, kept per session. (#55)
+- When another conversation ends a kit's skill grants, the owner's
+  session records a verdict naming that conversation ahead of the
+  revocations, `WithSkillGrantReport` is told once, with no `Skill` and
+  an `Err` wrapping `ErrSkillGrantConversation`, and the owner's own
+  read after it names the conversation that ended them, where it named
+  the owner twice. `Kit.RegrantSkills` writes a later revocation to the
+  kit's own recorder when the context carries none and that recorder
+  writes the session. (#59)
+- Under `WithSkillGrantScope`, a user message that ends a grant in force
+  gives the turn a developer note naming the skills and their rules and
+  saying that a read restores them. A model with the skill's text above
+  went straight to the tool and was refused as an ordinary ask. (#61)
+
+### Added
+
+- `Kit.ReloadSkills` discovers the skills again over the sources `New`
+  was given and puts the new catalogue behind the skill tool, the skill
+  grants and the skills part, for an agent that writes a skill and uses
+  it in the same conversation. A config returned before keeps its
+  instructions until its agent is given the new one, unless the kit
+  re-renders them each request. (#62)
+- `SkillGrant.FrontmatterChanged`: the skill file's frontmatter changed
+  since discovery, so the grant is the rules as loaded. (#63)
+
+### Changed
+
+- The memory manifest a kit handed back to records is a delta on its
+  own last manifest when that is smaller than one on the manifest in
+  force, which after a handoff is the other kit's. agentmemory v0.0.9's
+  `ManifestFold` resolves such a delta and `ApplyManifestRecord` refuses
+  it, so a reader of a session a handoff wrote folds with
+  `ManifestFold`; agentkit v0.0.5 and earlier read such a record as one
+  that does not fold, and write their next manifest whole. (#55)
+- Requires agentturn and agentturn/session v0.0.15, agentsession
+  v0.0.19, agenttool and mcpclient v0.0.14, agentpolicy v0.0.10,
+  agentskill v0.0.10 and agentmemory v0.0.9. agentskill v0.0.10 serves
+  a skill read by the path `SKILL.md` as its instructions, so such a
+  read now grants its `allowed-tools`, and reads the skill file at each
+  call.
+
+### Documentation
+
+- `WithFoldObserver` and the README say a failed fold is observed too,
+  with `Fold.Err` set and the transcript sent whole, and that a front
+  tells the two apart by `Err`. (#52)
+- `docs/manual.md` says its blocks need agentturn v0.0.15 or later, and
+  what an earlier one does to the fold block; the siblings' releases
+  now require it, so a product on them selects it. (#54)
+- `docs/ordering.md` no longer says the kit's `WithOnFold` replaces a
+  product's, which it has not since v0.0.4.
+
 ## v0.0.5 - 2026-10-01
 
 ### Added

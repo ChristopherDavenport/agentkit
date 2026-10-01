@@ -936,3 +936,347 @@ func TestARestartRegrantsSilently(t *testing.T) {
 		_ = kit.Close()
 	}
 }
+
+// trustedSkills is the source function the tests below grant under.
+func trustedSkills(sk *agentskill.Skill) agentpolicy.Source {
+	return agentpolicy.Source{Name: "skill:" + sk.Name, Path: sk.Location, Trusted: true}
+}
+
+// The engine records a grant as it took it, after WithAliases expanded
+// it, so a skill's Bash(git:*) is on the record as bash(git:*). The
+// replay granted only what matched the skill's own spelling, which under
+// an alias is nothing, and a restart silently lost the grant: the task's
+// next git call was asked about. (#57)
+func TestARestartUnderAnAliasRegrantsWhatTheReadWasGranted(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "release", "Bash(git:*)")
+	sessions := agentsession.NewMemoryStore()
+	var ran []string
+	bash := agenttool.New("bash", "run a command",
+		func(_ context.Context, in struct {
+			Command string `json:"command"`
+		}) (string, error) {
+			ran = append(ran, in.Command)
+			return "", nil
+		})
+	var reports []agentkit.SkillGrant
+	build := func(model agentturn.Model, sess agentkit.Option) *agentkit.Kit {
+		kit, err := agentkit.New(t.Context(),
+			agentkit.WithModel(model, "m"),
+			agentkit.WithSkills(skills),
+			agentkit.WithTools(bash),
+			agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{
+				Read:    []string{agentskill.ToolName},
+				Execute: []string{"bash"},
+			}), map[string]agentpolicy.ToolMatcher{
+				"bash": {Match: agentpolicy.PrefixMatcher("command")},
+			}, agentpolicy.WithAliases(map[string][]string{"Bash": {"bash"}})),
+			agentkit.WithSkillGrants(trustedSkills),
+			agentkit.WithSkillGrantReport(func(g agentkit.SkillGrant) { reports = append(reports, g) }),
+			sess,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = kit.Close() })
+		return kit
+	}
+
+	first := build(&scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn(agentskill.ToolName, `{"name":"release"}`),
+		callTurn("bash", `{"command":"rm -rf build"}`),
+	}}, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))
+	agent := agentturn.New(first.Config(), first.AgentOptions()...)
+	unsubscribe := first.Attach(agent)
+	end, err := agent.Prompt(t.Context(), openresponses.UserText("cut the release"))
+	unsubscribe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if end.Reason != agentturn.ReasonInputRequired {
+		t.Fatalf("reason = %q, want rm -rf held", end.Reason)
+	}
+
+	reports = nil
+	second := build(&scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn("bash", `{"command":"git status"}`),
+	}}, agentkit.WithResumedSession(sessions, first.SessionID()))
+	if len(reports) != 1 || !reports[0].Replayed || len(reports[0].Granted) != 1 || reports[0].Granted[0].String() != "bash(git:*)" {
+		t.Fatalf("the replay reported %+v, want bash(git:*) granted again", reports)
+	}
+	resumed := agentturn.New(second.Config(), second.AgentOptions()...)
+	defer second.Attach(resumed)()
+	pending := resumed.State().Pending
+	if len(pending) != 1 {
+		t.Fatalf("pending = %+v, want the held rm", pending)
+	}
+	end, err = resumed.Resume(t.Context(), agentturn.Approve(pending[0].Call.CallID).WithBy(agentpolicy.ByHuman))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if end.Reason == agentturn.ReasonInputRequired || !slices.Equal(ran, []string{"rm -rf build", "git status"}) {
+		t.Fatalf("after the restart git status was not run under the grant: %q, ran %v", end.Reason, ran)
+	}
+}
+
+// The default source names the digest of the frontmatter the rules were
+// parsed from, so a verdict about the grant says what it was built
+// from, and a restart does not grant again a read whose skill's
+// frontmatter has changed, although its instructions read the same.
+// (#63)
+func TestAGrantNamesTheFrontmatterItWasBuiltFrom(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "deploy", "Bash(kubectl:*)")
+	var reports []agentkit.SkillGrant
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithSkills(skills),
+		agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{Execute: []string{"Bash"}}),
+			map[string]agentpolicy.ToolMatcher{"Bash": {Match: agentpolicy.PrefixMatcher("command")}}),
+		agentkit.WithSkillGrants(nil),
+		agentkit.WithSkillGrantReport(func(g agentkit.SkillGrant) { reports = append(reports, g) }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	sk, _ := kit.Catalog().Lookup("deploy")
+	readSkill(t, skillTool(t, kit), "deploy")
+	var hash string
+	for _, set := range kit.Engine().Grants() {
+		if set.Source.Name == "agentskill:deploy" {
+			hash = set.Source.Hash
+		}
+	}
+	if hash == "" || hash != sk.FrontmatterSHA256() {
+		t.Fatalf("the grant's source hash = %q, want the frontmatter's %q", hash, sk.FrontmatterSHA256())
+	}
+
+	// The frontmatter rewritten on disk after discovery: the read serves
+	// the new body under the frontmatter as loaded, and says so.
+	writeFile(t, sk.Location, "---\nname: deploy\ndescription: what deploy is for\nallowed-tools: Bash(*)\n---\n\ndo the thing\n")
+	reports = nil
+	readSkill(t, skillTool(t, kit), "deploy")
+	if len(reports) != 1 || !reports[0].FrontmatterChanged {
+		t.Fatalf("a read after the frontmatter changed reported %+v, want FrontmatterChanged", reports)
+	}
+}
+
+// A front that records each conversation itself and names it with
+// session.ContextWithSessionID, as front/a2a's WithRecorderFor example
+// does, without ContextWithRecorder, is several conversations to the
+// kit: one conversation's read grants nothing to another. It was one
+// conversation, and Alice's skill let Bob's model run git clean
+// unasked. (#58)
+func TestConversationsNamedOnlyByTheirSessionIDAreApart(t *testing.T) {
+	for _, own := range []bool{false, true} {
+		skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "release", "Bash(git:*)")
+		sessions := agentsession.NewMemoryStore()
+		var ran []string
+		bash := agenttool.New("Bash", "run a command",
+			func(_ context.Context, in struct {
+				Command string `json:"command"`
+			}) (string, error) {
+				ran = append(ran, in.Command)
+				return "", nil
+			})
+		opts := []agentkit.Option{
+			agentkit.WithModel(stubModel{}, "m"),
+			agentkit.WithSkills(skills),
+			agentkit.WithTools(bash),
+			agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{
+				Read:    []string{agentskill.ToolName},
+				Execute: []string{"Bash"},
+			}), map[string]agentpolicy.ToolMatcher{
+				"Bash": {Match: agentpolicy.PrefixMatcher("command")},
+			}),
+			agentkit.WithSkillGrants(trustedSkills),
+		}
+		if own {
+			opts = append(opts, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))
+		}
+		kit, err := agentkit.New(t.Context(), opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer kit.Close()
+
+		serve := func(turns ...func(*openresponses.Emitter) error) *agentturn.RunEnd {
+			t.Helper()
+			rec, _, err := session.Start(t.Context(), sessions, agentsession.Header{CWD: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := kit.Config()
+			cfg.Model = &scriptModel{turns: turns}
+			cfg.ToolRecorder = rec.RecordFunc()
+			agent := agentturn.New(cfg)
+			defer rec.Attach(agent)()
+			end, err := agent.Prompt(session.ContextWithSessionID(t.Context(), rec.SessionID()), openresponses.UserText("go"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return end
+		}
+		serve(callTurn(agentskill.ToolName, `{"name":"release"}`), callTurn("Bash", `{"command":"git status"}`))
+		end := serve(callTurn("Bash", `{"command":"git clean -fdx"}`))
+		if end.Reason != agentturn.ReasonInputRequired || slices.Contains(ran, "git clean -fdx") {
+			t.Fatalf("own session %v: in another conversation git clean ran under the first one's grant: %q, ran %v", own, end.Reason, ran)
+		}
+	}
+}
+
+// When another conversation's call ends a kit's grants, the owner's
+// session says why and the report is told once, and the owner's own
+// read after it names the conversation that ended them, not itself
+// twice. (#59)
+func TestGrantsEndedByAnotherConversationSayWhy(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "release", "Bash(git:*)")
+	sessions := agentsession.NewMemoryStore()
+	var reports []agentkit.SkillGrant
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithSkills(skills),
+		agentkit.WithTools(namedTool(t, "Bash")),
+		agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{
+			Read:    []string{agentskill.ToolName},
+			Execute: []string{"Bash"},
+		}), map[string]agentpolicy.ToolMatcher{
+			"Bash": {Match: agentpolicy.PrefixMatcher("command")},
+		}),
+		agentkit.WithSkillGrants(trustedSkills),
+		agentkit.WithSkillGrantReport(func(g agentkit.SkillGrant) { reports = append(reports, g) }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	serve := func(rec *session.Recorder, turns ...func(*openresponses.Emitter) error) {
+		t.Helper()
+		cfg := kit.Config()
+		cfg.Model = &scriptModel{turns: turns}
+		cfg.ToolRecorder = rec.RecordFunc()
+		agent := agentturn.New(cfg)
+		defer rec.Attach(agent)()
+		ctx := agentkit.ContextWithRecorder(session.ContextWithSessionID(t.Context(), rec.SessionID()), rec)
+		if _, err := agent.Prompt(ctx, openresponses.UserText("go")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := func() *session.Recorder {
+		rec, _, err := session.Start(t.Context(), sessions, agentsession.Header{CWD: t.TempDir()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rec
+	}
+	alice, bob := start(), start()
+	serve(alice, callTurn(agentskill.ToolName, `{"name":"release"}`))
+	reports = nil
+	serve(bob, callTurn("Bash", `{"command":"git status"}`))
+
+	if len(reports) != 1 || reports[0].Skill != "" || !errors.Is(reports[0].Err, agentkit.ErrSkillGrantConversation) || !strings.Contains(reports[0].Err.Error(), bob.SessionID()) {
+		t.Fatalf("the trip reported %+v, want one report naming %s", reports, bob.SessionID())
+	}
+	named := false
+	for _, c := range customEntries(openSession(t, sessions, alice.SessionID()), agentpolicy.VerdictNS) {
+		if strings.Contains(string(c.Data), "skill grants ended") && strings.Contains(string(c.Data), bob.SessionID()) {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatal("the owner's session has no verdict saying which conversation ended its grants")
+	}
+
+	reports = nil
+	serve(alice, callTurnID("call-again", agentskill.ToolName, `{"name":"release"}`))
+	if len(reports) != 1 || !strings.Contains(reports[0].Err.Error(), "decided a call in session \""+bob.SessionID()+"\"") {
+		t.Fatalf("the owner's read after the trip reported %+v, want one naming %s", reports, bob.SessionID())
+	}
+}
+
+// Under the scope, a user message that ends a grant in force tells the
+// model so, and how to get it back: a model with the skill's text above
+// went straight to the tool and was refused as an ordinary ask. (#61)
+func TestTheScopeTellsTheModelAGrantEnded(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "sysinfo", "Bash(uptime:*)")
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn(agentskill.ToolName, `{"name":"sysinfo"}`),
+	}}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(model, "m"),
+		agentkit.WithSkills(skills),
+		agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{
+			Read:    []string{agentskill.ToolName},
+			Execute: []string{"Bash"},
+		}), map[string]agentpolicy.ToolMatcher{
+			"Bash": {Match: agentpolicy.PrefixMatcher("command")},
+		}),
+		agentkit.WithSkillGrants(trustedSkills),
+		agentkit.WithSkillGrantScope(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	agent := agentturn.New(kit.Config())
+	for _, text := range []string{"what is the date", "and the uptime", "and the kernel"} {
+		if _, err := agent.Prompt(t.Context(), openresponses.UserText(text)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notes := func(req openresponses.Request) []string {
+		var out []string
+		for _, item := range req.Input {
+			if m, ok := item.(*openresponses.Message); ok && m.Role == openresponses.RoleDeveloper {
+				for _, c := range m.Content {
+					if in, ok := c.(*openresponses.InputText); ok {
+						out = append(out, in.Text)
+					}
+				}
+			}
+		}
+		return out
+	}
+	reqs := model.requests()
+	last := notes(reqs[len(reqs)-1])
+	if len(last) != 1 || !strings.Contains(last[0], "sysinfo (Bash(uptime:*))") || !strings.Contains(last[0], "read the skill again") {
+		t.Fatalf("the notes the model was given = %q, want one naming sysinfo's ended grant", last)
+	}
+}
+
+// A skill written after New is found by ReloadSkills: the tool serves
+// it, the catalogue lists it, and the next config's instructions name
+// it. (#62)
+func TestReloadSkillsFindsASkillWrittenAfterNew(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "existing", "Read")
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithSkills(skills),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	tool := skillTool(t, kit)
+	before := kit.Config().Instructions
+
+	skillWithTools(t, skills, "learned-deploy", "Read")
+	args, _ := json.Marshal(map[string]string{"name": "learned-deploy"})
+	if _, err := tool.Execute(t.Context(), agenttool.Call{ID: "call-1", Args: args}); err == nil {
+		t.Fatal("a skill written after New was served before a reload")
+	}
+	if err := kit.ReloadSkills(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	readSkill(t, tool, "learned-deploy")
+	if _, ok := kit.Catalog().Lookup("learned-deploy"); !ok {
+		t.Fatal("the catalogue does not list the new skill")
+	}
+	if after := kit.Config().Instructions; after == before || !strings.Contains(after, "learned-deploy") {
+		t.Fatalf("the instructions after the reload do not name the new skill:\n%s", after)
+	}
+	// A recorder asking about a run started with the old config still
+	// gets its parts.
+	if parts, _ := kit.PartsFor(t.Context(), openresponses.Request{Instructions: before}); parts == nil {
+		t.Fatal("the config before the reload is no longer the kit's")
+	}
+}

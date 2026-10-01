@@ -133,7 +133,7 @@ contest was silent, and the kit is where they get called, in one order:
 | `OutputGuard` | the guards, then the product's |
 | `ShouldStopAfterTurn` | the policy's, then the product's |
 | `BeforeTurn` | the skill grants' revoke at each new user message under `WithSkillGrantScope`, then the product's |
-| `Transform` | the product's, then `compact`, with `WithOnFold` bound to the recorder and `WithFoldObserver` |
+| `Transform` | the product's, then `compact`, with `WithOnFold` bound to the recorder and `WithFoldObserver`, which hears a failed fold too, with `Fold.Err` set and the transcript sent whole |
 
 With a session, the engine's verdicts and the guards' are recorded
 under `agentpolicy.VerdictNS`, so the record says which rule held a
@@ -174,10 +174,15 @@ A front needs things a `Config` cannot carry: `kit.Engine()` for
 `Deferred` and `Release`, `kit.Recorder()` and `kit.SessionID()`,
 `kit.Catalog()`, `kit.Tools()`, and `kit.MemoryManifest()` for the hash
 that says whether the render moved. A front resuming a session seeds
-the agent with `kit.AgentOptions()`, the transcript at the leaf and the
-calls pending there, so a call held before a restart can still be
-approved. Under `WithSkillGrants`, `New` has already granted again what
-the session's skill reads granted, so the task goes on under them:
+the agent with `kit.AgentOptions()`, `session.AgentOptions`: the
+transcript at the leaf with the items the filter kept from the model,
+the model each reasoning item came from, so a switch of models after a
+restart does not send one provider another's reasoning, and the calls
+pending there, so a call held before a restart can still be approved.
+Under `WithSkillGrants`, `New` has already granted again what the
+session's skill reads granted, so the task goes on under them, and
+under `WithCompaction` the fold backs off from the last one that
+failed on the session's path:
 
 ```go
 agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
@@ -215,7 +220,10 @@ only when the product has said it trusts the tree the skill came from.
 `WithSkillGrantScope` ends each grant when the user's next message arrives, as
 Claude Code clears `allowed-tools` at the next message, and
 `kit.RevokeSkillGrants(ctx)` ends them when a front says; a skill read
-again is granted again.
+again is granted again, and under the scope the model is told which
+grants a message ended and that a read restores them.
+`kit.ReloadSkills(ctx)` discovers the skills again, for an agent that
+writes a skill and uses it in the same conversation.
 
 ## Composing with other agents
 
@@ -239,7 +247,11 @@ own observer reads `agentkit.RecorderFromContext`. A skill grant and an
 MCP server's connection stay the kit's, not the conversation's: the
 kit revokes its grants the first time it serves a second conversation,
 and every conversation calls an MCP server as whoever authorized the
-connection. A front that needs either per conversation or per user
+connection. A conversation is the session of the recorder on the run's
+context, or the session `session.ContextWithSessionID` names there, so
+a front that names its conversations only that way is still several
+conversations to the kit; one that names them neither way, as
+`fronta2a.New(kit.Config())` alone does, is one. A front that needs either per conversation or per user
 builds a kit for each, and keeps each user's OAuth grant across
 restarts with `mcpclient.StoreTokens`, keyed by the server and that
 user (`WithMCPTransport` shows the wiring).
@@ -275,13 +287,13 @@ a2a.
 | library | version |
 |---|---|
 | `openresponses` | v0.0.12 |
-| `agenttool`, `agenttool/mcpclient` | v0.0.13 |
-| `agentturn`, `agentturn/session` | v0.0.14 |
-| `agentsession` | v0.0.18 |
+| `agenttool`, `agenttool/mcpclient` | v0.0.14 |
+| `agentturn`, `agentturn/session` | v0.0.15 |
+| `agentsession` | v0.0.19 |
 | `agentsmd` | v0.0.2 |
-| `agentskill` | v0.0.9 |
-| `agentmemory` | v0.0.8 |
-| `agentpolicy` | v0.0.9 |
+| `agentskill` | v0.0.10 |
+| `agentmemory` | v0.0.9 |
+| `agentpolicy` | v0.0.10 |
 
 Every sibling is required at a released version with no `replace`, and
 `make no-replace` enforces it: the kit is the module that proves the

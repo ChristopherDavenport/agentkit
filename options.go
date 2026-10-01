@@ -127,6 +127,16 @@ type settings struct {
 	filter          func(agentturn.Transcript) agentturn.Transcript
 }
 
+// summaryReasoning is the reasoning the agent's requests carry, which a
+// fold's summary request is given too: [WithReasoning]'s, else the one
+// [WithRequest]'s base request names, as the loop resolves it.
+func (s *settings) summaryReasoning() openresponses.ReasoningConfig {
+	if !s.reasoning.IsZero() {
+		return s.reasoning
+	}
+	return s.request.Reasoning
+}
+
 // deferred is one tool source that cannot be built until the kit has
 // built the rest of itself. kind and name make the label a [Conflict]
 // blames: the option it came from, its position among the deferred
@@ -181,7 +191,8 @@ func WithRequestExtra(extra map[string]any) Option {
 	return func(s *settings) { s.requestExtra = extra }
 }
 
-// WithReasoning sets the reasoning effort and summary of every request.
+// WithReasoning sets the reasoning effort and summary of every request,
+// the summary request a [WithCompaction] fold sends among them.
 func WithReasoning(r openresponses.ReasoningConfig) Option {
 	return func(s *settings) { s.reasoning = r }
 }
@@ -327,10 +338,12 @@ func WithoutSkillTool() Option {
 // again each skill read no recorded revocation ended, so an approval
 // after a restart goes on under the grants the task had. A restart may
 // narrow a grant and never widens one: what is granted again is the
-// rules the journal says the read was granted that the skill still
-// allows, and a skill whose instructions changed since the read is not
-// granted at all; under [WithEngine], where the kit records no verdict,
-// it is the catalogue's rules as they stand. The replay records no
+// rules the journal says the read was granted, as the engine recorded
+// them after [agentpolicy.WithAliases] expanded them, when the read
+// recorded the digest of the frontmatter it was granted from and the
+// skill has it still; a skill whose instructions or frontmatter changed
+// since the read is not granted at all; under [WithEngine], where the
+// kit records no verdict, it is the catalogue's rules as they stand. The replay records no
 // verdict, since the ones it repeats are on the path, and is reported
 // with [SkillGrant.Replayed] set. A front that resumes a conversation
 // itself calls [Kit.RegrantSkills].
@@ -357,6 +370,17 @@ func WithoutSkillTool() Option {
 // the agent may do the moment the model reads it. That is the whole
 // point of allowed-tools and it is also a privilege escalation, so the
 // kit will not assume it.
+//
+// A source function that trusts a skill by its name or its directory
+// trusts whatever is written there next, an agent's own skills
+// included. To trust what a person approved, set Trusted only when
+// [agentskill.Skill.FrontmatterSHA256], the digest of the frontmatter
+// the rules are parsed from, is one they approved, and, to approve the
+// text too, the SHA-256 of [agentskill.Skill.Instructions]. The digest of
+// the instructions alone does not cover allowed-tools. The default
+// source names the frontmatter's digest as its Hash, so every verdict
+// about a grant says what it was built from; a source function does the
+// same by setting Hash.
 //
 // It has no effect without a policy engine, and none without skills,
 // so a product may add it unconditionally and the two behind flags.
@@ -411,6 +435,14 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 // model what the block is and which tool makes which change, follows
 // the block as [PartMemoryUsage], since the tools are offered whenever
 // the block is.
+//
+// A render [WithInstructionBudget] leaves no room for drops the block
+// and the paragraph, and that request is not offered memory_save,
+// memory_patch or memory_forget: the model would be writing over
+// entries it was never shown, with no word on the tools. A write the
+// model makes anyway in that run is refused. memory_search stays
+// offered, and [Kit.Omitted] lists every entry the drop left out. The
+// block, and the writes, come back on the first render that fits.
 //
 // The block is recorded as one part per piece
 // [agentmemory.RenderParts] returns, the title, each scope's heading,
@@ -856,10 +888,15 @@ func WithSession(store agentsession.Store, h agentsession.Header, opts ...sessio
 
 // WithResumedSession continues the session with the given ID at its
 // leaf, through [session.Resume]. [Kit.Session] then holds the session,
-// whose Context().Items is what the agent should be seeded with. The
-// recorder takes the kit's parts as under [WithSession]. Under
-// [WithSkillGrants], the grants the session's skill reads made are
-// granted again.
+// and [Kit.AgentOptions] seeds an agent with it: [session.AgentOptions],
+// the transcript with the items the filter kept from the model put
+// back, which Context().Items leaves out, the model each reasoning item
+// came from, so a request to another model leaves the earlier one's
+// out, and the calls pending at the leaf. The recorder takes the kit's
+// parts as under [WithSession]. Under [WithSkillGrants], the grants the
+// session's skill reads made are granted again, and under
+// [WithCompaction] the fold backs off from the last fold that failed on
+// the session's path.
 func WithResumedSession(store agentsession.Store, id string, opts ...session.Option) Option {
 	return func(s *settings) {
 		s.sessionStore, s.sessionID, s.sessionSet = store, id, true
@@ -899,6 +936,20 @@ func WithRecorder(rec *session.Recorder) Option {
 // compact.WithOnFold adds a callback, so one in opts is called too,
 // after the fold is recorded. [WithFoldObserver] is the kit's own way
 // to hear of a fold, with or without a session.
+//
+// The summary request is sent under the agent's reasoning, the
+// [WithReasoning] or [WithRequest] one, through a [compact.WithRequest]
+// of the kit's ahead of opts: a thinking model left at its server's
+// default reasons through the summary's cap and answers no text, which
+// fails every fold. compact.WithRequest is one function, so one in opts
+// replaces the kit's, and a product that passes one sets Reasoning in
+// it itself.
+//
+// With a session [New] resumed, the last fold that failed on its path,
+// [session.CompactOptions], is passed after opts, so a restart does not
+// ask again for a summary that failed before it. Under [WithRecorder] or
+// [ContextWithRecorder] the kit does not know the session when it
+// builds the fold, and the product passes session.CompactOptions in opts.
 func WithCompaction(budget int, opts ...compact.Option) Option {
 	return func(s *settings) {
 		s.compactSet, s.compactLocal = true, true
@@ -908,10 +959,14 @@ func WithCompaction(budget int, opts ...compact.Option) Option {
 }
 
 // WithFoldObserver is told of each fold compaction makes, after the
-// recorder has written it when a session is recorded: how a front says
-// the model has forgotten a detail. It has no effect without
-// [WithCompaction] or [WithCompactor]. A later call replaces an
-// earlier one.
+// recorder has written it when a session is recorded. It hears a fold
+// that failed as well as one that folded: since agentturn v0.0.13 a
+// summary no smaller than what it folds, one cut short, or one with no
+// text fails the fold quietly, with [compact.Fold] Err set and no
+// Summary, and the transcript is sent whole. A front that says the
+// model has forgotten a detail says it only for a fold whose Err is
+// nil. It has no effect without [WithCompaction] or [WithCompactor]. A
+// later call replaces an earlier one.
 func WithFoldObserver(fn func(context.Context, compact.Fold)) Option {
 	return func(s *settings) { s.foldObserver = fn }
 }
@@ -1045,7 +1100,11 @@ func (k *Kit) childContext(ctx context.Context, callID string) context.Context {
 	if rec == nil {
 		return ctx
 	}
+	conv := k.conversation(ctx)
 	ctx = rec.ChildContext(ctx, callID)
+	if id := session.SessionIDFromContext(ctx); id != "" {
+		ctx = context.WithValue(ctx, childConvKey{}, childConv{sid: id, conv: conv})
+	}
 	if k.memory {
 		if id := session.SessionIDFromContext(ctx); id != "" {
 			ctx = agentmemory.WithSession(ctx, id)

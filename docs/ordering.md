@@ -155,10 +155,15 @@ no sign. The kit is where they get called, in one order:
 | `BeforeTurn` | the skill grants' revoke on any turn a user message arrived for, then the product's | under `WithSkillGrantScope` a grant lasts until the next message, so the revoke has to land before anything after it is decided, whether the message started the run, followed its answer or was steered in; and not on a `Resume`, which is the same task going on |
 | `Transform` | the product's, then compaction | `agentturn.ChainTransform`: the fold is over what the product shaped, so a redaction or a filter is never undone by a summary written from the unshaped transcript |
 
-`WithOnFold` is bound to the session recorder when there is one, and is
-appended after the caller's compaction options, so a caller who passes
-their own `WithOnFold` alongside a session loses theirs. That is the
-one place the kit's choice beats the caller's, and it is deliberate: a
-fold the session did not record is a session that fails `Verify`. A
-caller who wants to hear of a fold passes `WithFoldObserver`, which the
-kit's `WithOnFold` calls after the recorder has written the fold.
+`WithOnFold` is bound to the run's recorder, and goes ahead of the
+caller's compaction options. Since agentturn v0.0.14 `WithOnFold` adds
+a callback rather than replacing one, so a caller's own runs too, after
+the recorder has written the fold: a fold the session did not record is
+a session that fails `Verify`, so the recording goes first. A caller
+who wants to hear of a fold passes `WithFoldObserver`, which the kit's
+`WithOnFold` calls after the recorder, for a fold that failed as well
+as one that folded. The kit's `compact.WithRequest`, which gives the
+summary request the agent's reasoning, also goes ahead of the caller's
+options, and since it is one function a caller's replaces it. The
+resumed session's last failed fold, `session.CompactOptions`, goes
+after them.

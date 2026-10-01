@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ChristopherDavenport/agentmemory"
+	"github.com/ChristopherDavenport/agentsession"
+	"github.com/ChristopherDavenport/openresponses"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -58,5 +61,43 @@ func TestAServersStderrIsPassedOnAndItsTailKept(t *testing.T) {
 	}
 	if (*stderrTail)(nil).String() != "" {
 		t.Fatal("a nil tail is not empty")
+	}
+}
+
+// A held save after a restart is based on the render its run was shown,
+// folded from the path. A render of another run between the call's run
+// start and the call may be the last record, so the fold refuses rather
+// than base the save on it. (#56)
+func TestFoldAtCallRefusesARenderThatMayBeAnotherRuns(t *testing.T) {
+	record := func(id, who string) agentsession.Entry {
+		_, data := agentmemory.Manifest{Entries: []agentmemory.ManifestEntry{{Scope: "user", Name: who}}}.Record()
+		return &agentsession.CustomEntry{EntryBase: agentsession.EntryBase{ID: id}, NS: agentmemory.ManifestNS, Data: data}
+	}
+	start := func(run string) agentsession.Entry {
+		return &agentsession.RunEntry{RunID: run, Phase: agentsession.RunStart}
+	}
+	end := func(run string) agentsession.Entry {
+		return &agentsession.RunEntry{RunID: run, Phase: agentsession.RunEnd}
+	}
+	call := &agentsession.ItemEntry{Item: &openresponses.FunctionCall{Name: agentmemory.SaveTool, CallID: "save"}}
+	for _, tc := range []struct {
+		name string
+		path []agentsession.Entry
+		want string // the entry the save is based on, "" for refused
+	}{
+		{"one run", []agentsession.Entry{start("a"), record("m1", "a"), call}, "a"},
+		{"a run before it", []agentsession.Entry{start("b"), record("m0", "b"), end("b"), start("a"), record("m1", "a"), call}, "a"},
+		{"no render of its own", []agentsession.Entry{start("b"), record("m0", "b"), end("b"), start("a"), call}, "b"},
+		{"another run open", []agentsession.Entry{start("a"), record("m1", "a"), start("b"), record("m2", "b"), call}, ""},
+		{"another run in between", []agentsession.Entry{start("a"), record("m1", "a"), start("b"), record("m2", "b"), end("b"), call}, ""},
+		{"no run entries", []agentsession.Entry{record("m1", "a"), call}, "a"},
+	} {
+		got, ok := foldAtCall(tc.path, "save")
+		switch {
+		case tc.want == "" && ok:
+			t.Errorf("%s: based on %+v, want refused", tc.name, got)
+		case tc.want != "" && (!ok || len(got.Entries) != 1 || got.Entries[0].Name != tc.want):
+			t.Errorf("%s: based on %+v (%v), want %s's render", tc.name, got, ok, tc.want)
+		}
 	}
 }
