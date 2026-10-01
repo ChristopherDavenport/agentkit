@@ -10,8 +10,11 @@ import (
 
 	"github.com/ChristopherDavenport/agentkit"
 	"github.com/ChristopherDavenport/agentpolicy"
+	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agenttool/mcpclient"
+	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/openresponses"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -264,4 +267,199 @@ func TestAnMCPServersQuestionReachesTheKitsElicitor(t *testing.T) {
 	if !strings.Contains(res.Output.String(), "accept") {
 		t.Fatalf("the tool's output = %q, want the server to have read the answer", res.Output)
 	}
+}
+
+// A server added after New is offered from the next resolution on, after
+// the servers New dialed and ahead of the product's provider, labelled
+// as WithMCPTransport's would be, and a call reaches it. (#50)
+func TestAServerAddedAfterNewJoinsTheTools(t *testing.T) {
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithTools(namedTool(t, "read")),
+		agentkit.WithMCPTransport(serveMCP(t, "remote_one")),
+		agentkit.WithToolProvider(func(context.Context) []agenttool.Tool {
+			return []agenttool.Tool{namedTool(t, "provided")}
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	label, err := kit.AddMCPTransport(t.Context(), serveMCP(t, "remote_two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(label, "mcp:#2 ") {
+		t.Fatalf("label = %q, want it numbered after New's server", label)
+	}
+	tools := kit.Config().ResolveTools(t.Context())
+	if got := strings.Join(toolNames(tools), " "); got != "read remote_one remote_two provided" {
+		t.Fatalf("tools = %s, want the added server after New's and before the provider's", got)
+	}
+	var origin string
+	for _, o := range kit.Tools() {
+		if o.Name == "remote_two" {
+			origin = o.Source
+		}
+	}
+	if origin != label {
+		t.Fatalf("Kit.Tools names remote_two's source %q, want %q", origin, label)
+	}
+	for _, tool := range tools {
+		if tool.Name() == "remote_two" {
+			if _, err := tool.Execute(t.Context(), agenttool.Call{ID: "c1", Args: json.RawMessage(`{}`)}); err != nil {
+				t.Fatalf("a call to the added server = %v", err)
+			}
+		}
+	}
+}
+
+// A server whose tool takes a name the kit offers now is refused and
+// closed, whether the name is before it or a provider's after it: this
+// is when the product can still prefix it. (#50)
+func TestAServerAddedWithATakenNameIsRefused(t *testing.T) {
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithTools(namedTool(t, "read")),
+		agentkit.WithToolProvider(func(context.Context) []agenttool.Tool {
+			return []agenttool.Tool{namedTool(t, "provided")}
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	for _, name := range []string{"read", "provided"} {
+		if _, err := kit.AddMCPTransport(t.Context(), serveMCP(t, name)); err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("adding a server offering %s = %v, want a conflict naming it", name, err)
+		}
+	}
+	if got := strings.Join(toolNames(kit.Config().ResolveTools(t.Context())), " "); got != "read provided" {
+		t.Fatalf("tools = %s after two refused servers, want them unchanged", got)
+	}
+	if _, err := kit.AddMCPTransport(t.Context(), serveMCP(t, "read"), mcpclient.WithPrefix("fs")); err != nil {
+		t.Fatalf("a prefixed server = %v, want it added", err)
+	}
+}
+
+// RemoveMCP drops an added server's tools and closes it, and refuses a
+// label that names no added server; Close closes what is left, and a
+// server added after it is refused. (#50)
+func TestAnAddedServerIsRemovedAndClosed(t *testing.T) {
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithMCPTransport(serveMCP(t, "remote_one")),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := kit.AddMCPTransport(t.Context(), serveMCP(t, "remote_two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	three, err := kit.AddMCPTransport(t.Context(), serveMCP(t, "remote_three"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kit.RemoveMCP(two); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(toolNames(kit.Config().ResolveTools(t.Context())), " "); got != "remote_one remote_three" {
+		t.Fatalf("tools = %s after removing %s", got, two)
+	}
+	for _, o := range kit.Tools() {
+		if o.Source == two {
+			t.Fatalf("Kit.Tools still lists %s from a removed server", o.Name)
+		}
+	}
+	if err := kit.RemoveMCP(two); err == nil {
+		t.Error("removing a server twice was accepted")
+	}
+	if err := kit.RemoveMCP(kit.Tools()[0].Source); err == nil {
+		t.Error("removing a server New dialed was accepted")
+	}
+
+	if err := kit.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(kit.Config().ResolveTools(t.Context())); n != 0 {
+		t.Fatalf("tools = %d after Close, want 0", n)
+	}
+	if err := kit.RemoveMCP(three); err == nil {
+		t.Error("Close left the added server to be removed")
+	}
+	if _, err := kit.AddMCPTransport(t.Context(), serveMCP(t, "remote_four")); err == nil {
+		t.Error("a server added after Close was accepted")
+	}
+}
+
+// A kit with no tool source has no ToolProvider in its config, so there
+// is nothing to offer an added server's tools through. (#50)
+func TestAddingAServerToAKitWithNoToolsIsAnError(t *testing.T) {
+	kit, err := agentkit.New(t.Context(), agentkit.WithModel(stubModel{}, "m"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	if _, err := kit.AddMCPTransport(t.Context(), serveMCP(t, "remote_one")); err == nil {
+		t.Fatal("a server was added to a kit whose config has no ToolProvider")
+	}
+}
+
+// In a session under way, the request after AddMCP offers the server's
+// tools and the session records them arriving. (#50)
+func TestAServerAddedMidSessionIsRecorded(t *testing.T) {
+	sessions := agentsession.NewMemoryStore()
+	model := &scriptModel{}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(model, "m"),
+		agentkit.WithTools(namedTool(t, "read")),
+		agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	agent := agentturn.New(kit.Config())
+	defer kit.Attach(agent)()
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("one")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kit.AddMCPTransport(t.Context(), serveMCP(t, "remote_one")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("two")); err != nil {
+		t.Fatal(err)
+	}
+	offered := func(req openresponses.Request) bool {
+		for _, tool := range req.Tools {
+			if strings.Contains(string(mustJSON(t, tool)), `"remote_one"`) {
+				return true
+			}
+		}
+		return false
+	}
+	reqs := model.requests()
+	if len(reqs) != 2 || offered(reqs[0]) || !offered(reqs[1]) {
+		t.Fatalf("remote_one offered in %d requests: want only the one after AddMCP", len(reqs))
+	}
+	var added bool
+	for _, c := range configEntries(openSession(t, sessions, kit.SessionID())) {
+		for _, tool := range c.ToolsAdded {
+			added = added || strings.Contains(string(mustJSON(t, tool)), `"remote_one"`)
+		}
+	}
+	if !added {
+		t.Fatal("the session does not record remote_one arriving")
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

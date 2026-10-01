@@ -87,6 +87,20 @@ type Kit struct {
 	seedOps []agentturn.Option
 	remotes []*mcpclient.Remote
 
+	// tools is the union the config's ToolProvider reads, which a server
+	// AddMCP connects joins; nil when the kit has no tool source.
+	tools *toolSet
+	// mcpStderr and mcpElicit are how New dialed its servers, which
+	// AddMCP dials the same way.
+	mcpStderr io.Writer
+	mcpElicit bool
+	// mcpMu guards added, the servers AddMCP connected and RemoveMCP has
+	// not removed, mcpNext, the number the next one is labelled with,
+	// and origins, which Kit.Tools reads and AddMCP and RemoveMCP change.
+	mcpMu   sync.Mutex
+	added   []addedMCP
+	mcpNext int
+
 	// ownRec is true when the kit opened the recorder, and so is the one
 	// to attach it; false under WithRecorder, whose owner attaches it.
 	ownRec bool
@@ -458,50 +472,73 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 func (k *Kit) dial(ctx context.Context, s *settings) error {
 	// Each server's stderr is copied on a goroutine of its own, so the
 	// product's writer is shared behind one lock.
-	var stderr io.Writer
 	if s.mcpStderr != nil {
-		stderr = &lockedWriter{w: s.mcpStderr}
+		k.mcpStderr = &lockedWriter{w: s.mcpStderr}
 	}
+	k.mcpElicit, k.mcpNext = s.elicitor != nil, len(s.mcp)
 	for i, d := range s.mcp {
-		t := d.transport
-		var tail *stderrTail
-		if t == nil {
-			fields := strings.Fields(d.command)
-			if len(fields) == 0 {
-				return errors.New("agentkit: WithMCP was given an empty command")
-			}
-			// Not CommandContext: ctx bounds New, and a server whose
-			// process died the moment New returned would offer its
-			// tools to exactly no turns.
-			cmd := exec.Command(fields[0], fields[1:]...)
-			// The server's diagnostics go to WithMCPStderr, and the
-			// last of them are kept for the error below, since a server
-			// that fails at start says why on stderr and the SDK reports
-			// only that the connection closed. The pipe that copies them
-			// is waited for a bounded time after the process exits, so
-			// a grandchild holding it open cannot hang Close.
-			tail = &stderrTail{w: stderr}
-			cmd.Stderr, cmd.WaitDelay = tail, mcpWaitDelay
-			t = &sdk.CommandTransport{Command: cmd}
-		}
-		opts := d.opts
-		if s.elicitor != nil {
-			// The client offers MCP's elicitation only when asked, and
-			// the product has said who answers; the product's own
-			// options follow and may still override it.
-			opts = append([]mcpclient.Option{mcpclient.WithElicitation()}, opts...)
-		}
-		remote, err := mcpclient.Connect(ctx, t, opts...)
+		remote, err := k.connect(ctx, d, i)
 		if err != nil {
-			err = fmt.Errorf("agentkit: connecting to MCP server %s: %w", d.label(i), err)
-			if said := tail.String(); said != "" {
-				err = fmt.Errorf("%w; its stderr ended: %s", err, said)
-			}
 			return err
 		}
 		k.remotes = append(k.remotes, remote)
 	}
 	return nil
+}
+
+// connect dials one server. i is its position among every server the
+// kit has been given, from zero; its label numbers it from one.
+func (k *Kit) connect(ctx context.Context, d mcpDial, i int) (*mcpclient.Remote, error) {
+	t := d.transport
+	var tail *stderrTail
+	if t == nil {
+		fields := strings.Fields(d.command)
+		if len(fields) == 0 {
+			return nil, errors.New("agentkit: an MCP server was given an empty command")
+		}
+		// Not CommandContext: ctx bounds the dial, New or AddMCP, and
+		// a server whose process died the moment the dial returned
+		// would offer its tools to exactly no turns.
+		cmd := exec.Command(fields[0], fields[1:]...)
+		// The server's diagnostics go to WithMCPStderr, and the
+		// last of them are kept for the error below, since a server
+		// that fails at start says why on stderr and the SDK reports
+		// only that the connection closed. The pipe that copies them
+		// is waited for a bounded time after the process exits, so
+		// a grandchild holding it open cannot hang Close.
+		tail = &stderrTail{w: k.mcpStderr}
+		cmd.Stderr, cmd.WaitDelay = tail, mcpWaitDelay
+		t = &sdk.CommandTransport{Command: cmd}
+	}
+	opts := d.opts
+	if k.mcpElicit {
+		// The client offers MCP's elicitation only when asked, and
+		// the product has said who answers; the product's own
+		// options follow and may still override it.
+		opts = append([]mcpclient.Option{mcpclient.WithElicitation()}, opts...)
+	}
+	remote, err := mcpclient.Connect(ctx, t, opts...)
+	if err != nil {
+		err = fmt.Errorf("agentkit: connecting to MCP server %s: %w", d.label(i), err)
+		if said := tail.String(); said != "" {
+			err = fmt.Errorf("%w; its stderr ended: %s", err, said)
+		}
+		return nil, err
+	}
+	return remote, nil
+}
+
+// remoteSource is a server's tools as a live source of the union.
+func (k *Kit) remoteSource(label string, remote *mcpclient.Remote) source {
+	return source{name: label, live: func(context.Context) []agenttool.Tool {
+		// A closed remote still holds the list it last fetched, and
+		// offering the model a tool whose session is gone is worse than
+		// offering it nothing: the call reaches the loop and fails there.
+		if k.closed.Load() {
+			return nil
+		}
+		return remote.Tools()
+	}}
 }
 
 // mcpWaitDelay bounds how long closing a server the kit started waits
@@ -730,18 +767,9 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 		ts.sources = append(ts.sources, source{name: "WithMemory", tools: tools})
 	}
 	for i, remote := range k.remotes {
-		label := "mcp:" + s.mcp[i].label(i)
-		ts.sources = append(ts.sources, source{name: label, live: func(context.Context) []agenttool.Tool {
-			// A closed remote still holds the list it last fetched, and
-			// offering the model a tool whose session is gone is worse
-			// than offering it nothing: the call reaches the loop and
-			// fails there.
-			if k.closed.Load() {
-				return nil
-			}
-			return remote.Tools()
-		}})
+		ts.sources = append(ts.sources, k.remoteSource("mcp:"+s.mcp[i].label(i), remote))
 	}
+	ts.addAt = len(ts.sources)
 	for i, fn := range s.toolProvide {
 		ts.sources = append(ts.sources, source{
 			name: fmt.Sprintf("WithToolProvider #%d", i+1),
@@ -755,6 +783,7 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 	}
 
 	ts.prepare()
+	k.tools = ts
 
 	// A collision the kit can see now is an error, because the two
 	// tools are both there and the caller can fix it. A collision that
@@ -1760,8 +1789,11 @@ func (k *Kit) LookupTool(name string) (agenttool.Tool, bool) {
 // The kit does not allow them itself: whether a library's tool runs
 // unasked is the product's decision. An MCP server's list and a
 // provider's are fetched each turn, so a tool they add after New is
-// not here.
+// not here. A server [Kit.AddMCP] connected is, with the tools it
+// listed when it was added, until [Kit.RemoveMCP] removes it.
 func (k *Kit) Tools() []ToolOrigin {
+	k.mcpMu.Lock()
+	defer k.mcpMu.Unlock()
 	return append([]ToolOrigin(nil), k.origins...)
 }
 
@@ -1882,7 +1914,7 @@ func (k *Kit) MemoryManifest() agentmemory.Manifest {
 }
 
 // Close releases what [New] opened, in reverse order, joining the
-// errors: the MCP clients. The stores a caller passed in — the memory
+// errors: the MCP clients, those [Kit.AddMCP] connected first. The stores a caller passed in — the memory
 // store, the session store — stay the caller's to sync, release and
 // close, since the kit did not open them.
 //
@@ -1892,6 +1924,14 @@ func (k *Kit) MemoryManifest() agentmemory.Manifest {
 func (k *Kit) Close() error {
 	k.closed.Store(true)
 	var errs []error
+	k.mcpMu.Lock()
+	for i := len(k.added) - 1; i >= 0; i-- {
+		if err := k.added[i].remote.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	k.added = nil
+	k.mcpMu.Unlock()
 	for i := len(k.remotes) - 1; i >= 0; i-- {
 		if err := k.remotes[i].Close(); err != nil {
 			errs = append(errs, err)

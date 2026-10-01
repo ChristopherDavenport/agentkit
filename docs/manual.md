@@ -294,6 +294,45 @@ error `New` returns when the server fails to start. With
 `WithToolElicitor` set, `mcpclient.WithElicitation()` goes ahead of
 `opts`, since a client offers elicitation only when asked.
 
+`Kit.AddMCP` and `Kit.AddMCPTransport` connect a server after `New`,
+the same way, and `Kit.RemoveMCP` closes one. By hand they are a list
+of remotes the provider reads each turn, after `New`'s servers and
+ahead of `WithToolProvider`'s:
+
+```go
+var (
+	mu    sync.Mutex
+	added []*mcpclient.Remote
+)
+provider := func(ctx context.Context) []agenttool.Tool {
+	out := append(tools, remote.Tools()...)
+	mu.Lock()
+	for _, r := range added {
+		out = append(out, r.Tools()...)
+	}
+	mu.Unlock()
+	return append(out, yours(ctx)...) // WithToolProvider
+}
+
+// Mid-session: dial as New does, refuse a name already offered, add.
+r, err := mcpclient.Connect(ctx, t, opts...)
+for _, tool := range r.Tools() {
+	if offered(tool.Name()) { // a name in provider(ctx)
+		r.Close()
+		return Conflict{...}
+	}
+}
+mu.Lock()
+added = append(added, r)
+mu.Unlock()
+```
+
+The kit labels each added server's tools `mcp:#<n> <what>`, numbered
+after the servers before it, for `WithToolFilter`, `WithToolWrap`, a
+`Conflict` and `Kit.Tools()`, and `Close` closes them. A turn already
+running keeps the tools it was offered, and the recorder writes the new
+ones as `tools_added` on the next.
+
 `WithChildAgent` is the line above with `childagent.New`: the kit binds
 `WithObserver` and `WithRunContext` to the run's recorder, the memory
 bridge only when `WithMemory` is configured, and adds nothing else, so a
