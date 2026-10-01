@@ -1,4 +1,3 @@
-cloud.google.com/go/compute/metadata v0.3.0/go.mod h1:zFmK7XCadkQkj6TtorcaGlCW1hT1fIilQDwofLpJ20k=
 github.com/ChristopherDavenport/agentmemory v0.0.8 h1:WjlK580qFl+JjZLPbITqZRBeOsVYe07FieZPyXOoKAU=
 github.com/ChristopherDavenport/agentmemory v0.0.8/go.mod h1:SJuvmjojeq4nVYTEljG2AbDwNuN1rHplwz8pSMCAWHw=
 github.com/ChristopherDavenport/agentpolicy v0.0.9 h1:w5SBiudZ6EblXHYi4ZOFlwku1Q5i4CyYohP1SnpPbO8=
@@ -19,7 +18,6 @@ github.com/ChristopherDavenport/agentturn/session v0.0.14 h1:71Xo2V8uQE+owkbdJpZ
 github.com/ChristopherDavenport/agentturn/session v0.0.14/go.mod h1:Sd0hrrkaZeAQao5h1VH/pmgi0qt1HtnXHqPGV3OOrHk=
 github.com/ChristopherDavenport/openresponses v0.0.12 h1:Cg4gYqf1ZMVQhYRmD94f068OLUQEv4rIK/9bl8EBUA4=
 github.com/ChristopherDavenport/openresponses v0.0.12/go.mod h1:oZT6GCySXw3+vL5LzrJrRI5qagBumqvwDZdp6Kr++a8=
-github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63YCY=
 github.com/golang-jwt/jwt/v5 v5.3.1/go.mod h1:fxCRLWMO43lRc8nhHWY6LGqRcf+1gQWArsqaEUEa5bE=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
