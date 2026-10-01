@@ -5,9 +5,9 @@ import (
 	"testing"
 
 	"github.com/ChristopherDavenport/agentmemory"
-	"github.com/ChristopherDavenport/agentpolicy"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/agentturn/session"
+	"github.com/ChristopherDavenport/openresponses"
 )
 
 // The bounded map keeps the last renderedRuns keys put, whatever mix of
@@ -47,13 +47,15 @@ func TestBoundedKeepsTheNewestKeys(t *testing.T) {
 // its own run: keyed by call ID alone, the first kept stood for both.
 func TestTwoConversationsCallsOfOneIDKeepTheirOwnBase(t *testing.T) {
 	k := &Kit{memory: true}
-	observe := k.observeVerdicts(&settings{}, false)
 	for _, conv := range []string{"conv-a", "conv-b"} {
 		ctx := session.ContextWithSessionID(agentturn.ContextWithRunID(t.Context(), "run-"+conv), conv)
 		k.mu.Lock()
 		k.rendered.put("run-"+conv, agentmemory.Manifest{Entries: []agentmemory.ManifestEntry{{Scope: "user", Name: conv}}})
 		k.mu.Unlock()
-		observe(ctx, agentpolicy.Verdict{Tool: agentmemory.SaveTool, CallID: "call_0", RunID: "run-" + conv})
+		call := &openresponses.FunctionCall{Name: agentmemory.SaveTool, CallID: "call_0"}
+		if _, err := k.keepSaveBase(ctx, agentturn.ToolCallInfo{RunID: "run-" + conv, Call: call}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, conv := range []string{"conv-a", "conv-b"} {
 		ctx := session.ContextWithSessionID(t.Context(), conv)

@@ -3,6 +3,124 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+The round 6 findings (#37 to #47), and the siblings' round 6 releases
+taken up.
+
+### Security
+
+- A skill grant no longer reaches another conversation. A grant is a
+  rule set on the kit's one engine, which applies it to every decision,
+  so a kit served to many conversations under `ContextWithRecorder`
+  let every conversation run what one conversation's skill read
+  allowed, and a user message in any of them ended the grant under
+  `WithSkillGrantScope`. A kit's grants now belong to one conversation:
+  the session it opened or was given, or the conversation of its first
+  grant. The first call the kit decides in any other conversation
+  revokes every grant before it is decided, recorded in the owner's
+  session, and from then on the kit grants nothing; a read elsewhere is
+  reported with the new `ErrSkillGrantConversation`. A front that grants
+  skills to many conversations gives each its own kit. agentpolicy has
+  no way to decide one conversation's call without another's grants, so
+  this fails closed rather than scoping them. The new
+  `Kit.RegrantSkills` restores a session's grants for a front that
+  resumes the conversation itself. (#44)
+- A restart never widens a skill grant. The replay granted the skill's
+  `allowed-tools` as they stood at `New`, so a skill widened between a
+  held call and its approval was granted rules the model never read,
+  and a read the engine withheld as untrusted was granted once the
+  source function trusted it. The replay now grants only the rules the
+  path's `granted <rule> by <source>` verdicts say the read was granted
+  and that the skill still allows, and passes over a read whose digest
+  is not what the catalogue's tool serves for the name now. Under
+  `WithEngine`, where the kit records no verdict, it is the catalogue's
+  rules as before. (#45)
+- A held `memory_save` keeps its base whoever holds it. The base was
+  kept by the observer of the engine `WithPolicy` builds, so a save held
+  by a `WithEngine` engine or a product `BeforeToolCall` hook, held
+  across a restart under `ContextWithRecorder`, or made after 1,024
+  other runs rendered, was based on the kit's last render and could
+  discard a write made after its model read the block, with nothing
+  reported. A `BeforeToolCall` hook of the kit's, ahead of the engine
+  and the product's hooks, now keeps it; a call with no kept base is
+  based on the manifest in force on its session's path at the call; and
+  a call in a run with neither is refused, telling the model to search
+  for the entry and save again. Only a call outside any run is based on
+  `Kit.MemoryManifest`. `New` no longer folds the pending saves itself,
+  since the path is folded when the save runs. (#41)
+
+### Changed
+
+- **Breaking**: requires agentturn and agentturn/session v0.0.14,
+  agentsession v0.0.18, agenttool and agenttool/mcpclient v0.0.12,
+  agentpolicy v0.0.9, agentskill v0.0.9 and agentmemory v0.0.8.
+  Sessions are written as `agentsession/0.10`, and a 0.9 file the
+  recorder appends to is raised to 0.10, after which agentsession
+  v0.0.12 to v0.0.17 refuse it: upgrade every reader of a store first.
+  A `cas` store is migrated to per-session logs on its first writing
+  open, after which agentsession v0.0.15 and earlier cannot read it.
+- A `compact.WithOnFold` in `WithCompaction`'s or `WithCompactor`'s
+  options runs again, after the kit records the fold. agentturn
+  v0.0.14's `WithOnFold` adds a callback rather than replacing the one
+  before it, so the kit registers its own ahead of the product's, and
+  v0.0.3's breaking change, which dropped the product's with no error,
+  is undone. (#38)
+- The memory manifest is a delta wherever the kit records it. The kit
+  read the path only of the session `New` opened, so under a recorder on
+  the run's context, the first turn after a restart or a `Rebase`, and a
+  handoff, every write was the whole manifest. The kit now reads the
+  path of whichever session the record lands in through the recorder's
+  store, whose `Open` hands back the live session it holds, and writes
+  `RecordSince` the manifest in force there, or nothing when the render
+  says what the path already says. Whole is left for a session with
+  nothing in force. (#42)
+- A kit handed back to after a handoff records its render again even
+  when it did not move. A kit under `WithRecorder` took "I wrote to this
+  session before" for "my record is last", so the path's last manifest
+  was the other agent's memory. It now sees the other kit's record on
+  the path, and, for a store that cannot open the session, a record of
+  the last manifest any kit in the process wrote there. (#43)
+- A restart's replay of skill grants is silent. It recorded every live
+  grant's verdicts again and called `WithSkillGrantReport` as if the
+  skill were read, so a daemon restarted every few minutes grew its
+  session by a verdict per rule per restart. The replay now records
+  nothing, the verdicts it repeats being on the path, and reports with
+  the new `SkillGrant.Replayed` set. (#46)
+- A memory budget too small for the block drops the block. agentmemory
+  v0.0.8 refuses such a bound with `ErrBudget`, which `New` would have
+  returned as an error.
+
+### Documentation
+
+- `docs/manual.md`'s `guardParts` sets each per-part verdict's
+  `Subject` to `instructions/<part id>`, as the kit does, and
+  `TestTheManualPathKeepsARedactedSecretOutOfTheRecord` compares the
+  two paths' guard verdicts. Written from the manual, a product
+  recorded them with no subject. (#39)
+- The README's first example takes its skills from
+  `WithOptionalSkills(repoRoot/.dex/skills, home/.dex/skills)`, since
+  `WithSkills(".dex/skills")` failed `New` in every repository without
+  one, relative to the process's directory. The serving paragraph no
+  longer says a peer needs no option, and names
+  `fronta2a.WithRecorderFor` and `RecordEach`. (#40)
+- `WithMCP` and `WithMCPTransport` say that a server's connection is
+  dialed once and its identity is the kit's, so an OAuth-authorized
+  server acts as whoever authorized it for every conversation, and that
+  a front serving several users gives each a kit. Connecting per user
+  needs a token store mcpclient does not have yet. (#47)
+- `ContextWithRecorder`'s example releases the conversation's session
+  when the task ends, and says that skill grants and MCP connections
+  stay the kit's.
+
+### Fixed
+
+- `examples/a2a`'s `RecordEach` releases a conversation's session when
+  the last task running in it ends, and the next message resumes it. A
+  server held every session it had served, a lock and the whole session
+  each, so no other process could open one. Its stale "the root is not
+  released" comment is gone. (#37)
+
 ## v0.0.3 - 2026-09-29
 
 The round 5 findings (#28 to #35), and the siblings' round 5 releases

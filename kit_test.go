@@ -1524,6 +1524,43 @@ func TestAFoldObserverHearsEveryFoldBesideTheRecorder(t *testing.T) {
 	}
 }
 
+// A compact.WithOnFold the product passes to WithCompaction is called on
+// every fold, beside the recorder and WithFoldObserver, with or without
+// a session: v0.0.3 replaced it with the kit's own and it never ran.
+// (#38)
+func TestAProductsOnFoldRunsBesideTheKits(t *testing.T) {
+	for _, recorded := range []bool{false, true} {
+		var product, observed atomic.Int32
+		opts := []agentkit.Option{
+			agentkit.WithModel(&scriptModel{}, "test-model"),
+			agentkit.WithCompaction(1, compact.WithKeepLast(2), compact.WithOnFold(func(context.Context, compact.Fold) error {
+				product.Add(1)
+				return nil
+			})),
+			agentkit.WithFoldObserver(func(context.Context, compact.Fold) { observed.Add(1) }),
+		}
+		if recorded {
+			opts = append(opts, agentkit.WithSession(agentsession.NewMemoryStore(), agentsession.Header{CWD: t.TempDir()}))
+		}
+		kit, err := agentkit.New(t.Context(), opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		agent := agentturn.New(kit.Config())
+		detach := kit.Attach(agent)
+		for _, text := range []string{"one", "two", "three"} {
+			if _, err := agent.Prompt(t.Context(), openresponses.UserText(text)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		detach()
+		_ = kit.Close()
+		if observed.Load() == 0 || product.Load() != observed.Load() {
+			t.Fatalf("recorded=%v: the product's WithOnFold ran %d times and the observer heard %d folds", recorded, product.Load(), observed.Load())
+		}
+	}
+}
+
 // A scope the model may read and not write is rendered into the block,
 // reachable through memory_search and refused by the writers. (#23)
 func TestAReadScopeIsRenderedAndNotWritable(t *testing.T) {
@@ -1704,5 +1741,31 @@ func TestAGuardsRefusalAtNewNamesThePart(t *testing.T) {
 	}
 	if !errors.Is(err, agentturn.ErrGuard) {
 		t.Errorf("New's error does not wrap agentturn.ErrGuard: %v", err)
+	}
+}
+
+// A memory share above zero and under what the block's title and
+// headings take drops the block, as a share of nothing does: agentmemory
+// v0.0.8 refuses such a bound with ErrBudget, which New must not return.
+func TestAMemoryShareUnderTheBlocksFloorDropsTheBlock(t *testing.T) {
+	const prompt = "Be brief."
+	budget := int64(len(prompt)+2*len(agentkit.Separator)+len(agentmemory.Usage())) + 20
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithInstructions(prompt),
+		agentkit.WithMemory(memStore(t, manyFacts("mine")...), "user"),
+		agentkit.WithInstructionBudget(budget),
+	)
+	if err != nil {
+		t.Fatalf("New = %v, want the block dropped", err)
+	}
+	defer kit.Close()
+	for _, p := range kit.Parts() {
+		if isMemoryPart(p.ID) {
+			t.Fatalf("part %s was sent under a %d byte share", p.ID, 20)
+		}
+	}
+	if len(kit.Omitted()) == 0 {
+		t.Fatal("the dropped entries are not reported")
 	}
 }

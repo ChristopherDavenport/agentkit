@@ -10,8 +10,10 @@ kit, err := agentkit.New(ctx,
 	agentkit.WithModel(model, "gpt-5"),
 	agentkit.WithInstructions("Be brief."),
 	agentkit.WithAgentsMD(cwd, agentsmd.Options{Root: repoRoot}),
-	agentkit.WithSkills(".dex/skills"),
-	agentkit.WithOptionalSkills(filepath.Join(home, ".dex", "skills")),
+	agentkit.WithOptionalSkills(
+		filepath.Join(repoRoot, ".dex", "skills"),
+		filepath.Join(home, ".dex", "skills"),
+	),
 	agentkit.WithMemory(store, "user", "project"),
 	agentkit.WithPolicy(policy, matchers),
 	agentkit.WithTools(read, write, edit, bash),
@@ -33,7 +35,10 @@ defer kit.Attach(agent)()
 ```
 
 `New` does the work that can fail — discovery, validation, opening the
-session, dialing MCP — and reports it once. `Config()` is then pure and
+session, dialing MCP — and reports it once. The skill directories are
+optional because most repositories and most users have none;
+`WithSkills` refuses a directory that is not there, for a product whose
+skills ship with it. `Config()` is then pure and
 can be called per run. `Close()` releases what `New` opened.
 
 `Attach` is the one step a `Config` cannot carry. The recorder has to
@@ -216,16 +221,26 @@ again is granted again.
 
 agentturn's composition story is a model, a tool, a peer and an
 in-process agent. The kit has options for three of them and, by
-design, none for a peer — because a peer does not need one. `Config()`
-returns a plain `agentturn.Config`, so a remote peer is an ordinary
-tool through `WithTools`, and serving the agent as a peer is
-`fronta2a.New(kit.Config())`. If a peer needed an option, the kit
-would have a seam. A front that records each conversation as its own
-session prompts each run with `agentkit.ContextWithRecorder(ctx, rec)`,
-so the verdicts, the memory manifest and the folds the kit's hooks
-write land in that conversation's session and not in the kit's. An
-engine a product built for `WithEngine` records its verdicts there only
-if its own observer reads `agentkit.RecorderFromContext`.
+design, none for a peer. `Config()` returns a plain `agentturn.Config`,
+so a remote peer is an ordinary tool through `WithTools`, and serving
+the agent as a peer is `fronta2a.New(kit.Config())`.
+
+Recording what a served agent does is the one place the kit adds a
+seam, `agentkit.ContextWithRecorder`. A front that records each
+conversation as its own session opens a recorder per conversation in
+`fronta2a.WithRecorderFor` and prompts each run with
+`agentkit.ContextWithRecorder(ctx, rec)`, so the verdicts, the memory
+manifest and the folds the kit's hooks write land in that
+conversation's session and not in the kit's. `RecordEach` in
+[`examples/a2a`](examples/a2a/a2a.go) is that function, releasing each
+session when its conversation's last task ends; copy it. An engine a
+product built for `WithEngine` records its verdicts there only if its
+own observer reads `agentkit.RecorderFromContext`. A skill grant and an
+MCP server's connection stay the kit's, not the conversation's: the
+kit revokes its grants the first time it serves a second conversation,
+and every conversation calls an MCP server as whoever authorized the
+connection. A front that needs either per conversation or per user
+builds a kit for each.
 
 `WithChildAgent` is the in-process one, and it exists for a different
 reason than a seam: it binds the child's observer and run context to
@@ -258,13 +273,13 @@ a2a.
 | library | version |
 |---|---|
 | `openresponses` | v0.0.12 |
-| `agenttool`, `agenttool/mcpclient` | v0.0.11 |
-| `agentturn`, `agentturn/session` | v0.0.12 |
-| `agentsession` | v0.0.15 |
+| `agenttool`, `agenttool/mcpclient` | v0.0.12 |
+| `agentturn`, `agentturn/session` | v0.0.14 |
+| `agentsession` | v0.0.18 |
 | `agentsmd` | v0.0.2 |
-| `agentskill` | v0.0.8 |
-| `agentmemory` | v0.0.7 |
-| `agentpolicy` | v0.0.8 |
+| `agentskill` | v0.0.9 |
+| `agentmemory` | v0.0.8 |
+| `agentpolicy` | v0.0.9 |
 
 Every sibling is required at a released version with no `replace`, and
 `make no-replace` enforces it: the kit is the module that proves the

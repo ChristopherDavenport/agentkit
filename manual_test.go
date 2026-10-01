@@ -3,9 +3,11 @@ package agentkit_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -278,13 +280,28 @@ func TestTheManualPathKeepsARedactedSecretOutOfTheRecord(t *testing.T) {
 	unsubscribe()
 
 	// The manual side, as docs/manual.md writes it.
-	chain := guard.Chain{Guards: guards}
-	guardParts := func(ctx context.Context, parts []agentsession.InstructionPart) ([]agentsession.InstructionPart, error) {
+	var rec *session.Recorder
+	observe := func(ctx context.Context, v agentpolicy.Verdict) {
+		if v.Guard == "" || v.Action != agentturn.Allow || v.Reason != "" {
+			ns, data := v.Record()
+			_, _ = rec.Annotate(ctx, ns, json.RawMessage(data))
+		}
+	}
+	chain := guard.Chain{Guards: guards, Observer: observe}
+	guardParts := func(ctx context.Context, c guard.Chain, parts []agentsession.InstructionPart) ([]agentsession.InstructionPart, error) {
 		out := make([]agentsession.InstructionPart, 0, len(parts))
 		for _, p := range parts {
+			pc := c
+			if obs := c.Observer; obs != nil {
+				subject := "instructions/" + p.ID
+				pc.Observer = func(ctx context.Context, v agentpolicy.Verdict) {
+					v.Subject = subject
+					obs(ctx, v)
+				}
+			}
 			one := openresponses.Request{Instructions: p.Text}
-			if err := chain.BeforeModelCall()(ctx, &one); err != nil {
-				return nil, err
+			if err := pc.BeforeModelCall()(ctx, &one); err != nil {
+				return nil, fmt.Errorf("instructions/%s: %w", p.ID, err)
 			}
 			if one.Instructions != "" {
 				p.Text = one.Instructions
@@ -308,7 +325,7 @@ func TestTheManualPathKeepsARedactedSecretOutOfTheRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := guardParts(t.Context(), rendered)
+	first, err := guardParts(t.Context(), guard.Chain{Guards: guards}, rendered)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +354,7 @@ func TestTheManualPathKeepsARedactedSecretOutOfTheRecord(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				guarded, err := guardParts(ctx, parts)
+				guarded, err := guardParts(ctx, chain, parts)
 				if err != nil {
 					return err
 				}
@@ -352,7 +369,7 @@ func TestTheManualPathKeepsARedactedSecretOutOfTheRecord(t *testing.T) {
 		OutputGuard:         chain.OutputGuard(),
 		ShouldStopAfterTurn: chain.ShouldStopAfterTurn(),
 	}
-	rec, _, err := session.Start(t.Context(), sessions, agentsession.Header{CWD: t.TempDir()},
+	rec, _, err = session.Start(t.Context(), sessions, agentsession.Header{CWD: t.TempDir()},
 		session.WithInstructionsParts(partsFor))
 	if err != nil {
 		t.Fatal(err)
@@ -377,6 +394,29 @@ func TestTheManualPathKeepsARedactedSecretOutOfTheRecord(t *testing.T) {
 			t.Fatal("a request carried the secret")
 		}
 	}
+	// The guards' verdicts name the part they were about the same way on
+	// both paths. (#39)
+	redacted := func(id string) []string {
+		var out []string
+		for _, c := range customEntries(openSession(t, sessions, id), agentpolicy.VerdictNS) {
+			var v struct{ Guard, Subject string }
+			if err := json.Unmarshal(c.Data, &v); err != nil {
+				t.Fatal(err)
+			}
+			if v.Guard != "" {
+				out = append(out, v.Guard+" "+v.Subject)
+			}
+		}
+		return out
+	}
+	kitVerdicts, manualVerdicts := redacted(kit.SessionID()), redacted(rec.SessionID())
+	if len(kitVerdicts) == 0 || !slices.Equal(kitVerdicts, manualVerdicts) {
+		t.Errorf("the guards' verdicts differ:\n kit    %q\n manual %q", kitVerdicts, manualVerdicts)
+	}
+	if !slices.Contains(kitVerdicts, "redact instructions/memory/user/aws") {
+		t.Errorf("the kit's guard verdicts %q do not name the memory entry the secret was in", kitVerdicts)
+	}
+
 	for name, id := range map[string]string{"kit": kit.SessionID(), "manual": rec.SessionID()} {
 		entries := configEntries(openSession(t, sessions, id))
 		if len(entries) == 0 {

@@ -278,9 +278,16 @@ func memoryPart(ctx context.Context, s *settings, limit int64) ([]Part, agentmem
 	if limit > 0 && int64(len(agentmemory.JoinParts(parts))) > limit {
 		bounded := append(append([]agentmemory.RenderOption(nil), opts...),
 			agentmemory.WithMaxTotalBytes(int(limit)))
-		parts, man, err = agentmemory.RenderParts(ctx, s.memStore, scopes, bounded...)
-		if err != nil {
-			return nil, man, nil, fmt.Errorf("agentkit: rendering memory: %w", err)
+		bp, bm, err := agentmemory.RenderParts(ctx, s.memStore, scopes, bounded...)
+		switch {
+		case errors.Is(err, agentmemory.ErrBudget):
+			// The share is under the block's floor. The unbounded
+			// render's manifest names what the drop below omits.
+			limit = -1
+		case err != nil:
+			return nil, bm, nil, fmt.Errorf("agentkit: rendering memory: %w", err)
+		default:
+			parts, man = bp, bm
 		}
 	}
 	size := int64(len(agentmemory.JoinParts(parts)))

@@ -7,25 +7,25 @@ go 1.25.0
 // without a gRPC stack; see the package doc.
 require (
 	github.com/ChristopherDavenport/agentkit v0.0.0
-	github.com/ChristopherDavenport/agenttool v0.0.11
-	github.com/ChristopherDavenport/agentturn v0.0.12
-	github.com/ChristopherDavenport/agentturn/front/a2a v0.0.12
-	github.com/ChristopherDavenport/agentturn/tools/a2a v0.0.12
+	github.com/ChristopherDavenport/agenttool v0.0.12
+	github.com/ChristopherDavenport/agentturn v0.0.14
+	github.com/ChristopherDavenport/agentturn/front/a2a v0.0.14
+	github.com/ChristopherDavenport/agentturn/tools/a2a v0.0.14
 	github.com/a2aproject/a2a-go v0.3.15
 )
 
 require (
-	github.com/ChristopherDavenport/agentsession v0.0.15
-	github.com/ChristopherDavenport/agentturn/session v0.0.12
+	github.com/ChristopherDavenport/agentsession v0.0.18
+	github.com/ChristopherDavenport/agentturn/session v0.0.14
+	github.com/ChristopherDavenport/openresponses v0.0.12
 )
 
 require (
-	github.com/ChristopherDavenport/agentmemory v0.0.7 // indirect
-	github.com/ChristopherDavenport/agentpolicy v0.0.8 // indirect
-	github.com/ChristopherDavenport/agentskill v0.0.8 // indirect
+	github.com/ChristopherDavenport/agentmemory v0.0.8 // indirect
+	github.com/ChristopherDavenport/agentpolicy v0.0.9 // indirect
+	github.com/ChristopherDavenport/agentskill v0.0.9 // indirect
 	github.com/ChristopherDavenport/agentsmd v0.0.2 // indirect
-	github.com/ChristopherDavenport/agenttool/mcpclient v0.0.11 // indirect
-	github.com/ChristopherDavenport/openresponses v0.0.12 // indirect
+	github.com/ChristopherDavenport/agenttool/mcpclient v0.0.12 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/modelcontextprotocol/go-sdk v1.8.0 // indirect
@@ -45,5 +45,7 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 
-// The root is not released yet, so there is no version to require.
+// The example builds against the root in this checkout, not a release,
+// so CI compiles it against the code it documents. A product copies
+// RecordEach rather than requiring this module.
 replace github.com/ChristopherDavenport/agentkit => ../..
