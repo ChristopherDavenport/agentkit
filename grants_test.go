@@ -3,6 +3,7 @@ package agentkit_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/ChristopherDavenport/agentskill"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
 
@@ -724,5 +726,213 @@ func TestARevokeOfASetWithNoRulesSurvivesARestart(t *testing.T) {
 		if len(g.Allow) > 0 {
 			t.Fatalf("a restart granted %v for a read the product revoked", g.Allow)
 		}
+	}
+}
+
+// grantedVerdicts counts the verdicts on the session's path that say a
+// rule was granted.
+func grantedVerdicts(s *agentsession.Session) int {
+	n := 0
+	for _, c := range customEntries(s, agentpolicy.VerdictNS) {
+		if strings.Contains(string(c.Data), `"reason":"granted `) {
+			n++
+		}
+	}
+	return n
+}
+
+// One kit serving two conversations, each its own session: a skill read
+// in the first grants it there, and the first call the kit decides in the
+// second revokes that grant before deciding, so the second conversation
+// runs nothing under it; a read in the second grants nothing and says
+// why. The revocation is written to the first conversation's session.
+// (#44)
+func TestASkillGrantDoesNotReachAnotherConversation(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "release", "Bash(git:*)")
+	sessions := agentsession.NewMemoryStore()
+	var ran []string
+	bash := agenttool.New("Bash", "run a command",
+		func(_ context.Context, in struct {
+			Command string `json:"command"`
+		}) (string, error) {
+			ran = append(ran, in.Command)
+			return "", nil
+		})
+	var reports []agentkit.SkillGrant
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithSkills(skills),
+		agentkit.WithTools(bash),
+		agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{
+			Read:    []string{agentskill.ToolName},
+			Execute: []string{"Bash"},
+		}), map[string]agentpolicy.ToolMatcher{
+			"Bash": {Match: agentpolicy.PrefixMatcher("command")},
+		}),
+		agentkit.WithSkillGrants(func(sk *agentskill.Skill) agentpolicy.Source {
+			return agentpolicy.Source{Name: "skill:" + sk.Name, Path: sk.Location, Trusted: true}
+		}),
+		agentkit.WithSkillGrantReport(func(g agentkit.SkillGrant) { reports = append(reports, g) }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	// Each conversation as RecordEach serves it: its own session and
+	// recorder, on the run's context.
+	serve := func(turns ...func(*openresponses.Emitter) error) (*session.Recorder, *agentturn.RunEnd) {
+		t.Helper()
+		rec, _, err := session.Start(t.Context(), sessions, agentsession.Header{CWD: t.TempDir()}, session.WithInstructionsParts(kit.PartsFor))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := kit.Config()
+		cfg.Model = &scriptModel{turns: turns}
+		cfg.ToolRecorder = rec.RecordFunc()
+		agent := agentturn.New(cfg)
+		defer rec.Attach(agent)()
+		ctx := agentkit.ContextWithRecorder(session.ContextWithSessionID(t.Context(), rec.SessionID()), rec)
+		end, err := agent.Prompt(ctx, openresponses.UserText("go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rec, end
+	}
+
+	alice, end := serve(callTurn(agentskill.ToolName, `{"name":"release"}`), callTurn("Bash", `{"command":"git status"}`))
+	if end.Reason == agentturn.ReasonInputRequired || !slices.Equal(ran, []string{"git status"}) {
+		t.Fatalf("in the conversation that read the skill git status was not run under the grant: %q, ran %v", end.Reason, ran)
+	}
+	bob, end := serve(callTurn("Bash", `{"command":"git clean -fdx"}`))
+	if end.Reason != agentturn.ReasonInputRequired || len(ran) != 1 {
+		t.Fatalf("in another conversation git clean ran under the first one's grant: %q, ran %v", end.Reason, ran)
+	}
+	if g := kit.Engine().Grants(); len(g) != 0 {
+		t.Fatalf("grants after a second conversation = %+v, want none", g)
+	}
+	revoked := func(rec *session.Recorder) int {
+		n := 0
+		for _, c := range customEntries(openSession(t, sessions, rec.SessionID()), agentpolicy.VerdictNS) {
+			if strings.Contains(string(c.Data), "revoked the rules granted by skill:release") {
+				n++
+			}
+		}
+		return n
+	}
+	if a, b := revoked(alice), revoked(bob); a != 1 || b != 0 {
+		t.Fatalf("revocations recorded: %d in the owner's session, %d in the other's; want 1 and 0", a, b)
+	}
+
+	reports = nil
+	serve(callTurn(agentskill.ToolName, `{"name":"release"}`))
+	if len(reports) != 1 || !errors.Is(reports[0].Err, agentkit.ErrSkillGrantConversation) || len(kit.Engine().Grants()) != 0 {
+		t.Fatalf("a read in another conversation reported %+v and left %d grants, want ErrSkillGrantConversation and none", reports, len(kit.Engine().Grants()))
+	}
+}
+
+// A restart grants again only what the read was granted and the skill
+// still allows: a skill whose allowed-tools were widened before the
+// restart gets nothing it did not have, and one whose instructions
+// changed is not the skill the model read and gets nothing. (#45)
+func TestARestartNeverWidensAGrant(t *testing.T) {
+	for name, edit := range map[string]string{
+		"widened allowed-tools": "---\nname: deploy\ndescription: what deploy is for\nallowed-tools: Bash(kubectl:*)\n---\n\ndo the thing\n",
+		"changed instructions":  "---\nname: deploy\ndescription: what deploy is for\nallowed-tools: Bash(kubectl get:*)\n---\n\ndo another thing\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "skills")
+			skills := skillWithTools(t, root, "deploy", "Bash(kubectl get:*)")
+			sessions := agentsession.NewMemoryStore()
+			build := func(model agentturn.Model, sess agentkit.Option) *agentkit.Kit {
+				kit, err := agentkit.New(t.Context(),
+					agentkit.WithModel(model, "m"),
+					agentkit.WithSkills(skills),
+					agentkit.WithPolicy(agentpolicy.FullAuto(agentpolicy.Tools{Read: []string{agentskill.ToolName}}),
+						map[string]agentpolicy.ToolMatcher{"Bash": {Match: agentpolicy.PrefixMatcher("command")}}),
+					agentkit.WithSkillGrants(func(sk *agentskill.Skill) agentpolicy.Source {
+						return agentpolicy.Source{Name: "skill:" + sk.Name, Trusted: true}
+					}),
+					sess,
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = kit.Close() })
+				return kit
+			}
+			first := build(&scriptModel{turns: []func(*openresponses.Emitter) error{
+				callTurn(agentskill.ToolName, `{"name":"deploy"}`),
+			}}, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))
+			agent := agentturn.New(first.Config())
+			unsubscribe := first.Attach(agent)
+			if _, err := agent.Prompt(t.Context(), openresponses.UserText("deploy")); err != nil {
+				t.Fatal(err)
+			}
+			unsubscribe()
+
+			writeFile(t, filepath.Join(root, "deploy", "SKILL.md"), edit)
+			second := build(&scriptModel{}, agentkit.WithResumedSession(sessions, first.SessionID()))
+			for _, g := range second.Engine().Grants() {
+				if len(g.Allow) > 0 {
+					t.Fatalf("a restart granted %v for a read of Bash(kubectl get:*)", g.Allow)
+				}
+			}
+		})
+	}
+}
+
+// A restart grants again silently: no verdict is recorded for what the
+// path already says was granted, and the report is marked Replayed.
+// (#46)
+func TestARestartRegrantsSilently(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "deploy", "Bash(git:*) Bash(make:*) Bash(ls:*)")
+	sessions := agentsession.NewMemoryStore()
+	var reports []agentkit.SkillGrant
+	build := func(model agentturn.Model, sess agentkit.Option) *agentkit.Kit {
+		kit, err := agentkit.New(t.Context(),
+			agentkit.WithModel(model, "m"),
+			agentkit.WithSkills(skills),
+			agentkit.WithPolicy(agentpolicy.FullAuto(agentpolicy.Tools{Read: []string{agentskill.ToolName}}),
+				map[string]agentpolicy.ToolMatcher{"Bash": {Match: agentpolicy.PrefixMatcher("command")}}),
+			agentkit.WithSkillGrants(func(sk *agentskill.Skill) agentpolicy.Source {
+				return agentpolicy.Source{Name: "skill:" + sk.Name, Trusted: true}
+			}),
+			agentkit.WithSkillGrantReport(func(g agentkit.SkillGrant) { reports = append(reports, g) }),
+			sess,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = kit.Close() })
+		return kit
+	}
+	first := build(&scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn(agentskill.ToolName, `{"name":"deploy"}`),
+	}}, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))
+	agent := agentturn.New(first.Config())
+	unsubscribe := first.Attach(agent)
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("deploy")); err != nil {
+		t.Fatal(err)
+	}
+	unsubscribe()
+	before := grantedVerdicts(first.Session())
+	if before != 3 || len(reports) != 1 || reports[0].Replayed {
+		t.Fatalf("the read recorded %d grant verdicts and reported %+v, want 3 and one report of the read", before, reports)
+	}
+
+	for i := range 5 {
+		reports = nil
+		kit := build(&scriptModel{}, agentkit.WithResumedSession(sessions, first.SessionID()))
+		if got := len(kit.Engine().Grants()[0].Allow); got != 3 {
+			t.Fatalf("restart %d granted %d rules, want 3", i, got)
+		}
+		if got := grantedVerdicts(openSession(t, sessions, first.SessionID())); got != before {
+			t.Fatalf("after restart %d the session holds %d grant verdicts, want the read's %d", i, got, before)
+		}
+		if len(reports) != 1 || !reports[0].Replayed || len(reports[0].Granted) != 3 {
+			t.Fatalf("restart %d reported %+v, want one report marked Replayed", i, reports)
+		}
+		_ = kit.Close()
 	}
 }

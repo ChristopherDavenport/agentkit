@@ -324,9 +324,24 @@ func WithoutSkillTool() Option {
 //
 // A grant lasts until something revokes it, and a restart does not: with
 // a session [New] opened, New replays the session's journal and grants
-// again each skill read no recorded revocation ended, under the
-// catalogue's rules as they stand, so an approval after a restart goes
-// on under the grants the task had. [WithSkillGrantScope]
+// again each skill read no recorded revocation ended, so an approval
+// after a restart goes on under the grants the task had. A restart may
+// narrow a grant and never widens one: what is granted again is the
+// rules the journal says the read was granted that the skill still
+// allows, and a skill whose instructions changed since the read is not
+// granted at all; under [WithEngine], where the kit records no verdict,
+// it is the catalogue's rules as they stand. The replay records no
+// verdict, since the ones it repeats are on the path, and is reported
+// with [SkillGrant.Replayed] set. A front that resumes a conversation
+// itself calls [Kit.RegrantSkills].
+//
+// The grants belong to one conversation, since the engine applies a
+// grant to every decision it makes: the session the kit opened or was
+// given, or the conversation of the first grant, [ContextWithRecorder].
+// The first call the kit decides in another conversation revokes every
+// grant and the kit grants nothing after it; see
+// [ErrSkillGrantConversation]. A front that grants skills to many
+// conversations gives each its own kit. [WithSkillGrantScope]
 // revokes every skill's grant when the user's next message arrives, which is the lifetime
 // Claude Code gives allowed-tools; without it a grant lasts the life of
 // the engine unless the product calls [Kit.RevokeSkillGrants]. A skill
@@ -370,15 +385,19 @@ func WithSkillGrants(source func(*agentskill.Skill) agentpolicy.Source) Option {
 //
 // Only the sources the kit granted are revoked; a product's own
 // [agentpolicy.Engine.GrantSet] calls are left alone. Every run on the
-// engine revokes them, so two agents sharing one engine share one
-// scope. It has no effect without [WithSkillGrants].
+// engine in the conversation the grants belong to revokes them, so two
+// agents sharing one engine share one scope; a message in another
+// conversation the kit serves revokes nothing, since the kit makes no
+// grant there. It has no effect without [WithSkillGrants].
 func WithSkillGrantScope() Option {
 	return func(s *settings) { s.skillGrantScope = true }
 }
 
 // WithSkillGrantReport is told what the engine did with each skill's
-// allowed-tools: what it granted, what it refused and why, and a
-// skill whose allowed-tools would not parse. A grant widens what the
+// allowed-tools: what it granted, what it refused and why, a skill
+// whose allowed-tools would not parse, a read the kit would not grant
+// because its grants belong to another conversation, and, with
+// [SkillGrant.Replayed] set, what a restart granted again. A grant widens what the
 // agent may do, so a front that shows the user the policy in force
 // wants to see it happen.
 func WithSkillGrantReport(fn func(SkillGrant)) Option {
@@ -404,14 +423,20 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 // made after the render is reported by [agentmemory.LostUpdates] and the
 // model is told, rather than silently discarded. The render is looked up
 // by [agentturn.RunIDFromContext], so concurrent runs off one kit each
-// save over their own; a call in a run that has not rendered, a
-// Resume's first batch, is based on [Kit.MemoryManifest], the last
-// render. A [WithMemoryTools] option of the same kind replaces the
-// kit's.
+// save over their own. A call held for approval keeps its run's render,
+// kept by a BeforeToolCall hook of the kit's ahead of whatever holds it,
+// for the Resume that runs it; after a restart, or once the kit has
+// dropped the run, a call is based on the manifest in force on its
+// session's path where the model made it. A call in a run for which the
+// kit has none of these is refused, and the model told to look at the
+// entry again, rather than based on another run's render. A
+// [WithMemoryTools] option of the same kind replaces the kit's.
 //
-// With a session, each render that moved is recorded under
-// [agentmemory.ManifestNS]: the kit's first in a session whole, and each
-// later one as [agentmemory.Manifest.RecordSince] the one before.
+// With a session, each render that differs from the manifest in force
+// on the session's path is recorded under [agentmemory.ManifestNS], as
+// [agentmemory.Manifest.RecordSince] the one in force: whole in a
+// session that holds none, and a delta otherwise, in the session New
+// opened, one on a run's context and a child's alike.
 func WithMemory(store agentmemory.Store, scopes ...agentmemory.Scope) Option {
 	return func(s *settings) { s.memStore, s.memScopes = store, scopes }
 }
@@ -528,6 +553,14 @@ func WithTools(ts ...agenttool.Tool) Option {
 // The error's stderr tail is the server's own words and may carry what
 // the server printed, a token in a failed request among them; a product
 // that logs errors from New logs it.
+//
+// The server is dialed once, at New, and every run the kit serves calls
+// it over that one connection, so whatever identity the connection
+// carries is the kit's, not a conversation's or a user's. A server
+// authorized by OAuth acts as whoever authorized it for every
+// conversation: the token belongs to the connection, and the server
+// refuses another user's token on it. A front serving several users
+// with such a server gives each user a kit of their own.
 func WithMCP(command string, opts ...mcpclient.Option) Option {
 	return func(s *settings) {
 		s.mcp = append(s.mcp, mcpDial{command: command, opts: opts})
@@ -539,7 +572,9 @@ func WithMCP(command string, opts ...mcpclient.Option) Option {
 // places credentials go: a *mcp.CommandTransport's program, an HTTP
 // transport's scheme and host, or the transport's type. The command's stderr is
 // the product's to set, since it built the command. [WithToolElicitor]
-// binds elicitation as for [WithMCP].
+// binds elicitation as for [WithMCP]. The connection's identity is the
+// kit's, as for WithMCP: a transport carrying one user's credentials
+// serves every conversation the kit serves as that user.
 func WithMCPTransport(t sdk.Transport, opts ...mcpclient.Option) Option {
 	return func(s *settings) {
 		s.mcp = append(s.mcp, mcpDial{transport: t, opts: opts})
@@ -835,11 +870,12 @@ func WithRecorder(rec *session.Recorder) Option {
 // fold is recorded with it. Summary requests name the agent's model,
 // [compact.WithModel] ahead of opts.
 //
-// The kit records the fold through compact.WithOnFold, which holds one
-// function, so a compact.WithOnFold in opts is always replaced: the
-// recorder may arrive on a run's context, [ContextWithRecorder], after
-// New. A product that wants to hear of a fold uses [WithFoldObserver],
-// which is called with or without a session.
+// The kit records the fold through a compact.WithOnFold of its own,
+// ahead of opts, whether or not there is a session, since the recorder
+// may arrive on a run's context, [ContextWithRecorder], after New.
+// compact.WithOnFold adds a callback, so one in opts is called too,
+// after the fold is recorded. [WithFoldObserver] is the kit's own way
+// to hear of a fold, with or without a session.
 func WithCompaction(budget int, opts ...compact.Option) Option {
 	return func(s *settings) {
 		s.compactSet, s.compactLocal = true, true
@@ -869,7 +905,8 @@ func WithCompactionModel(m openresponses.Streamer) Option {
 // takes the same budget and the same default: every request is sent
 // under the agent's model name, [compact.WithModel] ahead of opts, so a
 // compact.WithModel in opts still wins. The fold is recorded, and
-// [WithFoldObserver] told, as under WithCompaction.
+// [WithFoldObserver] told, as under WithCompaction, and a
+// compact.WithOnFold in opts is called after the recording as there.
 //
 // A compactor and a local summary are two ways to fold, so [New]
 // refuses WithCompactor beside WithCompaction or

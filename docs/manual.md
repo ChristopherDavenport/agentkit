@@ -28,11 +28,11 @@ privately", the kit has become a framework and the rule is broken.
 | `ToolProvider` | `WithTools`, `WithSkills`, `WithMemory`, `WithMCP`, `WithChildAgent`, `WithDeferredTools`, `WithToolProvider`, `WithToolFilter`, `WithToolWrap`, `WithPolicy` | `append` the slices, wrap each tool, and wrap the list in `engine.ToolProvider` — see below |
 | `BeforeTurn` | `WithSkillGrantScope`, `WithBeforeTurn` | `agentturn.ChainBeforeTurn(revokeOnUserMessage, yours...)` — see below |
 | `BeforeModelCall` | `WithMemory`, `WithGuards`, `WithVerdictObserver`, `WithBeforeModelCall` | `agentturn.ChainBeforeModelCall(instructions, chain.BeforeModelCall(), yours...)` — see below |
-| `BeforeToolCall` | `WithPolicy`, `WithBeforeToolCall` | `engine.BeforeToolCall()`, the engine built with `agentpolicy.WithHooks(yours...)`; with `WithEngine` or no policy, `agentturn.ChainBeforeToolCall(engine.BeforeToolCall(), yours...)` — see below |
+| `BeforeToolCall` | `WithPolicy`, `WithMemory`, `WithSkillGrants`, `WithBeforeToolCall` | `agentturn.ChainBeforeToolCall(keepSaveBase, grantGuard, engine.BeforeToolCall())`, the engine built with `agentpolicy.WithHooks(yours...)`; with `WithEngine` or no policy, `yours...` after the engine — see below |
 | `AfterToolCall` | `WithAfterToolCall` | assign it; the kit contests nothing here |
 | `OutputGuard` | `WithGuards`, `WithOutputGuard` | `agentturn.ChainOutputGuard(chain.OutputGuard(), yours...)` |
 | `ShouldStopAfterTurn` | `WithGuards`, `WithShouldStopAfterTurn` | `agentturn.ChainShouldStopAfterTurn(chain.ShouldStopAfterTurn(), yours...)` |
-| `Transform` | `WithCompaction`, `WithCompactionModel`, `WithCompactor`, `WithTransform`, `WithFoldObserver` | `agentturn.ChainTransform(yours, compact.NewLocal(model, compact.WithModel(name), compact.WithBudget(n), compact.WithOnFold(fold)).Transform)`, or `compact.New(compactor, ...)` with the same options for `WithCompactor`, where `fold` is `rec.Fold` and then the observer — see below |
+| `Transform` | `WithCompaction`, `WithCompactionModel`, `WithCompactor`, `WithTransform`, `WithFoldObserver` | `agentturn.ChainTransform(yours, compact.NewLocal(model, compact.WithModel(name), compact.WithOnFold(fold), compact.WithBudget(n), theirs...).Transform)`, or `compact.New(compactor, ...)` with the same options for `WithCompactor`, where `fold` is `rec.Fold` and then the observer — see below |
 | `ToolRecorder` | `WithSession`, `WithResumedSession`, `WithRecorder` | `rec.RecordFunc()`; without a session the kit leaves it nil, and the loop honours a recorder the product installs with `agenttool.ContextWithRecorder` on the prompt's context |
 | `ToolElicitor` | `WithToolElicitor` | a function that calls `rec.Elicitor(by, fn)` for the run's recorder, `recorderFor(ctx)` below, and `fn` without one; without the option the kit leaves it nil, and an elicitor on the prompt's context applies |
 
@@ -164,8 +164,10 @@ tools = append(tools, childagent.New(childCfg,
 tools = append(tools, cat.Tool())
 
 // memory_save is based on the render its call was composed from:
-// saveBase[call], kept when the engine decided the call, then
-// rendered[run], which the BeforeModelCall hook keeps, then the last.
+// saveBase[call], kept by keepSaveBase when the call was decided, then
+// rendered[run], which the BeforeModelCall hook keeps, then the manifest
+// in force on the run's session's path at the call. A call in a run
+// that finds none of them is refused; one outside any run takes the last.
 based := func(m func() agentmemory.Manifest) []agenttool.Tool {
 	return agentmemory.Tools(store, writable,
 		agentmemory.WithRendered(m),         // the block the model read
@@ -177,11 +179,18 @@ for i, t := range memTools {
 	if t.Name() == agentmemory.SaveTool {
 		memTools[i] = agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
 			key := sessionID(ctx) + "\x00" + call.ID // a call ID names a call in one conversation
+			run := agentturn.RunIDFromContext(ctx)
 			m, ok := saveBase[key]
 			if ok {
 				delete(saveBase, key)
 			} else {
-				m, ok = rendered[agentturn.RunIDFromContext(ctx)]
+				m, ok = rendered[run]
+			}
+			if !ok {
+				m, ok = manifestAtCall(ctx, call.ID) // below
+			}
+			if !ok && run != "" {
+				return agenttool.Result{}, errSaveBase // "... search for the entry with memory_search and save again"
 			}
 			if !ok {
 				return t.Execute(ctx, call) // based on last
@@ -228,17 +237,53 @@ returns). Two runs off one kit render in turn, and a save based on the
 other run's render, which may already hold a write a third session made
 in between, discards that write with nothing reported. A save held for
 approval runs in the `Resume`, a run of its own that has not rendered,
-so `saveBase` keeps its run's render: the engine's observer puts it
-there each time it decides a `memory_save` call in a run that rendered,
-keyed by the session on the context and the call ID, since two
-conversations whose provider numbers its calls both have a `call_0`.
-After a restart `New` folds the path's manifest records up to each
-pending save's call. `last`, what `Kit.MemoryManifest` returns, is the
-base for anything else. `rendered` and `saveBase` keep their newest
-1,024 keys. The kit's observer is on the engine `WithPolicy` builds and
-nowhere else, so a save held by an engine the product built for
-`WithEngine`, or deferred by a product `BeforeToolCall` hook, falls
-back to `last` unless the product keeps the base itself. The read scopes are left out of `writable`, since
+so `saveBase` keeps its run's render: `keepSaveBase`, the first
+`BeforeToolCall` hook ([below](#beforetoolcall-and-the-engine)), puts
+it there each time a `memory_save` call is decided in a run that
+rendered, keyed by the session on the context and the call ID, since
+two conversations whose provider numbers its calls both have a
+`call_0`. It runs ahead of whatever holds the call, the kit's engine,
+one built for `WithEngine` or a product hook, so the base is kept
+whoever holds it. After a restart, or once the bounded maps have
+dropped the run, `manifestAtCall` folds the manifest records on the
+path of the run's session, `recorderFor(ctx)`'s, read through
+`rec.Store().Open`, up to the call:
+
+```go
+manifestAtCall := func(ctx context.Context, callID string) (agentmemory.Manifest, bool) {
+	r := recorderFor(ctx)
+	if r == nil {
+		return agentmemory.Manifest{}, false
+	}
+	sess, err := r.Store().Open(ctx, runSessionID(ctx, r)) // the live session the store holds
+	if err != nil {
+		return agentmemory.Manifest{}, false
+	}
+	var m agentmemory.Manifest
+	valid := false
+	for _, e := range sess.Path(sess.Leaf()) {
+		switch e := e.(type) {
+		case *agentsession.CustomEntry:
+			if e.NS == agentmemory.ManifestNS {
+				next, err := agentmemory.ApplyManifestRecord(m, e.Data)
+				m, valid = next, err == nil
+			}
+		case *agentsession.ItemEntry:
+			if fc, ok := e.Item.(*openresponses.FunctionCall); ok && fc.CallID == callID {
+				return m, valid
+			}
+		}
+	}
+	return agentmemory.Manifest{}, false
+}
+```
+
+A call in a run that finds no base is refused with a result telling the
+model to search for the entry and save again: a save based on another
+run's render could discard a write the model never saw, with nothing
+reported. `last`, what `Kit.MemoryManifest` returns, is the base only
+for a call outside any run. `rendered` and `saveBase` keep their newest
+1,024 keys. The read scopes are left out of `writable`, since
 `agentmemory.Tools` panics on a scope that is both; `New` reports that
 panic, and a memory with no writable scope, as an error.
 
@@ -286,13 +331,21 @@ observe := func(ctx context.Context, v agentpolicy.Verdict) {
 chain := guard.Chain{Guards: guards, Observer: observe}
 
 // guardParts runs the input guards over each part alone. A refusal
-// names its part, and the kit's observer sets each verdict's Subject
-// to the same name.
+// names its part, and so does each verdict's Subject, since the chain
+// does not know the part.
 guardParts := func(ctx context.Context, c guard.Chain, parts []agentsession.InstructionPart) ([]agentsession.InstructionPart, error) {
 	out := make([]agentsession.InstructionPart, 0, len(parts))
 	for _, p := range parts {
+		pc := c
+		if obs := c.Observer; obs != nil {
+			subject := "instructions/" + p.ID
+			pc.Observer = func(ctx context.Context, v agentpolicy.Verdict) {
+				v.Subject = subject
+				obs(ctx, v)
+			}
+		}
 		one := openresponses.Request{Instructions: p.Text}
-		if err := c.BeforeModelCall()(ctx, &one); err != nil {
+		if err := pc.BeforeModelCall()(ctx, &one); err != nil {
 			return nil, fmt.Errorf("instructions/%s: %w", p.ID, err)
 		}
 		if one.Instructions != "" {
@@ -312,24 +365,8 @@ instructions := func(ctx context.Context, req *openresponses.Request) error {
 	// memory:usage, in the position the first of them held.
 	layers = withMemoryGroup(layers, pieces)
 	if r := recorderFor(ctx); r != nil {
-		sid := session.SessionIDFromContext(ctx) // the child's, under ChildContext
-		if sid == "" {
-			sid = r.SessionID()
-		}
-		prev, seen := recorded[sid]
-		// Only the session the kit opened is read: its path, live.
-		last, visible := lastManifestOnPath(r, sid)
-		onPath := seen && (!visible || last == prev.entry)
-		if !onPath || prev.man.Hash() != m.Hash() {
-			ns, data := m.Record()
-			if onPath && visible {
-				ns, data = m.RecordSince(prev.man) // a delta on the one in force
-			}
-			entry, err := r.Annotate(ctx, ns, json.RawMessage(data))
-			if err != nil {
-				return err
-			}
-			recorded[sid] = recordedManifest{m, entry}
+		if err := record(ctx, r, m); err != nil { // below
+			return err
 		}
 	}
 	if sent, err = guardParts(ctx, chain, layers); err != nil {
@@ -346,6 +383,44 @@ cfg.BeforeModelCall = agentturn.ChainBeforeModelCall(
 )
 ```
 
+`record` writes the manifest to the session the annotation lands in:
+
+```go
+record := func(ctx context.Context, r *session.Recorder, m agentmemory.Manifest) error {
+	sid := runSessionID(ctx, r) // session.SessionIDFromContext, the child's under ChildContext, else r.SessionID()
+	prev, seen := recorded[sid]
+	var inForce agentmemory.Manifest
+	folds := false
+	if sess, err := r.Store().Open(ctx, sid); err == nil { // the live session the store holds
+		path := sess.Path(sess.Leaf())
+		last := lastManifest(path) // the last agentmemory:render entry's ID, "" for none
+		switch {
+		case last == "":
+		case seen && last == prev.entry:
+			inForce, folds = prev.man, true // our own record is still last
+		default:
+			inForce, folds = foldManifests(path) // another kit's, or a Rebase's
+		}
+		if folds && inForce.Hash() == m.Hash() {
+			recorded[sid] = recordedManifest{m, last}
+			return nil // nothing moved
+		}
+	} else if seen && prev.man.Hash() == m.Hash() && lastWritten[r, sid] == prev.entry {
+		return nil
+	}
+	ns, data := m.Record()
+	if folds {
+		ns, data = m.RecordSince(inForce) // a delta on the one in force
+	}
+	entry, err := r.Annotate(ctx, ns, json.RawMessage(data))
+	if err != nil {
+		return err
+	}
+	recorded[sid], lastWritten[r, sid] = recordedManifest{m, entry}, entry
+	return nil
+}
+```
+
 This is what `WithMemory`, `WithGuards`, `WithVerdictObserver` and
 `WithBeforeModelCall` compose to, and it is the whole of it. The
 re-render is a `BeforeModelCall` and not a `Transform` because a
@@ -355,9 +430,9 @@ recorded.
 The guards run twice: over each part alone, so a rewrite such as
 `guard.Redact`'s lands in the part it belongs to and `sent` is what the
 request carried, and then over the whole request, its items and the
-joined text, where `guard.Limit` measures what a server sees. The kit's
-observer also sets each per-part verdict's `Subject` to
-`instructions/<part id>`, since the chain does not know the part.
+joined text, where `guard.Limit` measures what a server sees. Each
+per-part verdict's `Subject` is `instructions/<part id>`, so the record
+says which memory entry or AGENTS.md file a guard rewrote or refused.
 Without memory the instructions hook runs only when there are guards,
 and only on a request whose instructions are still the parts' join.
 
@@ -366,21 +441,23 @@ recorder writes several: a kit under `WithRecorder` inside a parent's
 child agent annotates a new child session on each call, and each of
 them carries the manifest of the render its run was shown.
 
-A manifest is written as `agentmemory.Manifest.RecordSince` the one
-before only where the kit can see that it will fold: the session is the
-one `New` opened, which `kit.Session()` holds live, and the last
-manifest record on the path to its leaf is the kit's own last write.
-`lastManifestOnPath` walks that path back to the last `agentmemory:render`
-entry. Anywhere else the write is whole: a session two kits of a handoff
-both record into, a path a `Rebase` or a `/clear` moved, a child's
-session, a recorder on the context. A delta on a manifest that is not
-the one in force is a record `agentmemory.ApplyManifestRecord` refuses.
-A path the kit can see that no longer ends in its record gets the render
-again even when it did not move, unless the record that is last there
-is whole and says the same, a second kit of a handoff over one memory,
-in which case the kit adopts it. A write the recorder filed in another
-session, a child run without `ChildContext`, is not read against this
-path. `sent` is
+A manifest is written whenever the render differs from the manifest in
+force on the path of the session it lands in, and as
+`agentmemory.Manifest.RecordSince` that one: whole only where nothing is
+in force, a new session or a child's. The path is read through the
+recorder's store: `Open` on a session a store holds hands back the live
+session it holds, which is how the recorder itself reopens one, so the
+session `New` opened, one on a run's context and a child's are read
+alike. What is in force is the kit's own last record while that is last
+on the path, and otherwise the fold of the path's records: another
+kit's of a handoff, a `Rebase` or `/clear`, a restart. So a kit handed
+back to after another kit wrote records its render again even when it
+did not move, a render that says what the path already says is not
+written, and a delta is always on the manifest a reader folds to, never
+one `agentmemory.ApplyManifestRecord` refuses. A store that cannot open
+the session gets whole writes, and `lastWritten`, shared by every kit
+in the process, is what tells a kit that another kit wrote there since
+its own record. `sent` is
 shared with the parts function below, under a lock in real code.
 
 The engine the kit builds is given the same `observe`, through
@@ -402,8 +479,37 @@ engine, err := agentpolicy.Build(policy, matchers,
 	agentpolicy.WithObserver(observe),
 	agentpolicy.WithHooks(yours...), // WithBeforeToolCall
 )
-cfg.BeforeToolCall = engine.BeforeToolCall()
+
+// keepSaveBase keeps a memory_save call's base for the Resume that may
+// run it, and decides nothing (WithMemory).
+keepSaveBase := func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+	if info.Call.Name == agentmemory.SaveTool {
+		if m, ok := rendered[info.RunID]; ok {
+			saveBase[sessionID(ctx)+"\x00"+info.Call.CallID] = m
+		}
+	}
+	return nil, nil
+}
+
+// grantGuard revokes every skill grant the first time a call is decided
+// in a conversation the grants do not belong to, and decides nothing
+// (WithSkillGrants).
+grantGuard := func(ctx context.Context, _ agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+	if conv := conversation(ctx); owned && !shared && conv != owner { // recorderFor(ctx).SessionID()
+		shared = true
+		for _, name := range granted {
+			engine.Revoke(agentkit.ContextWithRecorder(context.Background(), ownerRec), name)
+		}
+	}
+	return nil, nil
+}
+cfg.BeforeToolCall = agentturn.ChainBeforeToolCall(keepSaveBase, grantGuard, engine.BeforeToolCall())
 ```
+
+Both decide nothing, so they go first, ahead of whatever may hold or
+allow the call: `keepSaveBase` keeps the base for any holder, and
+`grantGuard` revokes before the engine decides with the grants in
+force. `grantGuard` is under "What the kit does" below.
 
 The product's hooks go into the engine rather than after it
 (agentpolicy v0.0.7), so a hook that asks about a call holds its
@@ -428,25 +534,25 @@ fold := func(ctx context.Context, f compact.Fold) error {
 	observer(ctx, f) // WithFoldObserver
 	return nil
 }
-opts := append([]compact.Option{compact.WithModel(name), compact.WithBudget(n)}, yours...)
-t := compact.NewLocal(model, append(opts, compact.WithOnFold(fold))...) // WithCompaction
-t = compact.New(compactor, append(opts, compact.WithOnFold(fold))...)   // WithCompactor
+opts := append([]compact.Option{compact.WithModel(name), compact.WithOnFold(fold), compact.WithBudget(n)}, yours...)
+t := compact.NewLocal(model, opts...) // WithCompaction
+t = compact.New(compactor, opts...)   // WithCompactor
 ```
 
 The agent's model name comes first under either, so a
 `compact.WithModel` of the product's wins, and a compactor's request
-names a model as a summary's does. `compact.WithOnFold` holds one
-function, so the kit writes the one that calls both and passes it after
-the product's `compact.Option`s, whether or not there is a session: a
-run may bring a recorder on its context. A `compact.WithOnFold` among
-the product's is therefore always replaced, which `WithCompaction`
-says; `WithFoldObserver` is how a product hears of a fold.
+names a model as a summary's does. `compact.WithOnFold` adds a
+callback (agentturn v0.0.14), so the kit passes `fold` ahead of the
+product's `compact.Option`s, whether or not there is a session, since a
+run may bring a recorder on its context, and a `compact.WithOnFold`
+among the product's is called after it, once the fold is recorded.
+`WithFoldObserver` is the kit's own way to hear of a fold.
 
 ## `BeforeTurn`
 
 ```go
 revokeOnUserMessage := func(ctx context.Context, info agentturn.TurnStartInfo) (openresponses.Items, error) {
-	if newUserMessage(info.Transcript) {
+	if newUserMessage(info.Transcript) && owned && !shared && conversation(ctx) == owner {
 		for _, name := range granted { // the sources the grants were made under
 			engine.Revoke(ctx, name)
 		}
@@ -481,11 +587,12 @@ loop in it. It runs on every turn, not only the first: a follow-up
 continues the run it joins and a steer arrives between turns, and
 either is a new message that must end the last request's grant. A
 `Resume`'s first turn ends with the answered calls' outputs, so an
-approval keeps the grant.
+approval keeps the grant. A message in a conversation the grants do not
+belong to revokes nothing, since nothing was granted there.
 
 ## What the kit does that no line here covers
 
-Seven things, all outside `agentturn.Config`:
+Eight things, all outside `agentturn.Config`:
 
 - `Kit.Attach(agent)` is `rec.Attach(agent)`, and returns the same
   unsubscribe. It cannot be a config field because the recorder
@@ -540,29 +647,47 @@ Seven things, all outside `agentturn.Config`:
   `agentturn.New`.
 - `Kit.LookupTool(name)` reads the union the provider last returned,
   and is what the kit's engine is given through `agentpolicy.WithTools`.
+- `WithSkillGrants`' grants belong to one conversation, since
+  `GrantSet` adds a rule set the engine applies to every decision: the
+  session the kit opened or was given, or, for a kit with none, the
+  conversation of the first grant, named by
+  `recorderFor(ctx).SessionID()`. A read in any other conversation is
+  not granted and is reported with `agentkit.ErrSkillGrantConversation`,
+  and `grantGuard` above revokes every grant, in the owner's session,
+  the first time a call is decided elsewhere, after which the kit grants
+  nothing. A front that grants skills to many conversations gives each
+  its own kit.
 - With `WithSkillGrants` and a session `New` opened, `New` grants
-  again what the session's journal left in force. It replays the path
-  forward: an `agentskill:read` record of a skill's own instructions
-  grants that skill's source, and a verdict whose reason is `revoked the
-  rules granted by <source>` ends it. `agentpolicy.Engine.Revoke`
-  records that verdict when it removed a rule, and the kit records it
-  for a source whose set held none, an untrusted skill's or one whose
-  rules were all refused, whether the scope or `Kit.RevokeSkillGrants`
-  revoked it. A record whose name the catalogue now gives a skill at
-  another `Location` is passed over. What is left is granted with
-  `grant(read.Name)`, under the catalogue's rules as they stand now.
-  Under `WithSkillGrantScope` the replay also starts after the path's
-  last user message, so the scope holds where the journal is silent: an
+  again what the session's journal left in force, and
+  `Kit.RegrantSkills(ctx, sess)` does the same for a session a front
+  resumed itself. It replays the path forward: an `agentskill:read`
+  record of a skill's own instructions makes that skill's source live,
+  and a verdict whose reason is `revoked the rules granted by <source>`
+  ends it. `agentpolicy.Engine.Revoke` records that verdict when it
+  removed a rule, and the kit records it for a source whose set held
+  none, an untrusted skill's or one whose rules were all refused,
+  whether the scope or `Kit.RevokeSkillGrants` revoked it. A record
+  whose name the catalogue now gives a skill at another `Location` is
+  passed over, and so is one whose `SHA256` is not what `cat.Tool()`
+  serves for the name now. What is granted again is the rules the
+  `granted <rule> by <source>` verdicts written just before the read's
+  record name, among the rules `agentskill.Skill.Rules()` gives now, so a
+  restart may narrow a grant and never widens one, nor trusts a read the
+  engine withheld; under `WithEngine` the kit records no verdict, and the
+  catalogue's rules are granted as they stand. The replay's `GrantSet`
+  runs under a context the kit's observer passes over, so it records no
+  verdict, the ones it repeats being on the path already, and
+  `WithSkillGrantReport` is told with `SkillGrant.Replayed` set. Under
+  `WithSkillGrantScope` the replay also starts after the path's last
+  user message, so the scope holds where the journal is silent: an
   engine the product built for `WithEngine`, or a verdict whose write
   failed. A grant lives in the engine, so a restart between a held call
-  and its approval lost it. The grants are made through the engine, so
-  each restart records its `GrantSet` verdicts again and tells
-  `WithSkillGrantReport` again. The journal matches a revocation to a
-  read by the source name the source function gives now, so one that
-  renames its sources loses the match; and a revocation that races a
-  read in flight may be journaled before the read's record, which the
-  replay then grants. Without the scope, a product that needs either
-  ruled out revokes after the restart.
+  and its approval lost it. The journal matches a revocation to a read
+  by the source name the source function gives now, so one that renames
+  its sources loses the match; and a revocation that races a read in
+  flight may be journaled before the read's record, which the replay
+  then grants. Without the scope, a product that needs either ruled out
+  revokes after the restart.
 
 None of them changes a field of the config, so none can make the manual
 path a different path.

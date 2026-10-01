@@ -3,8 +3,9 @@
 //
 // It needs none. [agentkit.Kit.Config] returns a plain
 // [agentturn.Config], and both a2a packages take one, so a peer is an
-// ordinary tool and serving is an ordinary front. There is no seam
-// here for the kit to own.
+// ordinary tool and serving is an ordinary front. The one seam is
+// recording a served conversation in a session of its own, which
+// [RecordEach] does with [agentkit.ContextWithRecorder].
 //
 // This is a nested module for the reason the kit has no option:
 // agentturn/tools/a2a and agentturn/front/a2a are nested modules on
@@ -75,39 +76,76 @@ func Serve(ctx context.Context, kit *agentkit.Kit, url, version string, opts ...
 // they land in the kit's own session, or nowhere, and the
 // conversation's session has the calls but not the rules that let them
 // run.
+//
+// A store holds a session it opened, a lock on it and the whole session
+// in memory, until it is released, so the session is released when the
+// last task running in its conversation ends, and the next message
+// resumes it. Without that a server holds every session it has served,
+// and no other process can open one: not the agentsession CLI, a second
+// replica, or an auditor.
+//
+// One kit serves every conversation here, and two things it holds are
+// the kit's rather than a conversation's: a skill grant, which the kit
+// revokes the first time it serves a second conversation
+// ([agentkit.ErrSkillGrantConversation]), and an MCP server's
+// connection, whose identity every conversation shares. A server that
+// needs either per conversation or per user builds a kit for each.
 func RecordEach(kit *agentkit.Kit, store agentsession.Store, cwd string) fronta2a.Option {
+	type conversation struct {
+		id    string // the session ID
+		tasks int    // the tasks running in it
+	}
 	var (
-		mu       sync.Mutex
-		sessions = map[string]string{} // a2a context ID to session ID
+		mu    sync.Mutex
+		convs = map[string]*conversation{} // by a2a context ID
 	)
+	release := func(contextID string) {
+		mu.Lock()
+		defer mu.Unlock()
+		c := convs[contextID]
+		if c.tasks--; c.tasks > 0 {
+			return
+		}
+		if r, ok := store.(interface{ Release(string) error }); ok {
+			_ = r.Release(c.id)
+		}
+	}
 	return fronta2a.WithRecorderFor(func(ctx context.Context, contextID string, a *agentturn.Agent) (context.Context, func(), error) {
 		parts := session.WithInstructionsParts(kit.PartsFor)
 		// Held across the open, so two first messages of one context do
 		// not each start a session.
 		mu.Lock()
 		defer mu.Unlock()
-		id, seen := sessions[contextID]
+		c, seen := convs[contextID]
 		var (
 			rec *session.Recorder
 			err error
 		)
 		if seen {
-			rec, _, err = session.Resume(ctx, store, id, parts)
+			rec, _, err = session.Resume(ctx, store, c.id, parts)
 		} else {
 			rec, _, err = session.Start(ctx, store, agentsession.Header{CWD: cwd}, parts)
 		}
 		if err != nil {
 			return nil, nil, err
 		}
-		sessions[contextID] = rec.SessionID()
+		if !seen {
+			c = &conversation{id: rec.SessionID()}
+			convs[contextID] = c
+		}
 
 		cfg := a.Config()
 		cfg.ToolRecorder = rec.RecordFunc()
 		if err := a.SetConfig(cfg); err != nil {
 			return nil, nil, err
 		}
+		c.tasks++
+		detach := rec.Attach(a)
 		ctx = session.ContextWithSessionID(ctx, rec.SessionID())
-		return agentkit.ContextWithRecorder(ctx, rec), rec.Attach(a), nil
+		return agentkit.ContextWithRecorder(ctx, rec), func() {
+			detach()
+			release(contextID)
+		}, nil
 	})
 }
 
