@@ -77,7 +77,10 @@ conversation, so the kit revokes its grants the first time it serves a
 second (`agentkit.ErrSkillGrantConversation`); and an MCP server's
 connection, dialed once at `New`, whose identity, an OAuth token among
 it, every conversation shares. A front that needs either per
-conversation or per user builds a kit for each.
+conversation or per user builds a kit for each. For an OAuth-protected
+server, `mcpclient.StoreTokens` keeps each user's grant in a
+`TokenStore` keyed by the endpoint and that user, so the kit built for
+them after a restart connects without asking again.
 
 `examples/a2a` wraps both as `Peer` and `Serve`, `RecordEach` is the
 per-conversation recording, and `Both` is the round trip: an agent that

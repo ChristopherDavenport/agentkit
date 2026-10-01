@@ -560,7 +560,8 @@ func WithTools(ts ...agenttool.Tool) Option {
 // authorized by OAuth acts as whoever authorized it for every
 // conversation: the token belongs to the connection, and the server
 // refuses another user's token on it. A front serving several users
-// with such a server gives each user a kit of their own.
+// with such a server gives each user a kit of their own, and keeps each
+// user's grant with [mcpclient.StoreTokens]; see [WithMCPTransport].
 func WithMCP(command string, opts ...mcpclient.Option) Option {
 	return func(s *settings) {
 		s.mcp = append(s.mcp, mcpDial{command: command, opts: opts})
@@ -575,6 +576,27 @@ func WithMCP(command string, opts ...mcpclient.Option) Option {
 // binds elicitation as for [WithMCP]. The connection's identity is the
 // kit's, as for WithMCP: a transport carrying one user's credentials
 // serves every conversation the kit serves as that user.
+//
+// A server behind OAuth takes a *mcp.StreamableClientTransport whose
+// OAuthHandler is the SDK's authorization-code handler. Its grant lives
+// in memory unless [mcpclient.StoreTokens] keeps it in a
+// [mcpclient.TokenStore], so a restart does not send the user to consent
+// again. The store is keyed by the endpoint and a subject the host
+// names, which is the user the kit is built for:
+//
+//	cfg := &auth.AuthorizationCodeHandlerConfig{ /* client, redirect, fetcher */ }
+//	key := mcpclient.TokenKey{Endpoint: endpoint, Subject: userID}
+//	if err := mcpclient.StoreTokens(ctx, cfg, store, key, logSaveError); err != nil {
+//		return err
+//	}
+//	h, err := auth.NewAuthorizationCodeHandler(cfg)
+//	kit, err := agentkit.New(ctx,
+//		agentkit.WithMCPTransport(&mcp.StreamableClientTransport{Endpoint: endpoint, OAuthHandler: h}),
+//		...)
+//
+// The handler, the fetcher and the store are the product's: the kit
+// dials the transport it is given and adds nothing to its
+// authorization.
 func WithMCPTransport(t sdk.Transport, opts ...mcpclient.Option) Option {
 	return func(s *settings) {
 		s.mcp = append(s.mcp, mcpDial{transport: t, opts: opts})
