@@ -8,8 +8,8 @@ require (
 	github.com/ChristopherDavenport/agentsession v0.0.18
 	github.com/ChristopherDavenport/agentskill v0.0.9
 	github.com/ChristopherDavenport/agentsmd v0.0.2
-	github.com/ChristopherDavenport/agenttool v0.0.12
-	github.com/ChristopherDavenport/agenttool/mcpclient v0.0.12
+	github.com/ChristopherDavenport/agenttool v0.0.13
+	github.com/ChristopherDavenport/agenttool/mcpclient v0.0.13
 	github.com/ChristopherDavenport/agentturn v0.0.14
 	github.com/ChristopherDavenport/agentturn/session v0.0.14
 	github.com/ChristopherDavenport/openresponses v0.0.12

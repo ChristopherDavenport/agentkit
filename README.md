@@ -240,7 +240,9 @@ MCP server's connection stay the kit's, not the conversation's: the
 kit revokes its grants the first time it serves a second conversation,
 and every conversation calls an MCP server as whoever authorized the
 connection. A front that needs either per conversation or per user
-builds a kit for each.
+builds a kit for each, and keeps each user's OAuth grant across
+restarts with `mcpclient.StoreTokens`, keyed by the server and that
+user (`WithMCPTransport` shows the wiring).
 
 `WithChildAgent` is the in-process one, and it exists for a different
 reason than a seam: it binds the child's observer and run context to
@@ -273,7 +275,7 @@ a2a.
 | library | version |
 |---|---|
 | `openresponses` | v0.0.12 |
-| `agenttool`, `agenttool/mcpclient` | v0.0.12 |
+| `agenttool`, `agenttool/mcpclient` | v0.0.13 |
 | `agentturn`, `agentturn/session` | v0.0.14 |
 | `agentsession` | v0.0.18 |
 | `agentsmd` | v0.0.2 |

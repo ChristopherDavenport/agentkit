@@ -3,6 +3,21 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- Requires agenttool and agenttool/mcpclient v0.0.13. No API of this
+  module changes with them.
+
+### Documentation
+
+- `WithMCPTransport` shows how to keep an OAuth-protected server's
+  grant with mcpclient's new `StoreTokens`, keyed by the endpoint and
+  the user a kit is built for, so a restart does not mean consenting
+  again. `WithMCP`, the README and `docs/composition.md` point a front
+  that builds a kit per user at it.
+
 ## v0.0.4 - 2026-10-01
 
 The round 6 findings (#37 to #47), and the siblings' round 6 releases
