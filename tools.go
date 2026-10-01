@@ -79,6 +79,60 @@ type toolSet struct {
 	// every turn for as long as the two sources both offer the name.
 	mu   sync.Mutex
 	seen map[Conflict]bool
+
+	// amu guards added, the MCP servers [Kit.AddMCP] connected after
+	// New, which join the union at addAt: after the servers New dialed
+	// and ahead of the product's providers. Each is a live source.
+	amu   sync.RWMutex
+	added []source
+	addAt int
+}
+
+// current is the sources in union order, the added servers among them,
+// as of now.
+func (ts *toolSet) current() []source {
+	ts.amu.RLock()
+	defer ts.amu.RUnlock()
+	if len(ts.added) == 0 {
+		return ts.sources
+	}
+	out := make([]source, 0, len(ts.sources)+len(ts.added))
+	out = append(out, ts.sources[:ts.addAt]...)
+	out = append(out, ts.added...)
+	return append(out, ts.sources[ts.addAt:]...)
+}
+
+// with is the sources in union order with extra among the added
+// servers, last of them, for checking a server before it is added.
+func (ts *toolSet) with(extra source) []source {
+	ts.amu.RLock()
+	defer ts.amu.RUnlock()
+	out := make([]source, 0, len(ts.sources)+len(ts.added)+1)
+	out = append(out, ts.sources[:ts.addAt]...)
+	out = append(out, ts.added...)
+	out = append(out, extra)
+	return append(out, ts.sources[ts.addAt:]...)
+}
+
+// add puts an added server's source last among the added servers.
+func (ts *toolSet) add(src source) {
+	ts.amu.Lock()
+	defer ts.amu.Unlock()
+	ts.added = append(ts.added, src)
+}
+
+// remove drops the added server whose source is named name, and
+// reports whether there was one.
+func (ts *toolSet) remove(name string) bool {
+	ts.amu.Lock()
+	defer ts.amu.Unlock()
+	for i, src := range ts.added {
+		if src.name == name {
+			ts.added = append(ts.added[:i:i], ts.added[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 // wrapOne applies the product's wrapper and then the source's own. A
@@ -113,12 +167,16 @@ func (ts *toolSet) prepare() {
 // resolve returns the union, in source order, where each tool came
 // from, and the conflicts found.
 func (ts *toolSet) resolve(ctx context.Context) ([]agenttool.Tool, []ToolOrigin, []Conflict) {
+	return ts.resolveSources(ctx, ts.current())
+}
+
+func (ts *toolSet) resolveSources(ctx context.Context, sources []source) ([]agenttool.Tool, []ToolOrigin, []Conflict) {
 	var out []agenttool.Tool
 	var origins []ToolOrigin
 	var conflicts []Conflict
 	from := map[string]string{}
-	for i := range ts.sources {
-		s := &ts.sources[i]
+	for i := range sources {
+		s := &sources[i]
 		raw, wrapped := s.tools, s.wrapped
 		if s.live != nil {
 			raw, wrapped = s.live(ctx), nil

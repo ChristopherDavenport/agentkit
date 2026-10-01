@@ -5,6 +5,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- `Kit.AddMCP` and `Kit.AddMCPTransport` connect an MCP server after
+  `New`, and `Kit.RemoveMCP` closes one. A server added mid-session is
+  dialed as `New` dials one, with `WithMCPStderr` and the elicitation
+  `WithToolElicitor` asks for, labelled `mcp:#<n> <what>` after the
+  servers before it, and offered from the next turn, after `New`'s
+  servers and ahead of `WithToolProvider`'s. A name it shares with a
+  tool offered now is an error and the server is closed. `Kit.Tools()`
+  lists its tools until it is removed, and `Close` closes it. By hand it
+  is a provider over a locked list of remotes, which `docs/manual.md`
+  writes out. (#50)
+
 ### Changed
 
 - Requires agenttool and agenttool/mcpclient v0.0.13. No API of this

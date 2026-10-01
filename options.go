@@ -562,6 +562,7 @@ func WithTools(ts ...agenttool.Tool) Option {
 // refuses another user's token on it. A front serving several users
 // with such a server gives each user a kit of their own, and keeps each
 // user's grant with [mcpclient.StoreTokens]; see [WithMCPTransport].
+// [Kit.AddMCP] connects a server after New, the same way.
 func WithMCP(command string, opts ...mcpclient.Option) Option {
 	return func(s *settings) {
 		s.mcp = append(s.mcp, mcpDial{command: command, opts: opts})
@@ -623,8 +624,8 @@ func WithToolConflict(fn func(Conflict)) Option {
 
 // WithToolProvider supplies tools from a source the kit does not know
 // about, called once per turn. Its tools come last, after the MCP
-// servers', and a name it repeats is a [Conflict] resolved the same
-// way. Several providers are each their own source, in the order given,
+// servers', those [Kit.AddMCP] connected among them, and a name it
+// repeats is a [Conflict] resolved the same way. Several providers are each their own source, in the order given,
 // so a collision between two of them says which is which.
 func WithToolProvider(fn func(context.Context) []agenttool.Tool) Option {
 	return func(s *settings) { s.toolProvide = append(s.toolProvide, fn) }
