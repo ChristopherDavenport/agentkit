@@ -1277,11 +1277,16 @@ func (k *Kit) buildHooks(s *settings) {
 		// so the kit's goes first and a fold is recorded before a
 		// compact.WithOnFold of the product's hears of it.
 		opts := []compact.Option{compact.WithModel(s.modelName), compact.WithOnFold(k.onFold(s))}
-		// The summary is asked under the agent's reasoning, as every
-		// other request is: a thinking model left at its server's default
-		// reasons through the summary's token cap and answers no text.
-		// compact.WithRequest is one field, so the product's replaces it.
-		if r := s.summaryReasoning(); !r.IsZero() {
+		// A summary the agent's model writes is asked under the agent's
+		// reasoning, as every other request to it is: a thinking model
+		// left at its server's default reasons through the summary's
+		// token cap and answers no text. Not under WithCompactionModel:
+		// the product chose that model knowing it, and a reasoning
+		// config meant for the agent's may be refused by, or wasted on,
+		// another. Nor under WithCompactor, whose compact.New ignores
+		// compact.WithRequest. compact.WithRequest is one field, so the
+		// product's replaces it.
+		if r := s.summaryReasoning(); !r.IsZero() && s.compactor == nil && s.compactModel == nil {
 			opts = append(opts, compact.WithRequest(func(req *openresponses.Request) { req.Reasoning = r }))
 		}
 		// A resumed session's last failed fold, after the product's

@@ -1009,9 +1009,25 @@ func WithRecorder(rec *session.Recorder) Option {
 // [WithReasoning] or [WithRequest] one, through a [compact.WithRequest]
 // of the kit's ahead of opts: a thinking model left at its server's
 // default reasons through the summary's cap and answers no text, which
-// fails every fold. compact.WithRequest is one function, so one in opts
-// replaces the kit's, and a product that passes one sets Reasoning in
-// it itself.
+// fails every fold. So for an agent at effort low or above the summary
+// is asked at that effort, and a thinking model spends part of the
+// summary's cap, half the budget, reasoning before it writes: the fold
+// succeeds, later and thinner, and nothing reports it. A product whose
+// agent thinks passes its own, which replaces the kit's since
+// compact.WithRequest is one function:
+//
+//	agentkit.WithCompaction(budget, compact.WithRequest(func(r *openresponses.Request) {
+//		r.Reasoning = openresponses.ReasoningConfig{Effort: openresponses.ReasoningEffortNone}
+//	}))
+//
+// or the lowest effort its provider accepts. The kit does not pick a
+// lower effort itself because it does not know that floor: several
+// reasoning models refuse none, and a fold that succeeds thinner today
+// would then fail every time. Under [WithCompactionModel] the kit
+// passes no reasoning at all, since the product chose that model
+// knowing it and a configuration meant for the agent's model may be
+// refused by, or wasted on, another; a compact.WithRequest in opts sets
+// it there too.
 //
 // With a session [New] resumed, the last fold that failed on its path,
 // [session.CompactOptions], is passed after opts, so a restart does not
@@ -1040,7 +1056,9 @@ func WithFoldObserver(fn func(context.Context, compact.Fold)) Option {
 }
 
 // WithCompactionModel folds with a model other than the agent's, which
-// is how a cheap model summarises for an expensive one.
+// is how a cheap model summarises for an expensive one. The summary
+// request carries no reasoning unless a compact.WithRequest in
+// [WithCompaction]'s options sets one; see there.
 func WithCompactionModel(m openresponses.Streamer) Option {
 	return func(s *settings) { s.compactSet, s.compactModel = true, m }
 }

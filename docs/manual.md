@@ -785,7 +785,7 @@ fold := func(ctx context.Context, f compact.Fold) error {
 	return nil
 }
 opts := []compact.Option{compact.WithModel(name), compact.WithOnFold(fold)}
-if !reasoning.IsZero() { // WithReasoning's, else WithRequest's Reasoning
+if !reasoning.IsZero() && summariser == model { // WithReasoning's, else WithRequest's; only when the agent's model summarises
 	opts = append(opts, compact.WithRequest(func(r *openresponses.Request) { r.Reasoning = reasoning }))
 }
 opts = append(opts, compact.WithBudget(n))
@@ -797,8 +797,8 @@ if sess != nil { // the session WithSession or WithResumedSession opened
 	}
 	opts = append(opts, failed...)
 }
-t := compact.NewLocal(model, opts...) // WithCompaction
-t = compact.New(compactor, opts...)   // WithCompactor
+t := compact.NewLocal(summariser, opts...) // WithCompaction: model; WithCompactionModel: its model
+t = compact.New(compactor, opts...)        // WithCompactor
 ```
 
 The agent's model name comes first under either, so a
@@ -813,11 +813,25 @@ a failed one too, with `Fold.Err` set and no summary: a front that says
 the model has forgotten something says it for a fold whose `Err` is
 nil.
 
-The summary request is sent under the agent's reasoning: a thinking
-model left at its server's default reasons through the summary's cap
-and answers no text. `compact.WithRequest` is one function, so a
-product's replaces the kit's and sets the reasoning itself.
-`session.CompactOptions` is the last fold on the resumed session's path
+A summary the agent's model writes is asked under the agent's
+reasoning: a thinking model left at its server's default reasons
+through the summary's cap and answers no text. So for an agent at
+effort low or above the summary is asked at that effort too, and a
+thinking model spends part of the summary's cap, half the budget,
+reasoning before it writes; the fold succeeds, later and thinner. A
+product whose agent thinks passes, in `yours`,
+`compact.WithRequest(func(r *openresponses.Request) { r.Reasoning =
+openresponses.ReasoningConfig{Effort: openresponses.ReasoningEffortNone} })`,
+or the lowest effort its provider accepts; `compact.WithRequest` is one
+function, so the product's replaces the kit's. The kit does not pick a
+lower effort itself because it does not know the provider's floor:
+several reasoning models refuse `none`, and a fold that succeeds
+thinner today would then fail every time. Under `WithCompactionModel`
+the kit passes no reasoning, since the product chose that model
+knowing it and a configuration meant for the agent's model may be
+refused by, or wasted on, another; `compact.New` ignores
+`compact.WithRequest`, so under `WithCompactor` there is nothing to
+pass. `session.CompactOptions` is the last fold on the resumed session's path
 that failed, so a restart does not ask again for a summary that failed
 before it; a product that records under `WithRecorder` or a recorder on
 the context passes it in `yours`.
