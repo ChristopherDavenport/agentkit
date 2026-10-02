@@ -3,7 +3,11 @@ package agentkit_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"go/parser"
+	"go/scanner"
+	"go/token"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -435,4 +439,77 @@ func TestTheManualPathKeepsARedactedSecretOutOfTheRecord(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Every Go block in docs/manual.md parses as Go: as declarations, or as
+// the body of a function, since most blocks are statements over names
+// the prose defines. A block that elides a value with `...` reads well
+// and compiles nowhere, and a product copying the manual meets the
+// parse error before anything else. The AddMCP block at v0.0.6 used the
+// server before checking Connect's error and returned `Conflict{...}`,
+// and the grant guard reported `SkillGrant{Err: ...}`. (#67)
+func TestManualGoBlocksParse(t *testing.T) {
+	for _, path := range []string{"docs/manual.md", "README.md"} {
+		t.Run(path, func(t *testing.T) {
+			blocks := goBlocks(readDoc(t, path))
+			if len(blocks) == 0 {
+				t.Fatalf("%s has no Go blocks; the test would be vacuous", path)
+			}
+			for _, b := range blocks {
+				if err := parseGoBlock(b.body); err != nil {
+					t.Errorf("%s:%d: the Go block does not parse: %v", path, b.line, err)
+				}
+			}
+			t.Logf("%d Go blocks in %s", len(blocks), path)
+		})
+	}
+}
+
+// goBlock is one ```go fenced block of a Markdown document and the line
+// its first line of code is on.
+type goBlock struct {
+	line int
+	body string
+}
+
+// goBlocks extracts the ```go fenced blocks, indented ones among them.
+func goBlocks(doc string) []goBlock {
+	var out []goBlock
+	var cur *goBlock
+	var lines []string
+	for i, l := range strings.Split(doc, "\n") {
+		switch trimmed := strings.TrimSpace(l); {
+		case cur == nil && trimmed == "```go":
+			cur, lines = &goBlock{line: i + 2}, nil
+		case cur != nil && trimmed == "```":
+			cur.body = strings.Join(lines, "\n")
+			out = append(out, *cur)
+			cur = nil
+		case cur != nil:
+			lines = append(lines, l)
+		}
+	}
+	return out
+}
+
+// parseGoBlock parses body as a Go file without its package clause,
+// and failing that as the body of a function. The error it returns is
+// the second's, with its line numbered within the block.
+func parseGoBlock(body string) error {
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "block.go", "package p\n"+body+"\n", parser.AllErrors); err == nil {
+		return nil
+	}
+	const header = "package p\nfunc _() {\n"
+	fset = token.NewFileSet()
+	_, err := parser.ParseFile(fset, "block.go", header+body+"\n}\n", parser.AllErrors)
+	if err == nil {
+		return nil
+	}
+	var list scanner.ErrorList
+	if !errors.As(err, &list) || len(list) == 0 {
+		return err
+	}
+	first := list[0]
+	return fmt.Errorf("line %d of the block: %s", first.Pos.Line-strings.Count(header, "\n"), first.Msg)
 }

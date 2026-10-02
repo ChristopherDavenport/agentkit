@@ -364,24 +364,38 @@ provider := func(ctx context.Context) []agenttool.Tool {
 	return append(out, yours(ctx)...) // WithToolProvider
 }
 
-// Mid-session: dial as New does, refuse a name already offered, add.
+// Mid-session: dial as New does, off the lock, since a dial may wait on
+// a sign-in; refuse a name already offered; add.
 r, err := mcpclient.Connect(ctx, t, opts...)
+if err != nil {
+	return err
+}
 for _, tool := range r.Tools() {
-	if offered(tool.Name()) { // a name in provider(ctx)
-		r.Close()
-		return Conflict{...}
+	if from, taken := offeredBy(tool.Name()); taken { // the source of a name in provider(ctx)
+		return errors.Join(agentkit.Conflict{Name: tool.Name(), Kept: from, Dropped: label}, r.Close())
 	}
 }
 mu.Lock()
 added = append(added, r)
 mu.Unlock()
+
+// Removing one: out of the list under the lock, closed after it, since
+// Close may wait for the server's calls in flight.
+mu.Lock()
+added = slices.DeleteFunc(added, func(a *mcpclient.Remote) bool { return a == r })
+mu.Unlock()
+return r.Close()
 ```
 
-The kit labels each added server's tools `mcp:#<n> <what>`, numbered
-after the servers before it, for `WithToolFilter`, `WithToolWrap`, a
-`Conflict` and `Kit.Tools()`, and `Close` closes them. A turn already
-running keeps the tools it was offered, and the recorder writes the new
-ones as `tools_added` on the next.
+`label` is the kit's `mcp:#<n> <what>`, numbered after the servers
+before it, which labels each added server's tools for `WithToolFilter`,
+`WithToolWrap`, a `Conflict` and `Kit.Tools()`. A turn already running
+keeps the tools it was offered, and the recorder writes the new ones as
+`tools_added` on the next. The kit holds its lock as the block does, for
+the list and never across the dial or the close, so `Kit.Tools()`,
+another `RemoveMCP` and `Close` answer while a server is dialed or
+closed; `Close` cancels a dial in flight and closes every server, added
+or `New`'s, together.
 
 `WithChildAgent` is the line above with `childagent.New`: the kit binds
 `WithObserver` and `WithRunContext` to the run's recorder, the memory
@@ -640,7 +654,7 @@ grantGuard := func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn
 		for _, name := range granted {
 			engine.Revoke(octx, name)
 		}
-		report(agentkit.SkillGrant{Err: ...}) // wraps ErrSkillGrantConversation, names conv and owner
+		report(agentkit.SkillGrant{Err: fmt.Errorf("%w: the kit decided a call in session %q, so it revoked the grants of session %q and grants nothing after", agentkit.ErrSkillGrantConversation, conv, owner)})
 		return nil, nil
 	}
 	if !scoped || len(endedBy) == 0 || !owned || shared || conversation(ctx) != owner {
