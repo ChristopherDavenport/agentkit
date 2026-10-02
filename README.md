@@ -129,7 +129,7 @@ contest was silent, and the kit is where they get called, in one order:
 | field | order |
 |---|---|
 | `BeforeModelCall` | memory re-render, then the guards over each part and over the whole request, then the product's |
-| `BeforeToolCall` | the policy engine, with the product's hooks folded into it (`agentpolicy.WithHooks`) |
+| `BeforeToolCall` | the skill grants' guard, which under `WithSkillGrantScope` refuses a call only an ended grant allowed and otherwise decides nothing, then the policy engine, with the product's hooks folded into it (`agentpolicy.WithHooks`) |
 | `OutputGuard` | the guards, then the product's |
 | `ShouldStopAfterTurn` | the policy's, then the product's |
 | `BeforeTurn` | the skill grants' revoke at each new user message under `WithSkillGrantScope`, then the product's |
@@ -217,11 +217,13 @@ policy: reading a skill grants its rules to the engine through
 attributes the grant to an **untrusted** source unless the caller's own
 source function says otherwise, so a skill widens what the agent may do
 only when the product has said it trusts the tree the skill came from.
-`WithSkillGrantScope` ends each grant when the user's next message arrives, as
-Claude Code clears `allowed-tools` at the next message, and
-`kit.RevokeSkillGrants(ctx)` ends them when a front says; a skill read
-again is granted again, and under the scope the model is told which
-grants a message ended and that a read restores them.
+`WithSkillGrantScope` ends each grant when the user's next message arrives,
+whichever agent's run received it, as Claude Code clears
+`allowed-tools` at the next message, and `kit.RevokeSkillGrants(ctx)`
+ends them when a front says; a skill read again is granted again, and
+under the scope the model is told which grants a message ended and
+that a read restores them, and a call only an ended grant allowed is
+refused naming the skill to read again.
 `kit.ReloadSkills(ctx)` discovers the skills again, for an agent that
 writes a skill and uses it in the same conversation.
 
