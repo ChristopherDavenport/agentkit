@@ -424,34 +424,49 @@ func WithSkillGrants(source func(*agentskill.Skill) agentpolicy.Source) Option {
 // message is not the one it digested, and on every turn whose
 // transcript's tail, back to the last item the model or a tool
 // produced, holds a user message, which catches a grant made in no run
-// and so bound to nothing. A compaction that folds away older messages
-// lowers the count and keeps the last message, so it ends nothing by
-// itself. A grant [New] or [Kit.RegrantSkills] grants again is bound
-// to the message the session's path ends under, which the agent seeded
-// from it starts under, so the restart's first turn keeps it. A steer
-// delivered before an output is one more user message, so it revokes
-// on the turn that follows, which the tail test alone left to
-// [agentturn.TurnStartInfo].
+// and so bound to nothing. A grant [New] or [Kit.RegrantSkills] grants
+// again is bound to the message the transcript the agent is seeded
+// with ends under, session.Transcript, the items [Kit.AgentOptions]
+// gives agentturn.New, so the restart's first turn keeps it. A
+// compaction ends nothing by itself, in the run, whose turns keep the
+// message the fold summarised, or across a restart, where the fold's
+// summary stands in for it in the seeded transcript and the grant is
+// bound to that. A steer delivered before an output is one more user
+// message, so it revokes on the turn that follows, which the tail test
+// alone left to [agentturn.TurnStartInfo].
 //
 // Under the scope the model is told, in a developer note at the turn
 // that ended a grant, which skills' tools ended and that a read
 // restores them; and a call that only an ended grant allowed is refused
-// by the kit's [agentturn.Config.BeforeToolCall] hook, ahead of the
-// engine, with a reason naming the skill and the tool that reads it
-// again, until the skill is read again. The engine would have deferred
-// the call to a reviewer, whose refusal says nothing of the skill. The
-// kit refuses only when the engine cannot allow the call on its own, as
-// far as its exported state says: no rule of the policy or of a grant
-// in force names the call's tools, the default does not allow or an ask
-// rule names them, and the tool does not say it runs confined; a call
-// a deny rule names gets the deny's reason. A call's subjects are the
-// tool's [agentpolicy.Subjects] split under [WithPolicy]'s matchers and
-// each must be covered by an ended rule, bare or with a specifier the
-// tool's matcher matches; under [WithEngine] the kit has no matchers
-// and only a bare rule covers. A hook the product folded into the
-// engine is not consulted first. The refusal is recorded as a verdict
-// under [agentpolicy.VerdictNS], as the engine's would be, and is not
-// reported through [WithSkillGrantReport].
+// with a reason naming the skill and the tool that reads it again,
+// until the skill is read again. The engine would have deferred the
+// call to a reviewer, whose refusal says nothing of the skill. The
+// refusal is the first hook the kit folds into the engine it builds
+// under [WithPolicy], [agentpolicy.WithHooks], ahead of the product's
+// [WithBeforeToolCall] hooks, so the engine's fold takes the Block, a
+// sibling in the same batch is decided beside it rather than held for a
+// question nobody is asked, and the engine records the decision as the
+// call's verdict under [agentpolicy.VerdictNS]; it is not reported
+// through [WithSkillGrantReport]. There is no refusal under
+// [WithEngine]. A call's subjects are the tool's [agentpolicy.Subjects]
+// split under WithPolicy's matchers, and each must be covered by an
+// ended rule, bare or with a specifier the tool's matcher matches; an
+// ended grant of a skill the catalogue no longer lists, after
+// [Kit.ReloadSkills], covers nothing.
+//
+// The engine has no side-effect-free evaluation to ask whether it
+// would allow the call, so the kit refuses only when the engine's
+// exported state leaves it no way to: for every tool of the call's
+// subjects, every rule naming that tool in [agentpolicy.Engine.Policy]'s
+// allow, deny and ask lists and in every [agentpolicy.Engine.Grants] set
+// is a bare ask, with no specifier and no carve-out; when no rule names
+// the tool, the default does not allow; the call's tool does not say it
+// runs confined, [agenttool.ConfinedBy], which lets a call past a bare
+// ask; and WithPolicy was given no agentpolicy option of the product's.
+// Any specifier naming a tool, any allow or deny naming one, any
+// option: the call goes to the engine, which asks, allows or denies it
+// as it would have. The predicate collapses to agentpolicy's
+// side-effect-free `Engine.Would` once that lands.
 //
 // Only the sources the kit granted are revoked; a product's own
 // [agentpolicy.Engine.GrantSet] calls are left alone. Every run on the

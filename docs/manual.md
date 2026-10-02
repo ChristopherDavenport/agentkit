@@ -39,7 +39,7 @@ and no fold is recorded.
 | `ToolProvider` | `WithTools`, `WithSkills`, `WithMemory`, `WithMCP`, `WithChildAgent`, `WithDeferredTools`, `WithToolProvider`, `WithToolFilter`, `WithToolWrap`, `WithPolicy` | `append` the slices, wrap each tool, and wrap the list in `engine.ToolProvider` — see below |
 | `BeforeTurn` | `WithSkillGrantScope`, `WithBeforeTurn` | `agentturn.ChainBeforeTurn(revokeOnUserMessage, yours...)` — see below |
 | `BeforeModelCall` | `WithMemory`, `WithGuards`, `WithVerdictObserver`, `WithBeforeModelCall` | `agentturn.ChainBeforeModelCall(instructions, chain.BeforeModelCall(), yours...)` — see below |
-| `BeforeToolCall` | `WithPolicy`, `WithMemory`, `WithSkillGrants`, `WithSkillGrantScope`, `WithBeforeToolCall` | `agentturn.ChainBeforeToolCall(keepSaveBase, grantGuard, engine.BeforeToolCall())`, the engine built with `agentpolicy.WithHooks(yours...)`; with `WithEngine` or no policy, `yours...` after the engine — see below |
+| `BeforeToolCall` | `WithPolicy`, `WithMemory`, `WithSkillGrants`, `WithSkillGrantScope`, `WithBeforeToolCall` | `agentturn.ChainBeforeToolCall(keepSaveBase, grantGuard, engine.BeforeToolCall())`, the engine built with `agentpolicy.WithHooks(refuseEndedGrant, yours...)`; with `WithEngine` or no policy, `yours...` after the engine and no `refuseEndedGrant` — see below |
 | `AfterToolCall` | `WithAfterToolCall` | assign it; the kit contests nothing here |
 | `OutputGuard` | `WithGuards`, `WithOutputGuard` | `agentturn.ChainOutputGuard(chain.OutputGuard(), yours...)` |
 | `ShouldStopAfterTurn` | `WithGuards`, `WithShouldStopAfterTurn` | `agentturn.ChainShouldStopAfterTurn(chain.ShouldStopAfterTurn(), yours...)` |
@@ -625,7 +625,7 @@ lookup := func(name string) (agenttool.Tool, bool) { t, ok := last[name]; return
 engine, err := agentpolicy.Build(policy, matchers,
 	agentpolicy.WithTools(lookup),
 	agentpolicy.WithObserver(observe),
-	agentpolicy.WithHooks(yours...), // WithBeforeToolCall
+	agentpolicy.WithHooks(refuseEndedGrant, yours...), // WithSkillGrantScope, then WithBeforeToolCall
 )
 
 // keepSaveBase keeps a memory write's render, the manifest and whether
@@ -642,10 +642,9 @@ keepSaveBase := func(ctx context.Context, info agentturn.ToolCallInfo) (*agenttu
 }
 
 // grantGuard revokes every skill grant the first time a call is decided
-// in a conversation the grants do not belong to (WithSkillGrants), and
-// under WithSkillGrantScope refuses a call that only a grant the scope
-// ended allowed; it decides nothing else.
-grantGuard := func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+// in a conversation the grants do not belong to, and decides nothing
+// (WithSkillGrants).
+grantGuard := func(ctx context.Context, _ agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
 	if conv := conversation(ctx); owned && !shared && conv != owner { // below
 		shared, tripBy = true, conv
 		octx := agentkit.ContextWithRecorder(context.Background(), ownerRec)
@@ -655,94 +654,150 @@ grantGuard := func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn
 			engine.Revoke(octx, name)
 		}
 		report(agentkit.SkillGrant{Err: fmt.Errorf("%w: the kit decided a call in session %q, so it revoked the grants of session %q and grants nothing after", agentkit.ErrSkillGrantConversation, conv, owner)})
-		return nil, nil
 	}
+	return nil, nil
+}
+
+// refuseEndedGrant blocks, inside the engine, a call that only a grant
+// the scope ended allowed and that the engine would only ask about
+// (WithSkillGrantScope). endedBy is what the last revocations under
+// BeforeTurn ended, by the source each was made under, which a read of
+// the skill clears and ReloadSkills prunes of skills no longer listed.
+refuseEndedGrant := func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
 	if !scoped || len(endedBy) == 0 || !owned || shared || conversation(ctx) != owner {
 		return nil, nil
 	}
-	// endedBy is what the last revocations under BeforeTurn ended, by
-	// source, which a read of the skill clears. Every subject of the call
-	// must be covered by an ended rule, or the engine decides it.
+	// Every subject of the call must be covered by an ended rule of a
+	// skill the catalogue still lists, or the engine decides it.
 	subjects := []agentpolicy.Subject{{Args: info.Args}}
-	if m := matchers[info.Call.Name]; m.Subjects != nil { // WithPolicy's; none under WithEngine
-		if subjects, err = m.Subjects(info.Args); err != nil || len(subjects) == 0 {
+	if m := matchers[info.Call.Name]; m.Subjects != nil {
+		split, err := m.Subjects(info.Args)
+		if err != nil || len(split) == 0 {
 			return nil, nil // the engine fails it closed
 		}
+		subjects = split
 	}
 	var skills, tools []string
 	for _, s := range subjects {
 		tool := cmp.Or(s.Tool, info.Call.Name)
-		tools = append(tools, tool)
+		if !slices.Contains(tools, tool) {
+			tools = append(tools, tool)
+		}
 		covered := false
 		for _, lg := range endedBy {
+			if _, listed := catalog.Lookup(lg.skill); !listed {
+				continue
+			}
 			for _, r := range lg.rules {
 				if _, carve := r.CarveOut(); carve || !r.MatchesTool(tool) {
 					continue
 				}
 				if m := matchers[tool].Match; r.Bare() || m != nil && m(r.Spec, s.Args) {
-					covered, skills = true, append(skills, lg.skill)
+					covered = true
+					if !slices.Contains(skills, lg.skill) {
+						skills = append(skills, lg.skill)
+					}
+					break
 				}
+			}
+			if covered {
+				break
 			}
 		}
 		if !covered {
 			return nil, nil
 		}
 	}
-	if engineMayAllow(ctx, info, tools) { // below
+	if engineDecides(ctx, info, tools) { // below
 		return nil, nil
 	}
 	reason := "the tools skill " + skills[0] + " granted ended with the user's last message; " +
 		"read the skill again with the " + agentskill.ToolName + " tool, then make this call again"
-	observe(ctx, agentpolicy.Verdict{RunID: info.RunID, Turn: info.Turn, CallID: info.Call.CallID,
-		Tool: info.Call.Name, Action: agentturn.Block, Reason: reason, By: agentpolicy.ByPolicy})
 	return &agentturn.ToolDecision{Action: agentturn.Block, By: agentpolicy.ByPolicy, Reason: reason}, nil
 }
 
-// engineMayAllow: the engine may allow, or deny, the call on its own, as
-// far as its exported state says, so the call is left to it.
-engineMayAllow := func(ctx context.Context, info agentturn.ToolCallInfo, tools []string) bool {
-	names := func(list []agentpolicy.Rule) bool { /* some rule's MatchesTool is true for some tool */ }
-	p := engine.Policy()
-	asked := names(p.Ask)
-	if names(p.Deny) || names(p.Allow) {
+// engineDecides: the engine's exported state leaves it a way to decide
+// the call other than by a bare ask, so the call is left to it.
+engineDecides := func(ctx context.Context, info agentturn.ToolCallInfo, tools []string) bool {
+	if len(engineOpts) > 0 { // WithPolicy's agentpolicy.Option values
 		return true
 	}
-	for _, set := range engine.Grants() {
-		if names(set.Allow) || names(set.Deny) {
+	if confined, _ := agenttool.ConfinedBy(ctx, info.Tool, info.Args); confined {
+		return true
+	}
+	p, sets := engine.Policy(), engine.Grants()
+	action, _ := p.Default.Action()
+	for _, tool := range tools {
+		named := false
+		// decides: some rule of list names the tool and is not a bare ask.
+		decides := func(list []agentpolicy.Rule, ask bool) bool {
+			for _, r := range list {
+				if !r.MatchesTool(tool) {
+					continue
+				}
+				named = true
+				if !ask || !r.Bare() {
+					return true
+				}
+			}
+			return false
+		}
+		if decides(p.Allow, false) || decides(p.Deny, false) || decides(p.Ask, true) {
 			return true
 		}
-		asked = asked || names(set.Ask)
+		for _, set := range sets {
+			if decides(set.Allow, false) || decides(set.Deny, false) || decides(set.Ask, true) {
+				return true
+			}
+		}
+		if !named && action == agentturn.Allow {
+			return true
+		}
 	}
-	if action, _ := p.Default.Action(); action == agentturn.Allow && !asked {
-		return true
-	}
-	confined, _ := agenttool.ConfinedBy(ctx, info.Tool, info.Args)
-	return confined
+	return false
 }
 cfg.BeforeToolCall = agentturn.ChainBeforeToolCall(keepSaveBase, grantGuard, engine.BeforeToolCall())
 ```
 
-Both go first, ahead of whatever may hold or allow the call:
-`keepSaveBase` decides nothing and keeps the render for any holder, and
-`grantGuard` revokes before the engine decides with the grants in
-force. `grantGuard` decides nothing either, except in one case under
-`WithSkillGrantScope`: a call that every rule of an ended grant would
-have allowed, and that the engine cannot allow on its own, is blocked
-with a reason the model reads, naming the skill and the tool that reads
-it again. The engine would defer it to an ask rule or its default, and
-the refusal the model read then, a reviewer's, said nothing of the
-skill; the note the turn began with is several items up, and a model
-refused acts on the refusal in front of it. The engine has no
-side-effect-free evaluation to ask whether it would allow, so the test
-is conservative, over `Engine.Policy()` and `Engine.Grants()`: a deny
-rule naming any of the call's tools leaves the call to the engine, so
-the deny's reason stands; so does an allow rule of the policy or of any
-grant in force, a default that allows with no ask rule naming the
-tools, and a tool that says it runs confined, which a bare ask rule
-lets past. A hook the product folded into the engine is not consulted
-first. The refusal is recorded as a verdict, since the engine never saw
-the call, and is not reported to `WithSkillGrantReport`. The
-conversation test in `grantGuard` is under "What the kit does" below.
+Both chained hooks decide nothing, so they go first, ahead of whatever
+may hold or allow the call: `keepSaveBase` keeps the render for any
+holder, and `grantGuard` revokes before the engine decides with the
+grants in force. The conversation test in `grantGuard` is under "What
+the kit does" below.
+
+`refuseEndedGrant` is the one decision the kit makes, and it makes it
+inside the engine, as the first of the hooks `agentpolicy.WithHooks`
+folds into the engine's own, ahead of the product's. Under
+`WithSkillGrantScope` a call that every rule of an ended grant would
+have allowed, and that the engine would only ask about, is blocked with
+a reason the model reads, naming the skill and the tool that reads it
+again. The engine would defer it to the ask rule, and the refusal the
+model read then, a reviewer's, said nothing of the skill; the note the
+turn began with is several items up, and a model refused acts on the
+refusal in front of it. Inside the engine rather than chained ahead of
+it because the engine's batch hold reads a chained Block as an ask: the
+blocked call's allowed siblings were held for a question nobody was
+asked. Folded in, the engine's fold takes the Block, the siblings are
+decided beside it, and the engine records the decision as the call's
+verdict, so the kit writes none itself; it is not reported to
+`WithSkillGrantReport`. With `WithEngine` the kit cannot fold a hook
+into the engine, so there is no refusal.
+
+The engine has no side-effect-free evaluation to ask whether it would
+allow the call, so `engineDecides` is conservative over its exported
+state and the kit refuses only when that state leaves the engine no way
+to decide other than by a bare ask: for every tool of the call's
+subjects, every rule naming that tool in `Engine.Policy()`'s allow,
+deny and ask lists and in every `Engine.Grants()` set is a bare ask,
+with no specifier and no carve-out; when no rule names the tool, the
+default does not allow; the call's tool does not say it runs confined,
+which lets a call past a bare ask; and `WithPolicy` was given no
+agentpolicy option of the product's, which may change how the engine
+reads any of that. An ask rule with a specifier the call does not match
+leaves the call allowed by default, and so does a bare ask a carve-out
+cancels, so any specifier naming a tool is the engine's to read, as is
+any allow or deny naming one and any option. The predicate collapses to
+agentpolicy's side-effect-free `Engine.Would` once that lands.
 
 The memory tools the kit offers are wrapped with `agenttool.Wrap`
 around what `agentmemory.Tools` returns. The wrapper reads the kept
@@ -935,18 +990,23 @@ under: marks[agentturn.RunIDFromContext(ctx)], bound: ok}`: the mark
 the hook kept for the run the read was made in, which is the same ID
 `TurnStartInfo.RunID` carries, and no mark for a read made in no run,
 which the tail test alone then ends. A replayed grant, `New`'s or
-`Kit.RegrantSkills`', is bound to `userMarkOf` over the `ItemEntry`
-items of the session's path, which is the mark the transcript
-`session.Transcript` seeds the agent with starts under, so the first
-turn after a restart does not end what the restart granted again. The
-tail test alone missed a message another agent's run received: the
-kit's agent hands the conversation to another kit's, that agent takes
-the user's next message and hands back, and the kit's first turn opens
-on the transfer's output. It also missed a steer delivered before an
-output, which `TurnStartInfo` does not report. Both are one more user
-message, so the count ends them. A compaction folds older messages
-away and keeps the last, so the count falls and the digest holds, and
-nothing ends; the message after it changes the digest.
+`Kit.RegrantSkills`', is bound to `userMarkOf(session.Transcript(sess))`,
+the items `Kit.AgentOptions` seeds the agent with, so the first turn
+after a restart does not end what the restart granted again. Not the
+path's `ItemEntry` items: a fold's summary stands in for the messages
+it folded in the seeded transcript, a user-role message of its own, and
+a restart after a fold past the last prompt would read the prompt's
+digest as stale and end the grant with "the user's new message" though
+none arrived. The tail test alone missed a message another agent's run
+received: the kit's agent hands the conversation to another kit's, that
+agent takes the user's next message and hands back, and the kit's first
+turn opens on the transfer's output. It also missed a steer delivered
+before an output, which `TurnStartInfo` does not report. Both are one
+more user message, so the count ends them. A compaction ends nothing by
+itself: in the run the turn's transcript keeps the message the fold
+summarised, so the count falls and the digest holds, and across a
+restart the grant is bound to the summary that stands in for it; the
+message after either changes the digest.
 
 ## What the kit does that no line here covers
 

@@ -129,7 +129,7 @@ contest was silent, and the kit is where they get called, in one order:
 | field | order |
 |---|---|
 | `BeforeModelCall` | memory re-render, then the guards over each part and over the whole request, then the product's |
-| `BeforeToolCall` | the skill grants' guard, which under `WithSkillGrantScope` refuses a call only an ended grant allowed and otherwise decides nothing, then the policy engine, with the product's hooks folded into it (`agentpolicy.WithHooks`) |
+| `BeforeToolCall` | the skill grants' guard, which decides nothing, then the policy engine, with the scope's refusal of a call only an ended grant allowed and then the product's hooks folded into it (`agentpolicy.WithHooks`) |
 | `OutputGuard` | the guards, then the product's |
 | `ShouldStopAfterTurn` | the policy's, then the product's |
 | `BeforeTurn` | the skill grants' revoke at each new user message under `WithSkillGrantScope`, then the product's |
@@ -223,7 +223,14 @@ whichever agent's run received it, as Claude Code clears
 ends them when a front says; a skill read again is granted again, and
 under the scope the model is told which grants a message ended and
 that a read restores them, and a call only an ended grant allowed is
-refused naming the skill to read again.
+refused, inside the engine, naming the skill to read again. The kit
+refuses only when every rule naming the call's tools, in the policy and
+in every grant in force, is a bare ask, the default does not allow a
+tool no rule names, the tool does not say it runs confined, and
+`WithPolicy` was given no agentpolicy option; any specifier, allow,
+deny or option leaves the call to the engine, which asks, allows or
+denies it as before. The test collapses to agentpolicy's
+side-effect-free `Engine.Would` once that lands.
 `kit.ReloadSkills(ctx)` discovers the skills again, for an agent that
 writes a skill and uses it in the same conversation.
 
