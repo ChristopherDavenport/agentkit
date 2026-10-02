@@ -1768,6 +1768,22 @@ func TestAMemoryShareUnderTheBlocksFloorDropsTheBlock(t *testing.T) {
 	if len(kit.Omitted()) == 0 {
 		t.Fatal("the dropped entries are not reported")
 	}
+	// Every entry is left out for the block, not the budget: the
+	// manifest says the whole block was dropped (#69).
+	man := kit.MemoryManifest()
+	if len(man.Entries) != 0 || len(man.Omitted) == 0 {
+		t.Fatalf("manifest of a dropped block = %+v, want no entry and every one omitted", man)
+	}
+	for _, e := range man.Omitted {
+		if e.Reason != agentmemory.OmitBlock {
+			t.Errorf("omitted entry %s/%s has reason %q, want %q", e.Scope, e.Name, e.Reason, agentmemory.OmitBlock)
+		}
+	}
+	for _, o := range kit.Omitted() {
+		if o.Source == agentkit.SourceMemory && o.Reason != agentmemory.OmitBlock {
+			t.Errorf("omission %+v has reason %q, want %q", o, o.Reason, agentmemory.OmitBlock)
+		}
+	}
 }
 
 // noTextSummary answers every request with a function call and no text,

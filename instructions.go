@@ -268,8 +268,9 @@ func unlistedReason(sk *agentskill.Skill, problems []agentskill.Problem) string 
 // refused, [memoryWrites], since a model shown no block and no word on
 // them would save over entries it was never shown. memory_search stays.
 // The dropped render's manifest shows no entry and lists every entry
-// the block held among the omitted with no reason, which is the mark
-// [droppedRender] reads in a session's record after a restart.
+// the block held among the omitted with [agentmemory.OmitBlock], which
+// is the mark [droppedRender] reads in a session's record after a
+// restart.
 func memoryPart(ctx context.Context, s *settings, limit int64) (group []Part, man agentmemory.Manifest, omitted []Omission, dropped bool, err error) {
 	usage := agentmemory.Usage()
 	if limit > 0 {
@@ -305,8 +306,15 @@ func memoryPart(ctx context.Context, s *settings, limit int64) (group []Part, ma
 		// Report every entry rather than send a block the budget said
 		// there was no room for.
 		parts, dropped = nil, true
-		man.Omitted = append(man.Omitted, man.Entries...)
-		man.Entries = nil
+		// Every entry is left out for the block, those a bounded render
+		// had already left out for the budget too: the block is not sent.
+		omitted := make([]agentmemory.ManifestEntry, 0, len(man.Entries)+len(man.Omitted))
+		omitted = append(omitted, man.Entries...)
+		omitted = append(omitted, man.Omitted...)
+		for i := range omitted {
+			omitted[i].Reason = agentmemory.OmitBlock
+		}
+		man.Entries, man.Omitted = nil, omitted
 	}
 
 	if size > 0 && len(parts) > 0 {

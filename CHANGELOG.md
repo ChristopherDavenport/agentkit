@@ -29,9 +29,16 @@ The round 8 findings (#66 to #76).
   for every memory write it decides, `memory_patch` and `memory_forget`
   as well as `memory_save`, and the refusal reads it first; after a
   restart, a manifest folded at the call that shows no entry and lists
-  one the block held among the omitted is refused on that; agentmemory's
-  next release adds `OmitBlock`, the reason the kit will write on those
-  omissions so the shape is explicit. (#69)
+  one the block held among the omitted is refused on that. When the
+  budget drops the block the kit writes `agentmemory.OmitBlock`,
+  agentmemory v0.0.10's reason for an entry left out with the whole
+  block, on every omitted entry, those a bounded render had already left
+  out under the budget as well, and `droppedRender` tests that reason in
+  place of the empty one it read. `Kit.Omitted()` reports those entries
+  with the reason `block`, where it reported `budget`. A session a kit
+  before this release recorded wrote the drop with no reason, and a
+  held write in it is no longer refused after a restart on the manifest
+  alone. (#69)
 
 ### Fixed
 
@@ -72,26 +79,26 @@ The round 8 findings (#66 to #76).
   fold takes the Block: a sibling in the same batch is decided beside it
   and runs when allowed, where a Block chained ahead of the engine left
   the siblings held for a question nobody was asked, and the engine
-  records the refusal as the call's verdict. The kit refuses only when
-  every rule naming the call's tools, in the policy and in every grant
-  in force, is a bare ask with no specifier and no carve-out, the
-  default does not allow a tool no rule names, the tool does not say it
-  runs confined, and `WithPolicy` was given no agentpolicy option,
-  `WithAliases` among them, since the options are opaque to the kit; any
-  specifier, allow, deny or option leaves the call to the engine, which
-  asks, allows or denies it as before. There is no refusal under
-  `WithEngine`. An ended grant is kept by the source it was made under,
+  records the refusal as the call's verdict. The kit refuses when
+  agentpolicy v0.0.11's `Engine.Would`, the engine's own side-effect-free
+  decision for the call without the ended grants, is to ask; a call the
+  engine allows or denies is left to it. `Would` reads the policy, the
+  grants in force, the tool's confinement, every agentpolicy option and
+  the hooks folded into the engine, so the refusal no longer gives up
+  under an option of the product's, `WithAliases` among them, and no
+  longer refuses a call a specifier or a carve-out leaves allowed. The
+  product's hooks are called once more for the question. There is no
+  refusal under `WithEngine`. An ended grant is kept by the source it was made under,
   and `Kit.ReloadSkills` forgets one whose skill the catalogue no longer
   lists, so a deleted skill does not refuse its tool for the rest of the
   conversation. (#76)
 - A kit restarted into a handoff wrote its whole memory manifest on its
   first hand-back, since its own last manifest, the base of the delta,
-  lives in the kit object. The kit's fold now keeps the manifests the
-  session's path holds in force, not only their hashes, and a kit with
-  no last manifest in memory writes a delta on whichever of them gives
-  the smallest record. agentmemory's next release adds
-  `ManifestFold.Record`, the smallest record over the manifests the fold
-  holds, which the kit's copies shrink to on that bump. (#68)
+  lives in the kit object. A kit with no last manifest in memory now
+  writes a delta on whichever manifest the session's path holds in force
+  gives the smallest record. The record is agentmemory v0.0.10's
+  `ManifestFold.Record`, the smallest over the manifests the fold holds,
+  and the kit keeps no copy of those manifests of its own. (#68)
 - A render of a run the kit's session does not record, an agent built
   from the kit and attached to nothing or to another recorder with no
   recorder on its context, was written into that session with no run
@@ -110,11 +117,56 @@ The round 8 findings (#66 to #76).
   it after; `Close` takes every server under the lock and closes them
   together, so quitting costs one grace and not one per server, and
   cancels a dial `AddMCP` has in flight, whose `AddMCP` returns an
-  error. `RemoveMCP`'s doc says what the close waits for under agenttool
-  v0.0.14, with and without `WithToolElicitor`. (#71)
+  error. `RemoveMCP`'s and `Close`'s docs say the close ends every call
+  in flight to the server with `mcpclient.ErrClosed` and returns within
+  a few seconds, as agenttool v0.0.15's does, with or without
+  `WithToolElicitor`; they no longer say it waits for the calls. (#71)
+
+### Added
+
+- `Kit.GrantScope(ctx)` names the grant scope the kit decides a run
+  under, the conversation's session ID, and `SkillGrant.Scope` says whose
+  read a report is. `Kit.LookupToolFor(ctx, name)` reads the union the
+  provider last returned to the run the context belongs to; the engine
+  the kit builds is given it through `agentpolicy.WithToolsFor`, so two
+  runs off one kit whose tool lists differ each read their own, where
+  `Kit.LookupTool` read whichever list was offered last. `LookupTool`
+  stays, for a context with no run. (#43 of agentpolicy)
 
 ### Changed
 
+- Skill grants are per conversation. A grant is made under the grant
+  scope of the conversation that read the skill,
+  `agentpolicy.ContextWithGrantScope` keyed by its session ID, and the
+  engine decides only that conversation's calls by it, so one kit serves
+  any number of conversations: a skill read in one grants nothing in
+  another, and a read in a second is granted there. The kit put the
+  engine's one grant set on the first conversation it served and, at the
+  first call it decided in a second, revoked every grant and granted
+  nothing after; that mechanism is gone, with `ErrSkillGrantConversation`,
+  its guard, its verdicts and its report with no skill (#44, #59). A
+  front that matched that error matches nothing now, and a front that
+  built a kit for each conversation to get this can build one. The
+  scope is on the context the kit's engine hook and tool provider call
+  the engine with, so a product that calls the engine for a
+  conversation, `Engine.Answers` on a `Resume`, `Engine.GrantsFor`,
+  `Engine.RevokeScope`, puts `Kit.GrantScope(ctx)` on its context. A
+  scope a front puts on the context with `agentpolicy.ContextWithGrantScope`
+  is the conversation's scope; a run with no session and no recorder has
+  one scope of the kit's own, not the unscoped one, which would decide
+  every conversation's calls. A child agent `WithChildAgent` offers runs
+  under a scope of its own, under its conversation's: its parent's skills
+  grant it nothing, a skill it reads is its alone, and its conversation's
+  next message under `WithSkillGrantScope` ends the grants of the
+  children run under it. `Kit.RevokeSkillGrants(ctx)` ends one
+  conversation's grants and its children's, and is what a front calls
+  when a conversation is over; the kit then forgets what it kept of them.
+  Each revocation is still a verdict per source in the conversation's
+  session, `revoked the rules granted by <source>`, so a restart replays
+  it as before, and `RegrantSkills` and `New` grant a session's reads
+  again under its scope; a replay also reads `Engine.RevokeScope`'s
+  verdict as ending every grant of the conversation. `RegrantSkills` no
+  longer refuses a second session.
 - Under `WithSkillGrantScope` a call that only an ended grant would have
   allowed is now refused by the kit with a reason naming the skill, where
   the engine held it for the ask rule and a reviewer answered (#76). A
@@ -122,14 +174,8 @@ The round 8 findings (#66 to #76).
   with the refusal in its output instead, and the model reads the
   skill again before it calls; the other calls of its batch are decided
   as they would have been without it, so an allowed sibling runs rather
-  than waiting on the refused call. The kit refuses only when every rule
-  naming the call's tools, in the policy and in every grant in force, is
-  a bare ask, the default does not allow a tool no rule names, the tool
-  does not say it runs confined, and `WithPolicy` was given no
-  agentpolicy option; any specifier, allow, deny or option leaves the
-  call to the engine, which asks, allows or denies it as before, and
-  under `WithEngine` nothing is refused. The predicate collapses to
-  agentpolicy's side-effect-free `Engine.Would` once that lands.
+  than waiting on the refused call. The kit refuses when the engine's
+  `Would` says it would ask, and under `WithEngine` nothing is refused.
 - `Kit.RegrantSkills` returns `ErrSkillGrantRecorder` instead of nil
   when the kit records its engine's verdicts and no recorder, on `ctx`
   or the kit's own, writes the session it was given; it granted

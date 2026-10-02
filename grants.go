@@ -17,7 +17,6 @@ import (
 	"github.com/ChristopherDavenport/agentskill"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
-	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
 
@@ -39,20 +38,20 @@ type SkillGrant struct {
 	// reason.
 	Refused []agentpolicy.Refusal
 	// Err is set when nothing was granted: because the skill's
-	// allowed-tools would not parse; because the read was made in a
-	// conversation the kit's grants do not belong to,
-	// [ErrSkillGrantConversation]; because the catalogue's tool refused
-	// the read, the skill file gone, renamed or unparseable since
-	// discovery, [agentskill.ErrSkillChanged], a report a front reloads
-	// on with [Kit.ReloadSkills]; or, with Replayed set, because a
-	// restart would not grant a read again: the skill changed since the
-	// read, [ErrSkillGrantChanged], the session records no verdict of
-	// the read's grant, [ErrSkillGrantUnrecorded], or none of the rules
-	// the session recorded for the read is among the skill's now. A
-	// report with no Skill is the kit's grants ending because it decided
-	// a call in another conversation; its Err wraps
-	// ErrSkillGrantConversation and names both.
+	// allowed-tools would not parse; because the catalogue's tool
+	// refused the read, the skill file gone, renamed or unparseable
+	// since discovery, [agentskill.ErrSkillChanged], a report a front
+	// reloads on with [Kit.ReloadSkills]; or, with Replayed set, because
+	// a restart would not grant a read again: the skill changed since
+	// the read, [ErrSkillGrantChanged], the session records no verdict
+	// of the read's grant, [ErrSkillGrantUnrecorded], or none of the
+	// rules the session recorded for the read is among the skill's now.
 	Err error
+	// Scope is the grant scope the read was made in, the conversation
+	// whose calls the grant decides, [Kit.GrantScope]. A kit that serves
+	// many conversations reports every one's reads to one function, and
+	// this says whose.
+	Scope string
 	// Replayed is true for a grant made again from a session's records,
 	// at [New] or by [Kit.RegrantSkills], rather than for a read the
 	// model made just now.
@@ -63,33 +62,6 @@ type SkillGrant struct {
 	// loaded, and [Kit.ReloadSkills] brings in the new ones.
 	FrontmatterChanged bool
 }
-
-// ErrSkillGrantConversation is the [SkillGrant.Err] of a read the kit
-// would not grant because its grants belong to one conversation and the
-// kit serves more than one. A grant is a rule set on the kit's one
-// engine, which applies it to every decision the engine makes, so a
-// grant made for one conversation would let every other conversation
-// the kit serves run what the skill allows.
-//
-// The grants belong to the session the kit opened or was given, or, for
-// a kit with none, to the conversation the first grant was made in,
-// named by the session its run records into, [ContextWithRecorder]. The
-// first call the kit decides in any other conversation revokes every
-// grant, before that call is decided, and from then on the kit grants
-// nothing: each read is reported with this error and the calls are
-// decided by the policy alone. A front that grants skills to many
-// conversations gives each its own kit.
-//
-// A run's conversation is the session of the recorder on its context,
-// [ContextWithRecorder]. Without one, it is the session
-// session.ContextWithSessionID names on the context, as a front that
-// records each conversation itself puts there, unless that is the kit's
-// own or a child's of a run the kit served; and otherwise the kit's own
-// session. Under [WithRecorder] the kit records into a recorder another
-// owns, every session of which it takes for one conversation. Runs that
-// name no session and that the kit records nowhere are one conversation
-// to the kit, which cannot tell them apart.
-var ErrSkillGrantConversation = errors.New("agentkit: this kit's skill grants belong to another conversation")
 
 // ErrSkillGrantChanged is the [SkillGrant.Err] of a read a restart will
 // not grant again because the skill is not what the model read: the
@@ -131,6 +103,12 @@ var ErrSkillGrantRecorder = errors.New("agentkit: no recorder writes the session
 // [agentpolicy.Engine.GrantSet] with a [agentpolicy.Source] the product
 // chose, around the catalogue's tool through [agenttool.Wrap], which
 // keeps every property the tool declares.
+//
+// Each grant belongs to the conversation that read the skill: the engine
+// keeps it under the grant scope [Kit.GrantScope] names for the run,
+// [agentpolicy.ContextWithGrantScope], and decides only the calls made
+// under that scope. The kit's one engine serves every conversation, and
+// no conversation's grant reaches another's.
 type skillGrants struct {
 	// cat is the catalogue as it stands, which [Kit.ReloadSkills] may
 	// replace.
@@ -140,57 +118,46 @@ type skillGrants struct {
 	report func(SkillGrant)
 	// observe, when the kit built the engine, records a revocation of a
 	// source whose set held no rules, which the engine does not report,
-	// so the session's journal says every grant ended, and a read refused
-	// in another conversation. It is nil under WithEngine, where the
-	// kit's observer is not the engine's and nothing the engine grants
-	// is recorded by the kit.
+	// so the session's journal says every grant ended. It is nil under
+	// WithEngine, where the kit's observer is not the engine's and
+	// nothing the engine grants is recorded by the kit.
 	observe func(context.Context, agentpolicy.Verdict)
-	// conv names the conversation a run on the context belongs to: the
-	// session its recorder writes, or "" for a run recorded nowhere.
-	conv func(context.Context) string
+	// scope names the grant scope a run on the context belongs to,
+	// Kit.GrantScope.
+	scope func(context.Context) string
 	// mark is the user message a grant made under the context is bound
 	// to, Kit.markFor, and false for a grant bound to none.
 	mark func(context.Context) (userMark, bool)
 	// matchers are WithPolicy's, which is how blockEnded reads a call's
 	// subjects and matches an ended rule's specifier against them.
 	matchers map[string]agentpolicy.ToolMatcher
-	// extraOpts is set when WithPolicy was given agentpolicy options of
-	// the product's, which may change how the engine decides in ways
-	// its exported state does not show, so blockEnded refuses nothing.
-	// The options are opaque, so one that would not, WithAliases among
-	// them, since the engine's lists and the grants are both expanded,
-	// disables the refusal too; agentpolicy's side-effect-free
-	// evaluation is what lifts that.
-	extraOpts bool
 	// scoped is WithSkillGrantScope.
 	scoped bool
 
-	// gmu is held from the test that a conversation may be granted to the
-	// end of its GrantSet, and across the revocation when a second
-	// conversation is seen, so no grant lands after that revocation.
+	// gmu is held from the start of a grant to the end of its GrantSet,
+	// and across a revocation, so no grant lands in the engine after the
+	// revocation that was to end it and goes unrecorded.
 	gmu sync.Mutex
 
-	// mu guards sources, the names of every source a read has granted
-	// under, which is what [Kit.RevokeSkillGrants] revokes; owner, the
-	// conversation the grants belong to once bound is set, and ownerRec,
-	// the recorder of its first grant, which a revocation is written to;
-	// and shared, set once the kit has decided a call in another
-	// conversation, and tripBy, the conversation of that call. A name
-	// stays in sources once granted: revoking one the engine no longer
-	// holds is a no-op. live is the grants in force, by source, which a
-	// revocation clears, for the note the scope gives the model. ended is
-	// the grants the scope's last revocations ended, by source, newest
-	// kept, which blockEnded, the hook the kit folds into the engine,
-	// refuses a call by until the skill is read again.
-	mu       sync.Mutex
-	sources  map[string]bool
-	live     map[string]liveGrant
-	ended    map[string]liveGrant
-	owner    string
-	ownerRec *session.Recorder
-	bound    bool
-	shared   bool
-	tripBy   string
+	// mu guards scopes, the state of each grant scope a read has granted
+	// in.
+	mu     sync.Mutex
+	scopes map[string]*scopeGrants
+}
+
+// scopeGrants is what the kit keeps of the grants of one grant scope:
+// sources, the names of every source a read has granted under, which is
+// what a revocation revokes; live, the grants in force, by source, which
+// a revocation clears, for the note the scope gives the model; and
+// ended, the grants the scope's last revocations ended, by source,
+// newest kept, which blockEnded, the hook the kit folds into the
+// engine, refuses a call by until the skill is read again. A name stays
+// in sources once granted: revoking one the engine no longer holds is a
+// no-op.
+type scopeGrants struct {
+	sources map[string]bool
+	live    map[string]liveGrant
+	ended   map[string]liveGrant
 }
 
 // liveGrant is a grant in force: the skill's listed name, the source
@@ -205,12 +172,37 @@ type liveGrant struct {
 	bound  bool
 }
 
-// stale reports whether a live grant was made under a user message
-// earlier than the one a transcript with mark now is under.
-func (g *skillGrants) stale(now userMark) bool {
+// state returns the state of scope, making it. The caller holds mu.
+func (g *skillGrants) state(scope string) *scopeGrants {
+	if g.scopes == nil {
+		g.scopes = map[string]*scopeGrants{}
+	}
+	st := g.scopes[scope]
+	if st == nil {
+		st = &scopeGrants{}
+		g.scopes[scope] = st
+	}
+	return st
+}
+
+// scopedCtx returns ctx carrying the grant scope a run on it belongs to,
+// which is what the engine's calls read.
+func (g *skillGrants) scopedCtx(ctx context.Context) context.Context {
+	return agentpolicy.ContextWithGrantScope(ctx, g.scope(ctx))
+}
+
+// stale reports whether a live grant in the grant scope of ctx was made
+// under a user message earlier than the one a transcript with mark now
+// is under.
+func (g *skillGrants) stale(ctx context.Context, now userMark) bool {
+	scope := g.scope(ctx)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for _, lg := range g.live {
+	st := g.scopes[scope]
+	if st == nil {
+		return false
+	}
+	for _, lg := range st.live {
 		if lg.bound && lg.under.stale(now) {
 			return true
 		}
@@ -220,103 +212,54 @@ func (g *skillGrants) stale(now userMark) bool {
 
 // keepEnded remembers the grants the scope ended, by the source each
 // was made under, for blockEnded.
-func (g *skillGrants) keepEnded(ended []liveGrant) {
+func (g *skillGrants) keepEnded(scope string, ended []liveGrant) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.ended == nil {
-		g.ended = map[string]liveGrant{}
+	st := g.state(scope)
+	if st.ended == nil {
+		st.ended = map[string]liveGrant{}
 	}
 	for _, lg := range ended {
-		g.ended[lg.source] = lg
+		st.ended[lg.source] = lg
 	}
 }
 
-// clearEnded forgets the ended grants of the skill listed as name, on a
-// read of it.
-func (g *skillGrants) clearEnded(name string) {
+// clearEnded forgets the ended grants of the skill listed as name in a
+// grant scope, on a read of it there.
+func (g *skillGrants) clearEnded(scope, name string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for source, lg := range g.ended {
+	st := g.scopes[scope]
+	if st == nil {
+		return
+	}
+	for source, lg := range st.ended {
 		if lg.skill == name {
-			delete(g.ended, source)
+			delete(st.ended, source)
 		}
 	}
 }
 
-// pruneEnded forgets the ended grants of skills the catalogue no longer
-// lists, after Kit.ReloadSkills: a skill deleted or renamed can be read
-// again under no name, so its ended grant would refuse its tool for the
-// rest of the conversation.
+// pruneEnded forgets the ended grants, in every grant scope, of skills
+// the catalogue no longer lists, after Kit.ReloadSkills: a skill deleted
+// or renamed can be read again under no name, so its ended grant would
+// refuse its tool for the rest of the conversation.
 func (g *skillGrants) pruneEnded() {
 	cat := g.cat()
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for source, lg := range g.ended {
-		if _, ok := cat.Lookup(lg.skill); !ok {
-			delete(g.ended, source)
+	for _, st := range g.scopes {
+		for source, lg := range st.ended {
+			if _, ok := cat.Lookup(lg.skill); !ok {
+				delete(st.ended, source)
+			}
 		}
 	}
 }
 
-// claim reports whether grants may be made for the conversation of a run
-// on ctx, binding the grants to it when they belong to none yet. The
-// caller holds gmu.
-func (g *skillGrants) claim(ctx context.Context) (string, bool) {
-	conv := g.conv(ctx)
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if !g.bound {
-		g.owner, g.ownerRec, g.bound = conv, RecorderFromContext(ctx), true
-	}
-	return conv, !g.shared && g.owner == conv
-}
-
-// owns reports whether the grants belong to the conversation of a run
-// on ctx and the kit still grants.
-func (g *skillGrants) owns(ctx context.Context) bool {
-	conv := g.conv(ctx)
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.bound && !g.shared && g.owner == conv
-}
-
-// guard is the BeforeToolCall hook the kit puts ahead of the engine under
-// WithSkillGrants, and decides nothing: the first call it sees in a
-// conversation the grants do not belong to revokes every grant, in the
-// owner's session, before the engine decides that call, and stops the
-// kit granting. [ErrSkillGrantConversation] says why. The scope's
-// refusal of a call an ended grant allowed is not here but inside the
-// engine, [blockEnded], so a batch is held as the engine holds it.
-func (g *skillGrants) guard(ctx context.Context, _ agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
-	conv := g.conv(ctx)
-	g.mu.Lock()
-	trip := g.bound && !g.shared && g.owner != conv
-	g.mu.Unlock()
-	if !trip {
-		return nil, nil
-	}
-	g.gmu.Lock()
-	defer g.gmu.Unlock()
-	g.mu.Lock()
-	if g.shared {
-		g.mu.Unlock()
-		return nil, nil
-	}
-	g.shared, g.tripBy = true, conv
-	rec, owner := g.ownerRec, g.owner
-	g.mu.Unlock()
-	// Written where the grants were made: the owner's run is not this
-	// one, so the context carries the owner's recorder and nothing of the
-	// run that tripped it. The cause goes first, so the revocations after
-	// it are not read as a scope's or the product's.
-	octx := ContextWithRecorder(context.WithoutCancel(context.Background()), rec)
-	if g.observe != nil {
-		g.observe(octx, agentpolicy.Verdict{Action: agentturn.Block, Reason: fmt.Sprintf("skill grants ended: the kit decided a call in session %q, and its skill grants belong to one conversation", conv), By: agentpolicy.ByPolicy})
-	}
-	g.revoke(octx)
-	g.tell(SkillGrant{Err: fmt.Errorf("%w: the kit decided a call in session %q, so it revoked the grants of session %q and grants nothing after", ErrSkillGrantConversation, conv, owner)})
-	return nil, nil
-}
+// wouldKey marks the context of blockEnded's own evaluation, which folds
+// the same hooks, blockEnded among them, as the decision it asks about.
+type wouldKey struct{}
 
 // blockEnded is the scope's refusal, the first hook the kit folds into
 // the engine it builds, [agentpolicy.WithHooks], under WithSkillGrantScope:
@@ -334,47 +277,45 @@ func (g *skillGrants) guard(ctx context.Context, _ agentturn.ToolCallInfo) (*age
 //
 // A call is allowed by an ended grant when each of its subjects, the
 // tool's [agentpolicy.Subjects] split of it under WithPolicy's matchers
-// or the call itself, is covered by a rule of an ended grant: the rule
-// names the subject's tool and is bare or its specifier matches the
-// subject under the tool's matcher. An ended grant of a skill the
-// catalogue no longer lists covers nothing.
+// or the call itself, is covered by a rule of an ended grant of the
+// grant scope the call is decided under: the rule names the subject's
+// tool and is bare or its specifier matches the subject under the tool's
+// matcher. An ended grant of a skill the catalogue no longer lists
+// covers nothing.
 //
-// The engine has no side-effect-free evaluation to ask whether it would
-// allow, so the kit refuses only when the engine's exported state leaves
-// it no way to: for every tool of the call's subjects, every rule naming
-// that tool in [agentpolicy.Engine.Policy]'s lists and in every
-// [agentpolicy.Engine.Grants] set is a bare ask, with no specifier and
-// no carve-out; when no rule names the tool, the default does not
-// allow; the call's tool does not say it runs confined,
-// [agenttool.ConfinedBy], which lets a call past a bare ask; and
-// WithPolicy was given no agentpolicy option of the product's, which
-// may change how the engine reads any of that. Any specifier, any allow
-// or deny naming a tool, any option: the call is left to the engine,
-// which asks, allows or denies as it would have. The predicate collapses
-// to an evaluation the engine exports once agentpolicy has one.
+// What the engine would do without those grants is [agentpolicy.Engine.Would]'s
+// answer, the decision before the batch hold with the same rules, the
+// grants still in force, the call's confinement and the hooks folded in,
+// the product's among them, which are called once more for it. The kit
+// refuses when the engine would ask, which is what the grant answered. A
+// call the engine would allow is left to it, since an allow needs no
+// grant. One it would deny is too: the engine folds its hooks in after a
+// policy that denies, so this hook is not asked, and a deny rule beats
+// a grant in any case.
 func (g *skillGrants) blockEnded(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
-	if info.Call == nil {
+	if info.Call == nil || ctx.Value(wouldKey{}) != nil {
 		return nil, nil
 	}
-	conv := g.conv(ctx)
+	scope := g.scope(ctx)
 	cat := g.cat()
 	g.mu.Lock()
-	owned := g.scoped && g.bound && !g.shared && g.owner == conv && len(g.ended) > 0
-	names := make([]string, 0, len(g.ended))
-	for name := range g.ended {
-		names = append(names, name)
-	}
-	ended := make([]liveGrant, 0, len(names))
-	sort.Strings(names)
-	for _, name := range names {
-		if lg := g.ended[name]; cat != nil {
-			if _, ok := cat.Lookup(lg.skill); ok {
-				ended = append(ended, lg)
+	var ended []liveGrant
+	if st := g.scopes[scope]; g.scoped && st != nil && len(st.ended) > 0 {
+		names := make([]string, 0, len(st.ended))
+		for name := range st.ended {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if lg := st.ended[name]; cat != nil {
+				if _, ok := cat.Lookup(lg.skill); ok {
+					ended = append(ended, lg)
+				}
 			}
 		}
 	}
 	g.mu.Unlock()
-	if !owned || len(ended) == 0 {
+	if len(ended) == 0 {
 		return nil, nil
 	}
 	args := info.Args
@@ -389,14 +330,11 @@ func (g *skillGrants) blockEnded(ctx context.Context, info agentturn.ToolCallInf
 		}
 		subjects = split
 	}
-	var skills, tools []string
+	var skills []string
 	for _, s := range subjects {
 		tool := s.Tool
 		if tool == "" {
 			tool = info.Call.Name
-		}
-		if !slices.Contains(tools, tool) {
-			tools = append(tools, tool)
 		}
 		covered := false
 		for _, lg := range ended {
@@ -420,7 +358,14 @@ func (g *skillGrants) blockEnded(ctx context.Context, info agentturn.ToolCallInf
 			return nil, nil
 		}
 	}
-	if g.engineDecides(ctx, info, tools, args) {
+	// The grants are revoked, so the engine decides as it would have
+	// without them. The context says so to this hook, which the
+	// evaluation folds in again.
+	v, err := g.engine.Would(context.WithValue(agentpolicy.ContextWithGrantScope(ctx, scope), wouldKey{}, true), info)
+	if err != nil {
+		return nil, nil // the decision reports it
+	}
+	if v.Action != agentturn.Defer {
 		return nil, nil
 	}
 	reason := "the tools skill " + skills[0] + " granted"
@@ -431,53 +376,6 @@ func (g *skillGrants) blockEnded(ctx context.Context, info agentturn.ToolCallInf
 	return &agentturn.ToolDecision{Action: agentturn.Block, By: agentpolicy.ByPolicy, Reason: reason}, nil
 }
 
-// engineDecides reports whether the engine's exported state leaves it a
-// way to decide a call over tools other than by a bare ask, in which
-// case the kit leaves the call to it; see blockEnded.
-func (g *skillGrants) engineDecides(ctx context.Context, info agentturn.ToolCallInfo, tools []string, args json.RawMessage) bool {
-	if g.extraOpts {
-		return true
-	}
-	if info.Tool != nil {
-		if ok, _ := agenttool.ConfinedBy(ctx, info.Tool, args); ok {
-			return true
-		}
-	}
-	p := g.engine.Policy()
-	sets := g.engine.Grants()
-	defaultAllows := false
-	if action, _ := p.Default.Action(); action == agentturn.Allow {
-		defaultAllows = true
-	}
-	for _, tool := range tools {
-		named := false
-		decides := func(list []agentpolicy.Rule, ask bool) bool {
-			for _, r := range list {
-				if !r.MatchesTool(tool) {
-					continue
-				}
-				named = true
-				if !ask || !r.Bare() {
-					return true
-				}
-			}
-			return false
-		}
-		if decides(p.Allow, false) || decides(p.Deny, false) || decides(p.Ask, true) {
-			return true
-		}
-		for _, set := range sets {
-			if decides(set.Allow, false) || decides(set.Deny, false) || decides(set.Ask, true) {
-				return true
-			}
-		}
-		if !named && defaultAllows {
-			return true
-		}
-	}
-	return false
-}
-
 // wrap returns the catalogue's tool, or whatever stands in for it,
 // granting on each read of a skill's own instructions.
 func (g *skillGrants) wrap(t agenttool.Tool) agenttool.Tool {
@@ -485,7 +383,7 @@ func (g *skillGrants) wrap(t agenttool.Tool) agenttool.Tool {
 		res, err := t.Execute(ctx, call)
 		if err != nil {
 			if errors.Is(err, agentskill.ErrSkillChanged) {
-				g.changed(call, err)
+				g.changed(ctx, call, err)
 			}
 			return res, err
 		}
@@ -497,12 +395,11 @@ func (g *skillGrants) wrap(t agenttool.Tool) agenttool.Tool {
 			// call that tells the model what to do.
 			return res, nil
 		}
+		// The grant belongs to the conversation that read the skill, the
+		// grant scope of the call's context.
+		ctx = g.scopedCtx(ctx)
 		g.gmu.Lock()
 		defer g.gmu.Unlock()
-		if conv, ok := g.claim(ctx); !ok {
-			g.refuse(ctx, read.Name, conv)
-			return res, nil
-		}
 		sk, ok := g.cat().Lookup(read.Name)
 		if !ok {
 			return res, nil
@@ -511,12 +408,12 @@ func (g *skillGrants) wrap(t agenttool.Tool) agenttool.Tool {
 		// over, whatever the read grants: a skill whose allowed-tools
 		// were emptied or broken since grants nothing, and must not go
 		// on refusing the tool it no longer names.
-		g.clearEnded(sk.ListedName())
+		g.clearEnded(agentpolicy.GrantScopeFromContext(ctx), sk.ListedName())
 		out := SkillGrant{Skill: sk.ListedName(), Location: sk.Location, FrontmatterChanged: read.FrontmatterChanged}
 		rules, err := skillRules(sk)
 		if err != nil {
 			out.Err = fmt.Errorf("agentkit: skill %s: allowed-tools: %w", sk.ListedName(), err)
-			g.tell(out)
+			g.tell(ctx, out)
 			return res, nil
 		}
 		g.grant(ctx, sk, out, rules)
@@ -532,7 +429,7 @@ func (g *skillGrants) wrap(t agenttool.Tool) agenttool.Tool {
 // ReloadSkills' doc says grants do. The name is the call's, parsed as
 // the tool parses it, since no Read came back; a name the catalogue no
 // longer lists is reported with no Location.
-func (g *skillGrants) changed(call agenttool.Call, err error) {
+func (g *skillGrants) changed(ctx context.Context, call agenttool.Call, err error) {
 	var args struct {
 		Name string `json:"name"`
 	}
@@ -542,29 +439,7 @@ func (g *skillGrants) changed(call agenttool.Call, err error) {
 		out.Skill, out.Location = sk.ListedName(), sk.Location
 		out.Err = fmt.Errorf("agentkit: skill %s: read refused: %w", sk.ListedName(), err)
 	}
-	g.tell(out)
-}
-
-// refuse reports, and records in the reading conversation's session, a
-// read whose grant the kit will not make because its grants belong to
-// another conversation. The model still gets the skill's text; its
-// calls are decided by the policy alone.
-func (g *skillGrants) refuse(ctx context.Context, name, conv string) {
-	sk, ok := g.cat().Lookup(name)
-	if !ok {
-		return
-	}
-	g.mu.Lock()
-	owner, tripBy := g.owner, g.tripBy
-	g.mu.Unlock()
-	err := fmt.Errorf("%w: skill %s was read in session %q, the grants belong to %q, and the kit serves more than one conversation", ErrSkillGrantConversation, sk.ListedName(), conv, owner)
-	if conv == owner {
-		err = fmt.Errorf("%w: skill %s was read in session %q, which the grants belonged to, but the kit has decided a call in session %q since, and grants nothing after it", ErrSkillGrantConversation, sk.ListedName(), conv, tripBy)
-	}
-	if g.observe != nil {
-		g.observe(ctx, agentpolicy.Verdict{Tool: agentskill.ToolName, Action: agentturn.Block, Reason: "not granted the tools of skill " + sk.ListedName() + ": the kit serves more than one conversation and its skill grants belong to one", By: agentpolicy.ByPolicy})
-	}
-	g.tell(SkillGrant{Skill: sk.ListedName(), Location: sk.Location, Err: err})
+	g.tell(ctx, out)
 }
 
 // grant grants rules, the skill's or those of it a replay grants again,
@@ -582,14 +457,17 @@ func (g *skillGrants) grant(ctx context.Context, sk *agentskill.Skill, out Skill
 	if len(set.Allow) == 0 {
 		return
 	}
+	ctx = g.scopedCtx(ctx)
+	scope := agentpolicy.GrantScopeFromContext(ctx)
 	if out.Replayed {
 		ctx = context.WithValue(ctx, replayKey{}, true)
 	}
 	g.mu.Lock()
-	if g.sources == nil {
-		g.sources = map[string]bool{}
+	st := g.state(scope)
+	if st.sources == nil {
+		st.sources = map[string]bool{}
 	}
-	g.sources[set.Source.Name] = true
+	st.sources[set.Source.Name] = true
 	g.mu.Unlock()
 	out.Granted, out.Refused = g.engine.GrantSet(ctx, set)
 	var mark userMark
@@ -598,16 +476,17 @@ func (g *skillGrants) grant(ctx context.Context, sk *agentskill.Skill, out Skill
 		mark, bound = g.mark(ctx)
 	}
 	g.mu.Lock()
-	if g.live == nil {
-		g.live = map[string]liveGrant{}
+	st = g.state(scope)
+	if st.live == nil {
+		st.live = map[string]liveGrant{}
 	}
 	if len(out.Granted) > 0 {
-		g.live[set.Source.Name] = liveGrant{skill: sk.ListedName(), source: set.Source.Name, rules: out.Granted, under: mark, bound: bound}
+		st.live[set.Source.Name] = liveGrant{skill: sk.ListedName(), source: set.Source.Name, rules: out.Granted, under: mark, bound: bound}
 	} else {
-		delete(g.live, set.Source.Name)
+		delete(st.live, set.Source.Name)
 	}
 	g.mu.Unlock()
-	g.tell(out)
+	g.tell(ctx, out)
 }
 
 // regrant grants again, at New or from [Kit.RegrantSkills], what the
@@ -666,6 +545,10 @@ func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, s
 	if mark, ok := seededMark(sess); ok {
 		ctx = context.WithValue(ctx, markKey{}, mark)
 	}
+	// The grants are the session's, made under the grant scope of its
+	// conversation.
+	ctx = g.scopedCtx(ctx)
+	scope := agentpolicy.GrantScopeFromContext(ctx)
 	from := 0
 	if scoped {
 		for i := len(path) - 1; i >= 0; i-- {
@@ -750,6 +633,9 @@ func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, s
 				seen[v.Source] = true
 			}
 			switch {
+			case v.Reason == revokedScopePrefix+scope:
+				// Engine.RevokeScope ended every grant of the conversation.
+				granted, pending, seen = nil, map[string]map[string]bool{}, map[string]bool{}
 			case strings.HasPrefix(v.Reason, revokedPrefix):
 				source := strings.TrimPrefix(v.Reason, revokedPrefix)
 				drop(source)
@@ -781,7 +667,7 @@ func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, s
 				// replay over, and this is not a verdict the path holds.
 				g.observe(ctx, agentpolicy.Verdict{Tool: agentskill.ToolName, Action: agentturn.Block, Reason: "not granted again the tools of skill " + sk.ListedName() + ": the skill changed since it was read", By: agentpolicy.ByPolicy})
 			}
-			g.tell(out)
+			g.tell(ctx, out)
 			continue
 		}
 		rules, err := skillRules(sk)
@@ -790,14 +676,14 @@ func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, s
 		}
 		if g.observe != nil && !l.seen && len(rules) > 0 {
 			out.Err = fmt.Errorf("%w: skill %s: the session records no verdict for the grant its read made, so nothing was granted again; was the run's recorder on its context, ContextWithRecorder?", ErrSkillGrantUnrecorded, sk.ListedName())
-			g.tell(out)
+			g.tell(ctx, out)
 			continue
 		}
 		if l.rules != nil {
 			rules = replayRules(rules, l.rules, l.recorded)
 			if len(rules) == 0 && len(l.rules) > 0 {
 				out.Err = fmt.Errorf("agentkit: skill %s: none of the rules the session recorded as granted for its read is among the skill's allowed-tools now, so nothing was granted again", sk.ListedName())
-				g.tell(out)
+				g.tell(ctx, out)
 				continue
 			}
 		}
@@ -870,8 +756,13 @@ func replayRules(rules []agentpolicy.Rule, granted map[string]bool, recorded boo
 // the whole grant goes and the report says why.
 func (g *skillGrants) narrow(ctx context.Context, sk *agentskill.Skill, recorded map[string]bool) {
 	source := g.sourceOf(sk).Name
+	scope := g.scope(ctx)
 	g.mu.Lock()
-	lg, ok := g.live[source]
+	var lg liveGrant
+	ok := false
+	if st := g.scopes[scope]; st != nil {
+		lg, ok = st.live[source]
+	}
 	g.mu.Unlock()
 	if !ok {
 		return
@@ -880,9 +771,11 @@ func (g *skillGrants) narrow(ctx context.Context, sk *agentskill.Skill, recorded
 		if !recorded[agentpolicy.Rule{Tool: r.Tool, Spec: r.Spec}.String()] {
 			g.engine.Revoke(context.WithValue(ctx, replayKey{}, true), source)
 			g.mu.Lock()
-			delete(g.live, source)
+			if st := g.scopes[scope]; st != nil {
+				delete(st.live, source)
+			}
 			g.mu.Unlock()
-			g.tell(SkillGrant{Skill: sk.ListedName(), Location: sk.Location, Replayed: true, Err: fmt.Errorf("agentkit: skill %s: granting again what the session recorded granted %s, which it did not record, so the grant was revoked", sk.ListedName(), r)})
+			g.tell(ctx, SkillGrant{Skill: sk.ListedName(), Location: sk.Location, Replayed: true, Err: fmt.Errorf("agentkit: skill %s: granting again what the session recorded granted %s, which it did not record, so the grant was revoked", sk.ListedName(), r)})
 			return
 		}
 	}
@@ -913,25 +806,59 @@ func replaying(ctx context.Context) bool {
 // Engine.Revoke records, which names the source after it.
 const revokedPrefix = "revoked the rules granted by "
 
-// revoke revokes every source a read granted under and returns the
-// number of rules the engine removed.
+// revokedScopePrefix opens the reason of the verdict agentpolicy's
+// Engine.RevokeScope records, which names the grant scope after it.
+const revokedScopePrefix = "revoked the rules granted under "
+
+// childSep joins a grant scope to the scope of a child agent run under
+// it, see [Kit.childContext].
+const childSep = "/"
+
+// revoke revokes every source a read granted under in the grant scope of
+// ctx, and the grants of the child agents run under it, forgets what the
+// kit kept of the scope, and returns the number of rules the engine
+// removed. It is for a conversation that is over, [Kit.RevokeSkillGrants].
 func (g *skillGrants) revoke(ctx context.Context) int {
-	n, _ := g.revokeLive(ctx)
-	return n
+	n, _ := g.revokeLive(ctx, true)
+	return n + g.endChildren(ctx)
 }
 
-// revokeLive is revoke, and returns too the grants that were in force,
-// by skill, in the order of their sources.
-func (g *skillGrants) revokeLive(ctx context.Context) (int, []liveGrant) {
+// revokeLive revokes the sources a read granted under in the grant scope
+// of ctx, forgetting the scope's state too when drop is set, and returns
+// the number of rules the engine removed and the grants that were in
+// force, by skill, in the order of their sources: those the engine still
+// held, which is what ended, so a grant the product revoked from the
+// engine itself, with Engine.Revoke or Engine.RevokeScope, is not
+// reported ended twice.
+func (g *skillGrants) revokeLive(ctx context.Context, drop bool) (int, []liveGrant) {
+	ctx = g.scopedCtx(ctx)
+	scope := agentpolicy.GrantScopeFromContext(ctx)
+	g.gmu.Lock()
+	defer g.gmu.Unlock()
 	g.mu.Lock()
-	names := make([]string, 0, len(g.sources))
-	for name := range g.sources {
-		names = append(names, name)
+	var (
+		names []string
+		live  map[string]liveGrant
+	)
+	if st := g.scopes[scope]; st != nil {
+		names = make([]string, 0, len(st.sources))
+		for name := range st.sources {
+			names = append(names, name)
+		}
+		live, st.live = st.live, nil
+		if drop {
+			delete(g.scopes, scope)
+		}
 	}
-	live := g.live
-	g.live = nil
 	g.mu.Unlock()
+	if len(names) == 0 {
+		return 0, nil
+	}
 	sort.Strings(names)
+	held := map[string]bool{}
+	for _, set := range g.engine.GrantsFor(ctx) {
+		held[set.Source.Name] = true
+	}
 	n := 0
 	for _, name := range names {
 		removed := g.engine.Revoke(ctx, name)
@@ -946,11 +873,38 @@ func (g *skillGrants) revokeLive(ctx context.Context) (int, []liveGrant) {
 	}
 	var ended []liveGrant
 	for _, name := range names {
-		if lg, ok := live[name]; ok {
+		if lg, ok := live[name]; ok && held[name] {
 			ended = append(ended, lg)
 		}
 	}
 	return n, ended
+}
+
+// endChildren ends every grant of the child agents run under the grant
+// scope of ctx, [Kit.childContext], and forgets their scopes: a child
+// is one run of a conversation, nothing revokes its grants when it ends,
+// and a scope no run reaches again would be a rule set the engine
+// consults for every decision for as long as it lives. It returns the
+// number of rules the engine removed.
+func (g *skillGrants) endChildren(ctx context.Context) int {
+	prefix := g.scope(ctx) + childSep
+	g.mu.Lock()
+	var children []string
+	for scope := range g.scopes {
+		if strings.HasPrefix(scope, prefix) {
+			children = append(children, scope)
+		}
+	}
+	for _, scope := range children {
+		delete(g.scopes, scope)
+	}
+	g.mu.Unlock()
+	sort.Strings(children)
+	n := 0
+	for _, scope := range children {
+		n += g.engine.RevokeScope(agentpolicy.ContextWithGrantScope(ctx, scope))
+	}
+	return n
 }
 
 func (g *skillGrants) sourceOf(sk *agentskill.Skill) agentpolicy.Source {
@@ -968,8 +922,10 @@ func (g *skillGrants) sourceOf(sk *agentskill.Skill) agentpolicy.Source {
 	return agentpolicy.Source{Name: "agentskill:" + sk.ListedName(), Path: sk.Location, Hash: sk.FrontmatterSHA256()}
 }
 
-func (g *skillGrants) tell(s SkillGrant) {
+// tell reports s, with the grant scope of ctx.
+func (g *skillGrants) tell(ctx context.Context, s SkillGrant) {
 	if g.report != nil {
+		s.Scope = g.scope(ctx)
 		g.report(s)
 	}
 }

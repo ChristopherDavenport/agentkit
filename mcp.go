@@ -143,14 +143,11 @@ func (k *Kit) giveBack(n int) {
 //
 // The server leaves the kit's lists at once and is closed after, off
 // the lock, so [Kit.Tools] and the other MCP methods answer while
-// RemoveMCP waits for the close. What the close waits for is
-// mcpclient's (agenttool v0.0.14): with [WithToolElicitor] set, so the
-// client offers elicitation, it ends every call in flight to the server
-// with [mcpclient.ErrClosed] and waits, a few seconds at most, for the
-// requests telling the server its open questions were cancelled;
-// without it, the close waits for every call in flight to the server to
-// finish, however long the server takes. A call already dispatched
-// fails with the connection either way.
+// RemoveMCP closes it. The close ends every call in flight to the server
+// with [mcpclient.ErrClosed] and returns within a few seconds, as
+// agenttool v0.0.15's does; it does not wait for the calls to finish.
+// With [WithToolElicitor] set it also waits, for that long at most, for
+// the requests telling the server its open questions were cancelled.
 func (k *Kit) RemoveMCP(label string) error {
 	k.mcpMu.Lock()
 	for i, a := range k.added {

@@ -487,6 +487,62 @@ func TestACallBesideAConfinedCommandIsNotHeld(t *testing.T) {
 	}
 }
 
+// The engine's tool lookup is per run: two runs off one kit whose tool
+// providers answer by context each have their own list, and a sibling's
+// confinement is read from the list its run was offered, not from
+// whichever list was offered last. A context with no run reads the last
+// union. (agentpolicy.WithToolsFor)
+func TestTheToolLookupIsPerRun(t *testing.T) {
+	type listKey struct{}
+	first := agenttool.New("probe", "first", func(context.Context, agenttool.NoArgs) (string, error) { return "first", nil })
+	second := agenttool.New("probe", "second", func(context.Context, agenttool.NoArgs) (string, error) { return "second", nil })
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithToolProvider(func(ctx context.Context) []agenttool.Tool {
+			if ctx.Value(listKey{}) == "second" {
+				return []agenttool.Tool{second}
+			}
+			return []agenttool.Tool{first}
+		}),
+		agentkit.WithPolicy(agentpolicy.AutoEdit(agentpolicy.Tools{Execute: []string{"probe"}}), nil),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	cfg := kit.Config()
+	runA := agentturn.ContextWithRunID(t.Context(), "run-a")
+	runB := agentturn.ContextWithRunID(context.WithValue(t.Context(), listKey{}, "second"), "run-b")
+	cfg.ResolveTools(runA)
+	cfg.ResolveTools(runB) // the last union offered is now run-b's
+
+	describe := func(ctx context.Context) string {
+		t.Helper()
+		tool, ok := kit.LookupToolFor(ctx, "probe")
+		if !ok {
+			t.Fatal("LookupToolFor did not find probe")
+		}
+		return tool.Description()
+	}
+	if got := describe(runA); got != "first" {
+		t.Errorf("run a reads %q, want the list its own turn was offered", got)
+	}
+	if got := describe(runB); got != "second" {
+		t.Errorf("run b reads %q, want its own", got)
+	}
+	if got := describe(t.Context()); got != "second" {
+		t.Errorf("a context with no run reads %q, want the last union offered", got)
+	}
+	if tool, _ := kit.LookupTool("probe"); tool.Description() != "second" {
+		t.Errorf("LookupTool reads %q, want the last union offered", tool.Description())
+	}
+	var nilKit *agentkit.Kit
+	if _, ok := nilKit.LookupToolFor(runA, "probe"); ok {
+		t.Error("a nil kit found a tool")
+	}
+}
+
 // A call the policy held before a restart is seeded as held, so the
 // resumed agent can approve it; seeded from the transcript alone it
 // would be unknown, and an approval of it would be refused as a call
