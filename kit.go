@@ -417,8 +417,18 @@ func (k *Kit) buildEngine(s *settings) (*agentpolicy.Engine, error) {
 	// The product's hooks are folded into the engine's decision, before
 	// the batch hold, rather than chained after it: a hook that asks
 	// about a call then holds its siblings, where chained after the
-	// engine it let them run before anyone answered.
-	opts = append(opts, agentpolicy.WithHooks(s.beforeToolCall...))
+	// engine it let them run before anyone answered. The scope's refusal
+	// of a call an ended grant allowed goes first among them, for the
+	// same reason in the other direction: chained ahead of the engine,
+	// its Block left the siblings held for a question nobody was asked.
+	// The grants are built after the engine, so the hook reads them when
+	// it is called.
+	var hooks []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
+	if s.skillGrants && s.skillGrantScope && offersSkillTool(s) {
+		hooks = append(hooks, k.refuseEndedGrant)
+	}
+	hooks = append(hooks, s.beforeToolCall...)
+	opts = append(opts, agentpolicy.WithHooks(hooks...))
 	opts = append(opts, s.engineOpts...)
 	e, err := agentpolicy.Build(s.policy, s.matchers, opts...)
 	if err != nil {
@@ -824,14 +834,15 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 		src := source{name: "WithSkills", tools: []agenttool.Tool{tool}}
 		if s.skillGrants && k.engine != nil {
 			k.grants = &skillGrants{
-				cat:      k.Catalog,
-				engine:   k.engine,
-				source:   s.skillSource,
-				report:   s.skillGrant,
-				conv:     k.conversation,
-				mark:     k.markFor,
-				matchers: s.matchers,
-				scoped:   s.skillGrantScope,
+				cat:       k.Catalog,
+				engine:    k.engine,
+				source:    s.skillSource,
+				report:    s.skillGrant,
+				conv:      k.conversation,
+				mark:      k.markFor,
+				matchers:  s.matchers,
+				extraOpts: len(s.engineOpts) > 0,
+				scoped:    s.skillGrantScope,
 			}
 			if s.engine == nil {
 				k.grants.observe = k.observeVerdicts(s, false)
@@ -1228,9 +1239,9 @@ func (k *Kit) buildHooks(s *settings) {
 
 	// BeforeToolCall: the memory_save base and the skill grants' guard,
 	// which decide nothing and so go first, ahead of whatever may hold or
-	// allow the call; then the engine,
-	// with the product's own policies folded into it when the kit built
-	// it, and chained after it otherwise.
+	// allow the call; then the engine, with the scope's refusal and the
+	// product's own hooks folded into it when the kit built it, and the
+	// product's chained after it otherwise.
 	var tool []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
 	if s.memStore != nil {
 		tool = append(tool, k.keepSaveBase)
@@ -1874,8 +1885,10 @@ func saveKey(ctx context.Context, callID string) string {
 // A handoff to another kit's agent takes the message in that agent's
 // run, and the kit's first turn after the handback opens on the
 // transfer's output rather than on the message, which the tail test
-// alone passed over. A compaction that folds away older messages lowers
-// the count and keeps the last message, so it ends nothing by itself.
+// alone passed over. A compaction ends nothing by itself, in the run,
+// where the turn's transcript keeps the message the fold summarised, or
+// across a restart, where the replayed grant is bound to the transcript
+// the agent is seeded with and the fold's summary stands in for it.
 //
 // TurnStartInfo does not say what the turn's new input is, so the other
 // test is the transcript's tail. A prompt puts the user's message last,
@@ -1893,7 +1906,9 @@ func saveKey(ctx context.Context, callID string) string {
 // only those grants allowed with the same word, [skillGrants.guard]. A
 // model that has the skill's text in its transcript from the message
 // before goes straight to the tool, and without either its call is
-// refused as an ordinary ask with no word of the grant that ended.
+// refused as an ordinary ask with no word of the grant that ended. The
+// guard is a hook inside the engine the kit built, so there is none
+// under WithEngine.
 func (k *Kit) revokeOnUserMessage(ctx context.Context, info agentturn.TurnStartInfo) (openresponses.Items, error) {
 	mark, marked := userMarkOf(info.Transcript)
 	run := info.RunID
@@ -1958,16 +1973,27 @@ func userMarkOf(items openresponses.Items) (userMark, bool) {
 	return mark, true
 }
 
-// pathMark is the mark of the items on a session's path, which is the
-// mark of the transcript an agent seeded from that path starts under.
-func pathMark(path []agentsession.Entry) (userMark, bool) {
-	var items openresponses.Items
-	for _, e := range path {
-		if ie, ok := e.(*agentsession.ItemEntry); ok {
-			items = append(items, ie.Item)
-		}
+// seededMark is the mark of the transcript an agent resumed from sess
+// is seeded with, session.Transcript, the items Kit.AgentOptions hands
+// agentturn.New: a fold's summary stands in there for the messages it
+// folded, as it does in the agent. False when the session has none or
+// cannot be read, and the replayed grant is then bound to nothing.
+func seededMark(sess *agentsession.Session) (userMark, bool) {
+	items, err := session.Transcript(sess)
+	if err != nil {
+		return userMark{}, false
 	}
 	return userMarkOf(items)
+}
+
+// refuseEndedGrant is the first hook the kit folds into the engine it
+// builds under WithSkillGrantScope, [skillGrants.blockEnded]. The grants
+// are built after the engine, so it reads them when called.
+func (k *Kit) refuseEndedGrant(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+	if k.grants == nil {
+		return nil, nil
+	}
+	return k.grants.blockEnded(ctx, info)
 }
 
 // markKey carries, on the context of a replay's grant, the mark of the
@@ -2453,6 +2479,9 @@ func (k *Kit) ReloadSkills(ctx context.Context) error {
 		}
 	}
 
+	if k.grants != nil {
+		defer k.grants.pruneEnded()
+	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.catalog, k.skillTool = cat, tool
