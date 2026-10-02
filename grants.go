@@ -226,6 +226,18 @@ func (g *skillGrants) keepEnded(ended []liveGrant) {
 	}
 }
 
+// clearEnded forgets the ended grants of the skill listed as name, on a
+// read of it.
+func (g *skillGrants) clearEnded(name string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for source, lg := range g.ended {
+		if lg.skill == name {
+			delete(g.ended, source)
+		}
+	}
+}
+
 // pruneEnded forgets the ended grants of skills the catalogue no longer
 // lists, after Kit.ReloadSkills: a skill deleted or renamed can be read
 // again under no name, so its ended grant would refuse its tool for the
@@ -490,6 +502,11 @@ func (g *skillGrants) wrap(t agenttool.Tool) agenttool.Tool {
 		if !ok {
 			return res, nil
 		}
+		// The skill is read again, so a refusal by its ended grant is
+		// over, whatever the read grants: a skill whose allowed-tools
+		// were emptied or broken since grants nothing, and must not go
+		// on refusing the tool it no longer names.
+		g.clearEnded(sk.ListedName())
 		out := SkillGrant{Skill: sk.ListedName(), Location: sk.Location, FrontmatterChanged: read.FrontmatterChanged}
 		rules, err := skillRules(sk)
 		if err != nil {
@@ -568,8 +585,6 @@ func (g *skillGrants) grant(ctx context.Context, sk *agentskill.Skill, out Skill
 		g.sources = map[string]bool{}
 	}
 	g.sources[set.Source.Name] = true
-	// The skill is read again, so a refusal by its ended grant is over.
-	delete(g.ended, set.Source.Name)
 	g.mu.Unlock()
 	out.Granted, out.Refused = g.engine.GrantSet(ctx, set)
 	var mark userMark

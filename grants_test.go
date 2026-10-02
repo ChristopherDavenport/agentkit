@@ -2190,3 +2190,70 @@ func TestAnEndedGrantOfASkillNoLongerListedRefusesNothing(t *testing.T) {
 		t.Fatalf("run ended %q with %d pending, refusals %q, act ran %d times; want the engine's ask for a skill no longer listed", end.Reason, len(end.Pending), refused, runs)
 	}
 }
+
+// A skill whose allowed-tools were emptied or broken and reloaded: the
+// read the refusal asks for grants nothing, and the ended grant was
+// cleared only by a grant, so the call was refused again, forever. The
+// read itself clears it now, whatever it grants, and the engine asks as
+// it would for any skill with no rules. (#76)
+func TestAReadThatGrantsNothingStillEndsTheRefusal(t *testing.T) {
+	for _, edited := range []string{"", "Bash(("} {
+		t.Run("allowed-tools "+edited, func(t *testing.T) {
+			skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "clock", "act")
+			ask, _ := agentpolicy.ParseRules("act")
+			allow, _ := agentpolicy.ParseRules(agentskill.ToolName)
+			runs := 0
+			act := agenttool.New("act", "a tool", func(context.Context, struct {
+				What string `json:"what,omitempty"`
+			}) (string, error) {
+				runs++
+				return "act ran", nil
+			})
+			model := &scriptModel{turns: []func(*openresponses.Emitter) error{
+				callTurn(agentskill.ToolName, `{"name":"clock"}`),
+				callTurnID("call-first", "act", `{"what":"it"}`),
+				textTurn("done it"),
+				textTurn("noted"),
+				callTurnID("call-reread", agentskill.ToolName, `{"name":"clock"}`),
+				callTurnID("call-third", "act", `{"what":"it"}`),
+			}}
+			kit, err := agentkit.New(t.Context(),
+				agentkit.WithModel(model, "m"),
+				agentkit.WithSkills(skills),
+				agentkit.WithTools(act),
+				agentkit.WithPolicy(agentpolicy.Policy{Ask: ask, Allow: allow, Default: agentpolicy.Allow()}, nil),
+				agentkit.WithSkillGrants(trustedSkills),
+				agentkit.WithSkillGrantScope(),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer kit.Close()
+			agent := agentturn.New(kit.Config())
+			for _, text := range []string{"use the skill", "thanks"} {
+				if _, err := agent.Prompt(t.Context(), openresponses.UserText(text)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The skill is edited: its allowed-tools are gone (or broken).
+			body := "---\nname: clock\ndescription: what clock is for\n---\n\ndo the thing\n"
+			if edited != "" {
+				body = "---\nname: clock\ndescription: what clock is for\nallowed-tools: " + edited + "\n---\n\ndo the thing\n"
+			}
+			if err := os.WriteFile(filepath.Join(skills, "clock", "SKILL.md"), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := kit.ReloadSkills(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			end, err := agent.Prompt(t.Context(), openresponses.UserText("act once more"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			refused := outputsSaying(agent.State().Transcript, "ended with the user's last message")
+			if end.Reason != agentturn.ReasonInputRequired || len(refused) != 0 || runs != 1 {
+				t.Fatalf("run ended %q, refusals %q, act ran %d; want the engine's ask after the skill was read again and grants nothing", end.Reason, refused, runs)
+			}
+		})
+	}
+}
