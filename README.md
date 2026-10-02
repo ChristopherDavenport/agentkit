@@ -300,14 +300,14 @@ a2a.
 
 | library | version |
 |---|---|
-| `openresponses` | v0.0.12 |
-| `agenttool`, `agenttool/mcpclient` | v0.0.14 |
-| `agentturn`, `agentturn/session` | v0.0.15 |
-| `agentsession` | v0.0.19 |
+| `openresponses` | v0.0.14 |
+| `agenttool`, `agenttool/mcpclient` | v0.0.15 |
+| `agentturn`, `agentturn/session` | v0.0.16 |
+| `agentsession` | v0.0.20 |
 | `agentsmd` | v0.0.2 |
-| `agentskill` | v0.0.10 |
-| `agentmemory` | v0.0.9 |
-| `agentpolicy` | v0.0.10 |
+| `agentskill` | v0.0.11 |
+| `agentmemory` | v0.0.10 |
+| `agentpolicy` | v0.0.11 |
 
 Every sibling is required at a released version with no `replace`, and
 `make no-replace` enforces it: the kit is the module that proves the

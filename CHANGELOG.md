@@ -140,6 +140,16 @@ The round 8 findings (#66 to #76).
 
 ### Changed
 
+- Requires agentturn and agentturn/session v0.0.16, agentsession
+  v0.0.20, agenttool and mcpclient v0.0.15, openresponses v0.0.14,
+  agentpolicy v0.0.11, agentskill v0.0.11 and agentmemory v0.0.10,
+  the releases that carry the sibling APIs the entries here use.
+  Under agentturn v0.0.16 a session is written in agentsession format
+  0.11, which names an instruction part or an omitted run the path
+  already holds rather than repeating it: in a handoff between two
+  kits the config entry at each hand-back after the first fell from
+  about 80 KB to about 13 KB.
+
 - Skill grants are per conversation. A grant is made under the grant
   scope of the conversation that read the skill,
   `agentpolicy.ContextWithGrantScope` keyed by its session ID, and the
