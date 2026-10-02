@@ -1000,7 +1000,11 @@ func WithSession(store agentsession.Store, h agentsession.Header, opts ...sessio
 // out, and the calls pending at the leaf. The recorder takes the kit's
 // parts, and every agent built from the kit is attached to it or
 // prompted under [ContextWithRecorder], as under [WithSession]. Under [WithSkillGrants], the grants the
-// session's skill reads made are granted again, and under
+// session's skill reads made are granted again, under the session's
+// conversation or, when the front scopes its conversations itself, the
+// scope [New]'s context carries, which is the one its runs pass
+// [agentpolicy.ContextWithGrantScope], since the session does not
+// record it; and under
 // [WithCompaction] the fold backs off from the last fold that failed on
 // the session's path.
 func WithResumedSession(store agentsession.Store, id string, opts ...session.Option) Option {
@@ -1251,8 +1255,11 @@ func (k *Kit) childContext(ctx context.Context, callID string) context.Context {
 		child = callID + "#" + strconv.FormatUint(k.childSeq.Add(1), 10)
 	}
 	parent := k.GrantScope(parentCtx)
-	ctx = agentpolicy.ContextWithGrantScope(ctx, parent+childSep+child)
-	ctx = context.WithValue(ctx, parentScopeKey{}, parent)
+	scope := parent + childSep + child
+	k.grants.mu.Lock()
+	k.grants.link(parent, scope)
+	k.grants.mu.Unlock()
+	ctx = agentpolicy.ContextWithGrantScope(ctx, scope)
 	if m, ok := k.markFor(parentCtx); ok {
 		ctx = context.WithValue(ctx, parentMarkKey{k}, m)
 	}

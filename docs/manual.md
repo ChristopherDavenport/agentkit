@@ -1140,7 +1140,8 @@ Nine things, all outside `agentturn.Config`:
   number without a recording), `parent+"/"+child` in the `ToolProvider`
   block above, so its parent's skills grant it nothing. The slash makes
   a name that reads well and nothing more: the kit records which scopes
-  are a conversation's children when one of them grants, and the
+  are a conversation's children when each child's run starts, so a
+  grandchild under a child that read no skill is one of them, and the
   conversation's next message, or `Kit.RevokeSkillGrants`, ends exactly
   those, `engine.RevokeScope` for each, never a scope whose name merely
   begins with the conversation's. A child's grants are bound to the
