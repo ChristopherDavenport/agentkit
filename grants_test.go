@@ -1472,3 +1472,97 @@ func TestAReadRefusedBecauseTheSkillChangedIsReported(t *testing.T) {
 		t.Fatalf("grants in force after the refused read = %d, want the earlier read's to stand", got)
 	}
 }
+
+// A front that names conversations with session.ContextWithSessionID
+// alone, as agentturn/front/a2a's WithRecorderFor example does, gives
+// its kit no recorder, so the kit wrote every grant verdict nowhere.
+// After a restart RegrantSkills found the read with no recorded grant,
+// granted nothing and returned nil: the approval ran without the tools
+// and nothing said why. It now refuses a session no recorder writes,
+// and, given one, reports a read the session records no grant for. (#74)
+func TestRegrantSkillsSaysWhenTheSessionRecordsNoGrant(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "deploy", "Bash(git:*)")
+	sessions := agentsession.NewMemoryStore()
+	var reports []agentkit.SkillGrant
+	build := func(model agentturn.Model) *agentkit.Kit {
+		kit, err := agentkit.New(t.Context(),
+			agentkit.WithModel(model, "m"),
+			agentkit.WithSkills(skills),
+			agentkit.WithTools(namedTool(t, "Bash")),
+			agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{
+				Read:    []string{agentskill.ToolName},
+				Execute: []string{"Bash"},
+			}), map[string]agentpolicy.ToolMatcher{
+				"Bash": {Match: agentpolicy.PrefixMatcher("command")},
+			}),
+			agentkit.WithSkillGrants(trustedSkills),
+			agentkit.WithSkillGrantReport(func(g agentkit.SkillGrant) { reports = append(reports, g) }),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = kit.Close() })
+		return kit
+	}
+	// Conversation A, recorded by the front and named on the context, with
+	// no ContextWithRecorder: the kit's observer writes nowhere.
+	first := build(&scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn(agentskill.ToolName, `{"name":"deploy"}`),
+		callTurn("Bash", `{"command":"rm -rf build"}`),
+	}})
+	rec, _, err := session.Start(t.Context(), sessions, agentsession.Header{CWD: t.TempDir()}, session.WithInstructionsParts(first.PartsFor))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := first.Config()
+	cfg.ToolRecorder = rec.RecordFunc()
+	agent := agentturn.New(cfg)
+	detach := rec.Attach(agent)
+	end, err := agent.Prompt(session.ContextWithSessionID(t.Context(), rec.SessionID()), openresponses.UserText("clean and check"))
+	detach()
+	if err != nil || end.Reason != agentturn.ReasonInputRequired {
+		t.Fatalf("the run ended %+v, %v; want rm -rf held", end, err)
+	}
+	if len(reports) != 1 || len(reports[0].Granted) != 1 {
+		t.Fatalf("the read reported %+v, want one grant", reports)
+	}
+	if got := grantedVerdicts(openSession(t, sessions, rec.SessionID())); got != 0 {
+		t.Fatalf("A's session holds %d grant verdicts, want none: the kit had nowhere to write them", got)
+	}
+	_ = first.Close()
+
+	// The restart.
+	t.Run("a session no recorder writes is refused", func(t *testing.T) {
+		reports = nil
+		kit := build(&scriptModel{})
+		_, sess, err := session.Resume(t.Context(), sessions, rec.SessionID(), session.WithInstructionsParts(kit.PartsFor))
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = kit.RegrantSkills(session.ContextWithSessionID(t.Context(), rec.SessionID()), sess)
+		if !errors.Is(err, agentkit.ErrSkillGrantRecorder) {
+			t.Fatalf("RegrantSkills on A's context = %v, want ErrSkillGrantRecorder", err)
+		}
+		if n := len(kit.Engine().Grants()); n != 0 || len(reports) != 0 {
+			t.Fatalf("%d set(s) in force and reports %+v after the refusal, want nothing", n, reports)
+		}
+	})
+	t.Run("a read the session records no grant for is reported", func(t *testing.T) {
+		reports = nil
+		kit := build(&scriptModel{})
+		resumed, sess, err := session.Resume(t.Context(), sessions, rec.SessionID(), session.WithInstructionsParts(kit.PartsFor))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := agentkit.ContextWithRecorder(session.ContextWithSessionID(t.Context(), rec.SessionID()), resumed)
+		if err := kit.RegrantSkills(ctx, sess); err != nil {
+			t.Fatal(err)
+		}
+		if len(reports) != 1 || !reports[0].Replayed || reports[0].Skill != "deploy" || !errors.Is(reports[0].Err, agentkit.ErrSkillGrantUnrecorded) {
+			t.Fatalf("RegrantSkills reported %+v, want one Replayed report with ErrSkillGrantUnrecorded", reports)
+		}
+		if n := len(kit.Engine().Grants()); n != 0 {
+			t.Fatalf("%d set(s) in force, want none: the session cannot vouch for the read", n)
+		}
+	})
+}

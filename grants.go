@@ -46,11 +46,12 @@ type SkillGrant struct {
 	// discovery, [agentskill.ErrSkillChanged], a report a front reloads
 	// on with [Kit.ReloadSkills]; or, with Replayed set, because a
 	// restart would not grant a read again: the skill changed since the
-	// read, [ErrSkillGrantChanged], or none of the rules the session
-	// recorded for the read is among the skill's now. A report with no
-	// Skill is the kit's grants ending because it decided a call in
-	// another conversation; its Err wraps ErrSkillGrantConversation and
-	// names both.
+	// read, [ErrSkillGrantChanged], the session records no verdict of
+	// the read's grant, [ErrSkillGrantUnrecorded], or none of the rules
+	// the session recorded for the read is among the skill's now. A
+	// report with no Skill is the kit's grants ending because it decided
+	// a call in another conversation; its Err wraps
+	// ErrSkillGrantConversation and names both.
 	Err error
 	// Replayed is true for a grant made again from a session's records,
 	// at [New] or by [Kit.RegrantSkills], rather than for a read the
@@ -100,6 +101,25 @@ var ErrSkillGrantConversation = errors.New("agentkit: this kit's skill grants be
 // now, and a front that shows the user the policy in force shows that
 // the skill changed since they approved it.
 var ErrSkillGrantChanged = errors.New("agentkit: the skill changed since it was read, so its grant was not made again")
+
+// ErrSkillGrantUnrecorded is the [SkillGrant.Err] of a live read, found
+// by [New] or [Kit.RegrantSkills] in a session a kit that records its
+// engine's verdicts is to grant again, for which the session records no
+// verdict of the grant: the engine observes a verdict for every rule a
+// GrantSet grants or refuses, so none means the kit's observer wrote
+// nowhere when the read was made, as it does when the run's context
+// carries no recorder, [ContextWithRecorder], and the kit has none.
+// Nothing is granted: a restart grants what the session says the read
+// was granted, and this session says nothing.
+var ErrSkillGrantUnrecorded = errors.New("agentkit: the session records no grant for the read, so it was not made again")
+
+// ErrSkillGrantRecorder is the error [Kit.RegrantSkills] returns, before
+// it binds or grants anything, when the kit records its engine's
+// verdicts and no recorder writes the session it was given: neither the
+// one on ctx, [ContextWithRecorder], nor the kit's own. The grants'
+// verdicts and a later revocation would be recorded nowhere, and the
+// next restart would find a session that says nothing about them.
+var ErrSkillGrantRecorder = errors.New("agentkit: no recorder writes the session, so its skill grants would be recorded nowhere")
 
 // skillGrants is the meeting of a skill's allowed-tools and the policy
 // engine: reading a skill grants that skill's rules.
@@ -369,8 +389,11 @@ func (g *skillGrants) grant(ctx context.Context, sk *agentskill.Skill, out Skill
 // "granted <rule> by <source>" verdicts written just before its record,
 // that the catalogue still gives the skill: a skill whose allowed-tools
 // were widened, or whose source turned trusted, since the read gets
-// nothing it did not have. Under WithEngine the kit records nothing, and
-// what is granted is the catalogue's rules as they stand now.
+// nothing it did not have. A read the session records no verdict for,
+// granted or refused, was made by a kit whose observer wrote nowhere,
+// and is reported with [ErrSkillGrantUnrecorded] and not granted. Under
+// WithEngine the kit records nothing, and what is granted is the
+// catalogue's rules as they stand now.
 //
 // The replay is silent: no verdict is recorded for it, since the ones it
 // repeats are still on the path, and the report is made with
@@ -505,6 +528,11 @@ func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, s
 		}
 		rules, err := skillRules(sk)
 		if err != nil {
+			continue
+		}
+		if g.observe != nil && !l.seen && len(rules) > 0 {
+			out.Err = fmt.Errorf("%w: skill %s: the session records no verdict for the grant its read made, so nothing was granted again; was the run's recorder on its context, ContextWithRecorder?", ErrSkillGrantUnrecorded, sk.ListedName())
+			g.tell(out)
 			continue
 		}
 		if l.rules != nil {

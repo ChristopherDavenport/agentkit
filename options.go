@@ -437,10 +437,11 @@ func WithSkillGrantScope() Option {
 // no longer parses, with Err wrapping [agentskill.ErrSkillChanged],
 // and, with [SkillGrant.Replayed] set, what a restart granted again and
 // the read it will not grant again, with Err wrapping
-// [ErrSkillGrantChanged] when the skill changed since the read. A grant
-// widens what the agent may do, so a front that shows the user the
-// policy in force wants to see it happen; and a front reloads the
-// skills, [Kit.ReloadSkills], on a report wrapping
+// [ErrSkillGrantChanged] when the skill changed since the read and
+// [ErrSkillGrantUnrecorded] when the session records no verdict of the
+// read's grant. A grant widens what the agent may do, so a front that
+// shows the user the policy in force wants to see it happen; and a
+// front reloads the skills, [Kit.ReloadSkills], on a report wrapping
 // agentskill.ErrSkillChanged or with [SkillGrant.FrontmatterChanged]
 // set, since the model is told to discover the skills again and cannot.
 func WithSkillGrantReport(fn func(SkillGrant)) Option {

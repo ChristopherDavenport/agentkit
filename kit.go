@@ -2054,9 +2054,20 @@ func (k *Kit) Tools() []ToolOrigin {
 // [ContextWithRecorder], so a call held before a restart is approved
 // with the tools its task had. ctx carries that conversation's
 // recorder, ContextWithRecorder, which is where a later revocation of
-// the grants is written; without one it is written to the kit's own
-// recorder when that writes sess, and otherwise nowhere. The grants are made silently and
-// reported with [SkillGrant.Replayed] set. It refuses, with
+// the grants is written, and where the verdicts the regrant records
+// go; the kit's own recorder serves when it writes sess. When the kit
+// records its engine's verdicts, that is under [WithPolicy], and
+// neither writes sess, it returns [ErrSkillGrantRecorder] before it
+// binds or grants anything: the grants' verdicts and a later revocation
+// would be recorded nowhere, and the next restart would find a session
+// that says nothing about them. Under [WithEngine] the kit records no
+// verdict, and a ctx without a recorder binds the grants with no
+// recorder for the revocation. The grants are made silently and
+// reported with [SkillGrant.Replayed] set; a read it will not grant
+// again is reported too, with [ErrSkillGrantChanged] when the skill
+// changed since the read and [ErrSkillGrantUnrecorded] when sess holds
+// the read and no verdict of its grant, as a session a front recorded
+// without ContextWithRecorder does. It refuses, with
 // [ErrSkillGrantConversation], a kit whose grants already belong to
 // another session, and does nothing without skill grants.
 func (k *Kit) RegrantSkills(ctx context.Context, sess *agentsession.Session) error {
@@ -2064,14 +2075,22 @@ func (k *Kit) RegrantSkills(ctx context.Context, sess *agentsession.Session) err
 		return nil
 	}
 	g := k.grants
+	// The recorder that writes sess, where the grants' verdicts and a
+	// later revocation go: the one on ctx, else the kit's own.
+	rec := RecorderFromContext(ctx)
+	if rec == nil || rec.SessionID() != sess.ID() {
+		switch {
+		case k.rec != nil && k.rec.SessionID() == sess.ID():
+			rec = k.rec
+			ctx = ContextWithRecorder(ctx, rec)
+		case g.observe != nil:
+			return fmt.Errorf("%w: session %q: neither ctx nor the kit carries a recorder writing it, so the grants' verdicts and a later revocation would be recorded nowhere; put the conversation's recorder on ctx with ContextWithRecorder", ErrSkillGrantRecorder, sess.ID())
+		}
+	}
 	g.gmu.Lock()
 	defer g.gmu.Unlock()
 	g.mu.Lock()
 	if !g.bound {
-		rec := RecorderFromContext(ctx)
-		if rec == nil && k.rec != nil && k.rec.SessionID() == sess.ID() {
-			rec = k.rec
-		}
 		g.owner, g.ownerRec, g.bound = sess.ID(), rec, true
 	}
 	ok := !g.shared && g.owner == sess.ID()

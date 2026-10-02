@@ -870,7 +870,13 @@ Nine things, all outside `agentturn.Config`:
   up with no read after, is not granted again after a restart, and the
   front hears it. What is granted again is the rules
   the `granted <rule> by <source>` verdicts written just before the
-  read's record name. When the record carries the frontmatter's digest,
+  read's record name. A live read of a skill with rules that no verdict
+  names the source of since its last read or revocation, granted or
+  refused, was granted by a kit whose observer wrote nowhere, as a run
+  recorded by the front with `session.ContextWithSessionID` and no
+  `agentkit.ContextWithRecorder` on its context is; it is reported with
+  `Replayed` set and `Err` wrapping `agentkit.ErrSkillGrantUnrecorded`
+  and nothing is granted for it. When the record carries the frontmatter's digest,
   the skill's `allowed-tools` are as they were, so those rules are
   granted as the engine recorded them, after `agentpolicy.WithAliases`
   expanded them, each whose specifier one of the skill's rules has;
@@ -894,7 +900,12 @@ Nine things, all outside `agentturn.Config`:
   its sources loses the match; and a revocation that races a read in
   flight may be journaled before the read's record, which the replay
   then grants. Without the scope, a product that needs either ruled out
-  revokes after the restart.
+  revokes after the restart. `Kit.RegrantSkills` writes the regrant's
+  verdicts and a later revocation through the recorder that writes the
+  session, the one on `ctx` or the kit's own, and when the kit records
+  its engine's verdicts and neither does, it returns an error wrapping
+  `agentkit.ErrSkillGrantRecorder` before binding or granting anything;
+  under `WithEngine` it binds with no recorder, as before.
 
 - `Kit.ReloadSkills(ctx)` discovers the skills again over the same
   sources and puts the new catalogue behind the skill tool (`currentCat`
