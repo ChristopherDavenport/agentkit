@@ -1787,36 +1787,68 @@ func (m *noTextSummary) CreateStream(_ context.Context, req openresponses.Reques
 	return e.Complete()
 }
 
-// The summary request a fold sends carries the agent's reasoning, as
-// every other request does: left at the server's default, a thinking
-// model reasoned through the summary's cap and answered no text. (#60)
-func TestTheSummaryRequestCarriesTheAgentsReasoning(t *testing.T) {
-	r := openresponses.ReasoningConfig{Effort: "none"}
-	summaries := &scriptModel{}
-	kit, err := agentkit.New(t.Context(),
-		agentkit.WithModel(&scriptModel{}, "m"),
-		agentkit.WithReasoning(r),
-		agentkit.WithCompactionModel(summaries),
-		agentkit.WithCompaction(1, compact.WithKeepLast(1), compact.WithMinFold(0)),
-	)
-	if err != nil {
-		t.Fatal(err)
+// The summary request a fold sends carries the agent's reasoning when
+// the agent's model is asked for it, as every other request to that
+// model does: left at the server's default, a thinking model reasoned
+// through the summary's cap and answered no text (#60). Under
+// WithCompactionModel the request carries none: the product chose that
+// model knowing it, and the agent's reasoning may be refused by, or
+// wasted on, another. A compact.WithRequest the product passes sets it
+// either way. (#75)
+func TestTheSummaryRequestsReasoningFollowsTheModelAsked(t *testing.T) {
+	agents := openresponses.ReasoningConfig{Effort: openresponses.ReasoningEffortLow}
+	none := openresponses.ReasoningConfig{Effort: openresponses.ReasoningEffortNone}
+	cases := []struct {
+		name  string
+		other bool
+		opts  []compact.Option
+		want  openresponses.ReasoningConfig
+	}{
+		{name: "the agent's model summarises under the agent's reasoning", want: agents},
+		{name: "WithCompactionModel's summarises under none", other: true},
+		{name: "WithCompactionModel's under the product's compact.WithRequest", other: true, want: none,
+			opts: []compact.Option{compact.WithRequest(func(r *openresponses.Request) { r.Reasoning = none })}},
 	}
-	defer kit.Close()
-	agent := agentturn.New(kit.Config())
-	for _, text := range []string{"one", "two", "three"} {
-		if _, err := agent.Prompt(t.Context(), openresponses.UserText(text)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	reqs := summaries.requests()
-	if len(reqs) == 0 {
-		t.Fatal("no summary was asked for")
-	}
-	for _, req := range reqs {
-		if req.Reasoning != r {
-			t.Fatalf("a summary request's reasoning = %+v, want the agent's %+v", req.Reasoning, r)
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			model, summaries := &scriptModel{}, &scriptModel{}
+			opts := []agentkit.Option{
+				agentkit.WithModel(model, "m"),
+				agentkit.WithInstructions("Be brief."),
+				agentkit.WithReasoning(agents),
+				agentkit.WithCompaction(1, append([]compact.Option{compact.WithKeepLast(1), compact.WithMinFold(0)}, tc.opts...)...),
+			}
+			if tc.other {
+				opts = append(opts, agentkit.WithCompactionModel(summaries))
+			}
+			kit, err := agentkit.New(t.Context(), opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer kit.Close()
+			agent := agentturn.New(kit.Config())
+			for _, text := range []string{"one", "two", "three"} {
+				if _, err := agent.Prompt(t.Context(), openresponses.UserText(text)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// A summary request carries no instructions and a turn's carries
+			// the agent's, which is how a replay tells them apart.
+			var reqs []openresponses.Request
+			for _, req := range append(model.requests(), summaries.requests()...) {
+				if req.Instructions == "" {
+					reqs = append(reqs, req)
+				}
+			}
+			if len(reqs) == 0 {
+				t.Fatal("no summary was asked for")
+			}
+			for _, req := range reqs {
+				if req.Reasoning != tc.want {
+					t.Fatalf("a summary request's reasoning = %+v, want %+v", req.Reasoning, tc.want)
+				}
+			}
+		})
 	}
 }
 

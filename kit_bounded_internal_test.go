@@ -59,8 +59,8 @@ func TestTwoConversationsCallsOfOneIDKeepTheirOwnBase(t *testing.T) {
 	}
 	for _, conv := range []string{"conv-a", "conv-b"} {
 		ctx := session.ContextWithSessionID(t.Context(), conv)
-		m, ok := k.saveBase.get(saveKey(ctx, "call_0"))
-		if !ok || len(m.Entries) != 1 || m.Entries[0].Name != conv {
+		r, ok := k.saveBase.get(saveKey(ctx, "call_0"))
+		if m := r.man; !ok || len(m.Entries) != 1 || m.Entries[0].Name != conv {
 			t.Errorf("%s's call_0 is based on %+v, want its own render", conv, m)
 		}
 	}

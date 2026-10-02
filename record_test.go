@@ -1490,3 +1490,397 @@ func TestAHandBackRecordsADeltaOnTheKitsOwnManifest(t *testing.T) {
 		}
 	}
 }
+
+// facts is n entries of who's own, in one scope, and one more every kit
+// shares the name of.
+func facts(who string, n int) []agentmemory.Entry {
+	var out []agentmemory.Entry
+	for i := range n {
+		out = append(out, agentmemory.Entry{Scope: "user", Name: fmt.Sprintf("%s-%03d", who, i), Content: who + " knows a fact"})
+	}
+	return append(out, agentmemory.Entry{Scope: "user", Name: "a", Content: who + " remembers"})
+}
+
+// lastToolOutput is the text of the last function call output the model
+// was sent: what the tool told it.
+func lastToolOutput(m *scriptModel) string {
+	reqs := m.requests()
+	for i := len(reqs) - 1; i >= 0; i-- {
+		for j := len(reqs[i].Input) - 1; j >= 0; j-- {
+			if out, ok := reqs[i].Input[j].(*openresponses.FunctionCallOutput); ok {
+				return outputText(out)
+			}
+		}
+	}
+	return ""
+}
+
+// A kit restarted into a handoff has no last manifest of its own in
+// memory, so its first hand-back was written whole on the other kit's
+// manifest, though the fold of the path still held the one it wrote
+// before the restart among the last ManifestFoldDepth in force. It is a
+// delta on that one. A whole record another process wrote, as agentkit
+// v0.0.5 did at every hand-back, folds among them, and the kit's next
+// record is a delta still. (#68)
+func TestARestartedKitsFirstHandBackIsADelta(t *testing.T) {
+	sessions := agentsession.NewMemoryStore()
+	rec, _, err := session.Start(t.Context(), sessions, agentsession.Header{CWD: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func(who string, store agentmemory.Store) *agentkit.Kit {
+		kit, err := agentkit.New(t.Context(),
+			agentkit.WithModel(&scriptModel{}, "m"),
+			agentkit.WithInstructions("You are "+who+"."),
+			agentkit.WithMemory(store, "user"),
+			agentkit.WithRecorder(rec),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = kit.Close() })
+		return kit
+	}
+	// Nothing is attached: the path holds no run entries, and a render
+	// under any run ID is recorded, as a session with no runs is.
+	render := func(kit *agentkit.Kit, run string) {
+		cfg := kit.Config()
+		if err := cfg.BeforeModelCall(agentturn.ContextWithRunID(t.Context(), run), &openresponses.Request{Instructions: cfg.Instructions}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	last := func() int {
+		sizes := manifestSizes(openSession(t, sessions, rec.SessionID()))
+		return sizes[len(sizes)-1]
+	}
+	mem := memStore(t, facts("a", 200)...)
+	a := build("a", mem)
+	var others []*agentkit.Kit
+	for i := range agentmemory.ManifestFoldDepth {
+		who := fmt.Sprintf("k%d", i)
+		others = append(others, build(who, memStore(t, facts(who, 20)...)))
+	}
+	render(a, "a0")
+	whole := last()
+	got := map[int]int{}
+	for _, n := range []int{1, 7, 8} {
+		for i := range n {
+			render(others[i], fmt.Sprintf("k%d-%d", n, i))
+		}
+		render(a, fmt.Sprintf("a%d", n))
+		got[n] = last()
+	}
+	if got[1]*4 > whole || got[7]*4 > whole {
+		t.Fatalf("hand-backs after 1 and 7 other kits wrote %d and %d bytes against a whole manifest of %d", got[1], got[7], whole)
+	}
+	if got[8] != whole {
+		t.Fatalf("the hand-back after %d other kits wrote %d bytes, want the whole manifest of %d, as documented", agentmemory.ManifestFoldDepth, got[8], whole)
+	}
+
+	// The restart: a new kit over the same memory, handed back to after
+	// one other kit, whose render has not moved.
+	render(others[0], "k-restart")
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	a2 := build("a", mem)
+	render(a2, "a-restart")
+	if first := last(); first*4 > whole {
+		t.Fatalf("a restarted kit's first hand-back wrote %d bytes against a whole manifest of %d; the fold still holds its last one", first, whole)
+	}
+	render(others[0], "k-again")
+	render(a2, "a-again")
+	if next := last(); next*4 > whole {
+		t.Fatalf("the restarted kit's next hand-back wrote %d bytes against a whole manifest of %d", next, whole)
+	}
+
+	// Another process hands off with a whole record, as a v0.0.5 kit
+	// wrote at every hand-back.
+	ns, data := others[1].MemoryManifest().Record()
+	if _, err := rec.Annotate(t.Context(), ns, json.RawMessage(data)); err != nil {
+		t.Fatal(err)
+	}
+	render(a2, "a-after-whole")
+	if next := last(); next*4 > whole {
+		t.Fatalf("the hand-back after a whole record wrote %d bytes against a whole manifest of %d", next, whole)
+	}
+	if got := foldManifests(t, openSession(t, sessions, rec.SessionID())); got.Hash() != a2.MemoryManifest().Hash() {
+		t.Fatalf("the path folds to %s, want the restarted kit's render %s", got.Hash(), a2.MemoryManifest().Hash())
+	}
+}
+
+// A memory write the model makes in a run whose block the budget dropped
+// is refused (#53). One a policy held and a person approved runs in a
+// Resume, a run with no render of its own, and was let through: it ran
+// over an entry the model was never shown. The render kept for the call
+// says the block was dropped, so the approved write is refused the same
+// way, for each of the three writes; after a restart, the manifest at the
+// call says it, holding no entry and every entry omitted. (#69)
+func TestAHeldWriteInARunWhoseBlockWasDroppedIsRefused(t *testing.T) {
+	const prompt = "be brief"
+	content := "This project pins Go 1.25. " + strings.Repeat("c", 4000)
+	writes := map[string]string{
+		agentmemory.SaveTool:   `{"scope":"user","name":"go-version","content":"This project pins Go 1.26."}`,
+		agentmemory.PatchTool:  `{"scope":"user","name":"go-version","old_text":"1.25","new_text":"1.26"}`,
+		agentmemory.ForgetTool: `{"scope":"user","name":"go-version"}`,
+	}
+	for _, restart := range []bool{false, true} {
+		for name, args := range writes {
+			t.Run(fmt.Sprintf("%s restart %v", name, restart), func(t *testing.T) {
+				store := memStore(t, agentmemory.Entry{Scope: "user", Name: "go-version", Content: content})
+				sessions := agentsession.NewMemoryStore()
+				build := func(model agentturn.Model, sess agentkit.Option) *agentkit.Kit {
+					kit, err := agentkit.New(t.Context(),
+						agentkit.WithModel(model, "m"),
+						agentkit.WithInstructions(prompt),
+						agentkit.WithMemory(store, "user"),
+						agentkit.WithInstructionBudget(int64(len(prompt)+len(agentkit.Separator)+40)),
+						agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{Execute: []string{name}}), nil),
+						sess,
+					)
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = kit.Close() })
+					return kit
+				}
+				model := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn(name, args)}}
+				first := build(model, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))
+				if got := first.Config().Instructions; got != prompt {
+					t.Fatalf("instructions = %q, want the block dropped", got)
+				}
+				agent := agentturn.New(first.Config(), first.AgentOptions()...)
+				unsubscribe := first.Attach(agent)
+				end, err := agent.Prompt(t.Context(), openresponses.UserText("bump go"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if end.Reason != agentturn.ReasonInputRequired {
+					t.Fatalf("reason = %q, want the write held", end.Reason)
+				}
+				kit := first
+				if restart {
+					unsubscribe()
+					model = &scriptModel{}
+					kit = build(model, agentkit.WithResumedSession(sessions, first.SessionID()))
+					agent = agentturn.New(kit.Config(), kit.AgentOptions()...)
+					unsubscribe = kit.Attach(agent)
+				}
+				defer unsubscribe()
+				pending := agent.State().Pending
+				if len(pending) != 1 {
+					t.Fatalf("pending = %+v, want the held write", pending)
+				}
+				answers := []agentturn.Answer{agentturn.Approve(pending[0].Call.CallID).WithBy(agentpolicy.ByHuman)}
+				if !restart {
+					// A front answers through the engine, which records who
+					// approved; after a restart the engine holds nothing and
+					// the answer goes to the seeded agent.
+					if answers, err = kit.Engine().Release(t.Context(), end, answers...); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := agent.Resume(t.Context(), answers...); err != nil {
+					t.Fatal(err)
+				}
+				got, err := store.Get(t.Context(), "user", "go-version")
+				if err != nil {
+					t.Fatalf("after the approved %s the entry is gone, %v; want it untouched, the model was shown no block", name, err)
+				}
+				if got.Content != content {
+					t.Fatalf("after the approved %s the entry holds %.40q; want it untouched, the model was shown no block", name, got.Content)
+				}
+				if out := lastToolOutput(model); !strings.Contains(out, "memory cannot be changed") {
+					t.Fatalf("the approved %s was told %q, want the refusal", name, out)
+				}
+			})
+		}
+	}
+}
+
+// The run's start is on the session's path before the run's first
+// BeforeModelCall: the agent delivers run_start to its subscribers
+// before it builds the first request, and the recorder writes the entry
+// as it is delivered. Kit.record rests on this to tell a run the session
+// records from one it does not. (#70)
+func TestARunsStartIsOnThePathBeforeItsFirstModelCall(t *testing.T) {
+	sessions := agentsession.NewMemoryStore()
+	var (
+		kit  *agentkit.Kit
+		mu   sync.Mutex
+		seen []string
+	)
+	hook := func(ctx context.Context, _ *openresponses.Request) error {
+		run := agentturn.RunIDFromContext(ctx)
+		sess := kit.Session()
+		open := false
+		for _, e := range sess.Path(sess.Leaf()) {
+			if r, ok := e.(*agentsession.RunEntry); ok && r.RunID == run {
+				open = r.IsStart()
+			}
+		}
+		mu.Lock()
+		seen = append(seen, fmt.Sprintf("%s open %v", run, open))
+		mu.Unlock()
+		if !open {
+			return fmt.Errorf("run %s is not open on the path at its model call", run)
+		}
+		return nil
+	}
+	var err error
+	kit, err = agentkit.New(t.Context(),
+		agentkit.WithModel(&scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("note", `{}`)}}, "m"),
+		agentkit.WithTools(namedTool(t, "note")),
+		agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
+		agentkit.WithBeforeModelCall(hook),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	agent := agentturn.New(kit.Config())
+	defer kit.Attach(agent)()
+	for _, text := range []string{"one", "two"} {
+		end, err := agent.Prompt(t.Context(), openresponses.UserText(text))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if end.Err != nil {
+			t.Fatal(end.Err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) < 3 {
+		t.Fatalf("model calls seen = %v, want two runs' worth", seen)
+	}
+}
+
+// A run built from a kit with a session, neither attached to it nor
+// prompted under ContextWithRecorder, had its render written into the
+// kit's session with no run entries around it, where foldAtCall read it
+// as the held save's run's own after a restart: the approved save ran
+// over the write another channel made, with nothing reported. A render
+// of a run the session does not record is not written there, so the
+// held save is based on its own run's render, with the other write
+// reported, or refused. (#70)
+func TestARenderOfARunTheSessionDoesNotRecordIsNotWritten(t *testing.T) {
+	store := memStore(t, agentmemory.Entry{Scope: "user", Name: "profile", Content: "Chris."})
+	sessions := agentsession.NewMemoryStore()
+	var (
+		kit  *agentkit.Kit
+		bErr error
+	)
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{
+		func(e *openresponses.Emitter) error {
+			// While A's model composes: another channel writes the entry,
+			// and a second agent off the kit, not attached to its session,
+			// runs a turn and renders the write.
+			other := agentmemory.WithSession(context.Background(), "telegram")
+			if _, err := store.Put(other, agentmemory.Entry{Scope: "user", Name: "profile", Content: "Chris. Prefers Go."}); err != nil {
+				return err
+			}
+			cfg := kit.Config()
+			cfg.Model = &scriptModel{}
+			_, bErr = agentturn.New(cfg).Prompt(context.Background(), openresponses.UserText("what time is it"))
+			return callTurn(agentmemory.SaveTool, `{"scope":"user","name":"profile","content":"Chris. Lives in Bristol."}`)(e)
+		},
+	}}
+	build := func(model agentturn.Model, sess agentkit.Option) *agentkit.Kit {
+		kit, err := agentkit.New(t.Context(),
+			agentkit.WithModel(model, "m"),
+			agentkit.WithMemory(store, "user"),
+			agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{Execute: []string{agentmemory.SaveTool}}), nil),
+			sess,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = kit.Close() })
+		return kit
+	}
+	kit = build(model, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))
+	agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
+	unsubscribe := kit.Attach(agent)
+	end, err := agent.Prompt(t.Context(), openresponses.UserText("I moved to Bristol"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsubscribe()
+	if bErr != nil {
+		t.Fatal(bErr)
+	}
+	if end.Reason != agentturn.ReasonInputRequired {
+		t.Fatalf("reason = %q, want the save held", end.Reason)
+	}
+	if n := len(customEntries(openSession(t, sessions, kit.SessionID()), agentmemory.ManifestNS)); n != 1 {
+		t.Fatalf("manifest records = %d, want A's alone: the unattached run's render landed in the session", n)
+	}
+
+	// The restart.
+	model2 := &scriptModel{}
+	kit2 := build(model2, agentkit.WithResumedSession(sessions, kit.SessionID()))
+	agent2 := agentturn.New(kit2.Config(), kit2.AgentOptions()...)
+	defer kit2.Attach(agent2)()
+	pending := agent2.State().Pending
+	if len(pending) != 1 {
+		t.Fatalf("pending = %+v, want the held save", pending)
+	}
+	if _, err := agent2.Resume(t.Context(), agentturn.Approve(pending[0].Call.CallID).WithBy(agentpolicy.ByHuman)); err != nil {
+		t.Fatal(err)
+	}
+	lost, err := agentmemory.LostUpdates(t.Context(), store, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(t.Context(), "user", "profile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := lastToolOutput(model2)
+	refused := strings.Contains(out, "no longer known") && strings.Contains(got.Content, "Prefers Go")
+	if len(lost) != 1 && !refused {
+		t.Fatalf("the approved save left the entry %q with %d lost updates reported and was told %q; want it based on A's own render, the other write reported, or refused", got.Content, len(lost), out)
+	}
+}
+
+// Many renders of runs the session does not record do not grow it. (#70)
+func TestUnrecordedRunsDoNotGrowTheSession(t *testing.T) {
+	store := memStore(t, agentmemory.Entry{Scope: "user", Name: "profile", Content: "Chris."})
+	sessions := agentsession.NewMemoryStore()
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(&scriptModel{}, "m"),
+		agentkit.WithMemory(store, "user"),
+		agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	agent := agentturn.New(kit.Config())
+	defer kit.Attach(agent)()
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("hello")); err != nil {
+		t.Fatal(err)
+	}
+	before := len(customEntries(openSession(t, sessions, kit.SessionID()), agentmemory.ManifestNS))
+	cfg := kit.Config()
+	for i := range 64 {
+		// Each render moves, or nothing would be written anyway.
+		if _, err := store.Put(t.Context(), agentmemory.Entry{Scope: "user", Name: "profile", Content: fmt.Sprintf("Chris, take %d.", i)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := cfg.BeforeModelCall(agentturn.ContextWithRunID(t.Context(), fmt.Sprintf("unattached-%d", i)), &openresponses.Request{Instructions: cfg.Instructions}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if after := len(customEntries(openSession(t, sessions, kit.SessionID()), agentmemory.ManifestNS)); after != before {
+		t.Fatalf("manifest records went from %d to %d over renders of runs the session does not record", before, after)
+	}
+	// The attached agent's next run records its render as before.
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("again")); err != nil {
+		t.Fatal(err)
+	}
+	if after := len(customEntries(openSession(t, sessions, kit.SessionID()), agentmemory.ManifestNS)); after != before+1 {
+		t.Fatalf("manifest records = %d after the attached agent's run, want %d", after, before+1)
+	}
+}

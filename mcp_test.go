@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ChristopherDavenport/agentkit"
 	"github.com/ChristopherDavenport/agentpolicy"
@@ -338,8 +340,14 @@ func TestAServerAddedWithATakenNameIsRefused(t *testing.T) {
 	if got := strings.Join(toolNames(kit.Config().ResolveTools(t.Context())), " "); got != "read provided" {
 		t.Fatalf("tools = %s after two refused servers, want them unchanged", got)
 	}
-	if _, err := kit.AddMCPTransport(t.Context(), serveMCP(t, "read"), mcpclient.WithPrefix("fs")); err != nil {
+	// The refused servers took no number, so the first server added is
+	// the first.
+	label, err := kit.AddMCPTransport(t.Context(), serveMCP(t, "read"), mcpclient.WithPrefix("fs"))
+	if err != nil {
 		t.Fatalf("a prefixed server = %v, want it added", err)
+	}
+	if !strings.HasPrefix(label, "mcp:#1 ") {
+		t.Fatalf("label = %q after two refused servers, want the first number", label)
 	}
 }
 
@@ -462,4 +470,309 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// serveServer connects srv over an in-memory transport and returns the
+// client side of it.
+func serveServer(t *testing.T, srv *sdk.Server) sdk.Transport {
+	t.Helper()
+	client, server := sdk.NewInMemoryTransports()
+	session, err := srv.Connect(t.Context(), server, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	return client
+}
+
+// slowCloseTransport is a transport whose connection takes delay to
+// close: the shape of a server whose Close waits for its calls in
+// flight, as mcpclient's does for the requests answering a server's
+// questions cancel. closing is closed when the first Close begins.
+type slowCloseTransport struct {
+	inner   sdk.Transport
+	delay   time.Duration
+	closing chan struct{}
+	once    sync.Once
+}
+
+func slowClose(inner sdk.Transport, delay time.Duration) *slowCloseTransport {
+	return &slowCloseTransport{inner: inner, delay: delay, closing: make(chan struct{})}
+}
+
+func (s *slowCloseTransport) Connect(ctx context.Context) (sdk.Connection, error) {
+	conn, err := s.inner.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &slowCloseConn{Connection: conn, t: s}, nil
+}
+
+type slowCloseConn struct {
+	sdk.Connection
+	t *slowCloseTransport
+}
+
+func (c *slowCloseConn) Close() error {
+	c.t.once.Do(func() {
+		close(c.t.closing)
+		time.Sleep(c.t.delay)
+	})
+	return c.Connection.Close()
+}
+
+// gatedTransport is a transport whose Connect waits until open is
+// closed, or the context ends: a dial waiting on a sign-in in a
+// browser. entered is closed when Connect begins.
+type gatedTransport struct {
+	inner   sdk.Transport
+	open    chan struct{}
+	entered chan struct{}
+}
+
+func gated(inner sdk.Transport) *gatedTransport {
+	return &gatedTransport{inner: inner, open: make(chan struct{}), entered: make(chan struct{})}
+}
+
+func (g *gatedTransport) Connect(ctx context.Context) (sdk.Connection, error) {
+	close(g.entered)
+	select {
+	case <-g.open:
+		return g.inner.Connect(ctx)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// timed runs fn and reports how long it took, or fails the test when it
+// has not returned within limit.
+func timed(t *testing.T, what string, limit time.Duration, fn func()) time.Duration {
+	t.Helper()
+	done := make(chan time.Duration, 1)
+	at := time.Now()
+	go func() { fn(); done <- time.Since(at) }()
+	select {
+	case d := <-done:
+		return d
+	case <-time.After(limit):
+		t.Fatalf("%s has not returned after %s", what, limit)
+		return 0
+	}
+}
+
+// The kit's MCP lock is not held across a server's Close: Kit.Tools()
+// answers while RemoveMCP waits for a server whose close is slow, as a
+// status line reads it, and the call in flight to that server ends with
+// ErrClosed. (#71)
+func TestKitToolsAnswersWhileRemoveMCPClosesASlowServer(t *testing.T) {
+	const delay = 500 * time.Millisecond
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	started := make(chan struct{}, 1)
+	srv := sdk.NewServer(&sdk.Implementation{Name: "test", Version: "0"}, nil)
+	sdk.AddTool(srv, &sdk.Tool{Name: "deploy", Description: "deploy, slowly"},
+		func(ctx context.Context, _ *sdk.CallToolRequest, _ struct{}) (*sdk.CallToolResult, any, error) {
+			started <- struct{}{}
+			select {
+			case <-ctx.Done():
+			case <-release:
+			}
+			return &sdk.CallToolResult{}, nil, nil
+		})
+	transport := slowClose(serveServer(t, srv), delay)
+
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithTools(namedTool(t, "read")),
+		agentkit.WithToolElicitor(agentpolicy.ByHuman, func(context.Context, agenttool.Elicitation) (agenttool.Answer, error) {
+			return agenttool.Answer{Action: agenttool.ActionCancel}, nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	label, err := kit.AddMCPTransport(t.Context(), transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kit.Config().ResolveTools(t.Context())
+	deploy, ok := kit.LookupTool("deploy")
+	if !ok {
+		t.Fatal("the added server's tool is not in the union")
+	}
+	callErr := make(chan error, 1)
+	go func() {
+		_, err := deploy.Execute(t.Context(), agenttool.Call{ID: "c1", Args: json.RawMessage(`{}`)})
+		callErr <- err
+	}()
+	<-started
+
+	removed := make(chan time.Duration, 1)
+	at := time.Now()
+	go func() { _ = kit.RemoveMCP(label); removed <- time.Since(at) }()
+	<-transport.closing
+	tools := timed(t, "Kit.Tools()", 2*delay, func() { kit.Tools() })
+	remove := <-removed
+	if remove < delay {
+		t.Fatalf("RemoveMCP took %s; the server's close was not the slow one", remove)
+	}
+	if tools > delay/2 {
+		t.Errorf("Kit.Tools() asked during RemoveMCP took %s; RemoveMCP held the lock across the server's close (%s)", tools, remove)
+	}
+	select {
+	case err := <-callErr:
+		if !errors.Is(err, mcpclient.ErrClosed) {
+			t.Errorf("the call in flight ended with %v, want ErrClosed", err)
+		}
+	case <-time.After(2 * delay):
+		t.Error("the call in flight to the removed server did not end")
+	}
+	for _, o := range kit.Tools() {
+		if o.Source == label {
+			t.Errorf("Kit.Tools still lists %s from the removed server", o.Name)
+		}
+	}
+}
+
+// Close closes every server together, those New dialed and those added,
+// so quitting with three servers whose close is slow costs one wait and
+// not three. (#71)
+func TestCloseClosesTheServersTogether(t *testing.T) {
+	const delay = 500 * time.Millisecond
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithMCPTransport(slowClose(serveMCP(t, "one_a"), delay)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"two_a", "three_a"} {
+		if _, err := kit.AddMCPTransport(t.Context(), slowClose(serveMCP(t, name), delay)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := len(kit.Config().ResolveTools(t.Context())); n != 3 {
+		t.Fatalf("tools = %d, want 3", n)
+	}
+	took := timed(t, "Kit.Close()", 4*delay, func() {
+		if err := kit.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if took < delay {
+		t.Fatalf("Close took %s; the servers' close was not the slow one", took)
+	}
+	if took > delay*3/2 {
+		t.Errorf("Close with three servers each taking %s to close took %s; want them closed together", delay, took)
+	}
+	if n := len(kit.Config().ResolveTools(t.Context())); n != 0 {
+		t.Fatalf("tools = %d after Close, want 0", n)
+	}
+}
+
+// The lock is not held across a dial either: Kit.Tools() and Kit.Close()
+// answer while AddMCPTransport waits for a transport whose Connect
+// blocks, as an OAuth dial does on the user's consent, and Close ends
+// that dial, so AddMCPTransport returns an error saying the kit closed.
+// (#71)
+func TestToolsAndCloseAnswerWhileADialWaits(t *testing.T) {
+	const limit = 2 * time.Second
+	transport := gated(serveMCP(t, "whoami"))
+	t.Cleanup(func() { close(transport.open) })
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithTools(namedTool(t, "read")),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type added struct {
+		label string
+		err   error
+	}
+	addDone := make(chan added, 1)
+	go func() {
+		label, err := kit.AddMCPTransport(t.Context(), transport)
+		addDone <- added{label, err}
+	}()
+	<-transport.entered
+
+	if took := timed(t, "Kit.Tools()", limit, func() { kit.Tools() }); took > limit/4 {
+		t.Errorf("Kit.Tools() during a dial took %s", took)
+	}
+	if took := timed(t, "Kit.Close()", limit, func() { _ = kit.Close() }); took > limit/4 {
+		t.Errorf("Kit.Close() during a dial took %s", took)
+	}
+	select {
+	case a := <-addDone:
+		if a.err == nil {
+			t.Fatalf("AddMCPTransport returned %q after Close, want an error", a.label)
+		}
+		if !strings.Contains(a.err.Error(), "Close") {
+			t.Errorf("AddMCPTransport's error = %v, want it to say the kit closed", a.err)
+		}
+	case <-time.After(limit):
+		t.Fatal("Close did not end the dial AddMCPTransport was waiting in")
+	}
+}
+
+// Two AddMCP calls dialing at once get distinct labels, and both servers
+// join the set. (#71)
+func TestConcurrentAddMCPCallsGetDistinctLabels(t *testing.T) {
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithTools(namedTool(t, "read")),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	transports := []*gatedTransport{gated(serveMCP(t, "one_a")), gated(serveMCP(t, "two_a"))}
+	labels := make(chan string, len(transports))
+	for _, tr := range transports {
+		go func() {
+			label, err := kit.AddMCPTransport(t.Context(), tr)
+			if err != nil {
+				t.Error(err)
+			}
+			labels <- label
+		}()
+	}
+	// Both dials are in flight before either is let through, which the
+	// lock held across a dial never allowed.
+	for _, tr := range transports {
+		select {
+		case <-tr.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the second dial did not begin while the first was in flight")
+		}
+	}
+	for _, tr := range transports {
+		close(tr.open)
+	}
+	got := map[string]bool{}
+	for range transports {
+		select {
+		case l := <-labels:
+			got[l] = true
+		case <-time.After(5 * time.Second):
+			t.Fatal("an AddMCPTransport did not return")
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("labels = %v, want two distinct ones", got)
+	}
+	for _, want := range []string{"mcp:#1 ", "mcp:#2 "} {
+		var found bool
+		for l := range got {
+			found = found || strings.HasPrefix(l, want)
+		}
+		if !found {
+			t.Errorf("labels = %v, want one numbered %q", got, want)
+		}
+	}
+	if got := strings.Join(toolNames(kit.Config().ResolveTools(t.Context())), " "); got != "read one_a two_a" && got != "read two_a one_a" {
+		t.Fatalf("tools = %s, want both servers' tools after the product's", got)
+	}
 }

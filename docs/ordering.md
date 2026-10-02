@@ -163,7 +163,8 @@ a session that fails `Verify`, so the recording goes first. A caller
 who wants to hear of a fold passes `WithFoldObserver`, which the kit's
 `WithOnFold` calls after the recorder, for a fold that failed as well
 as one that folded. The kit's `compact.WithRequest`, which gives the
-summary request the agent's reasoning, also goes ahead of the caller's
-options, and since it is one function a caller's replaces it. The
+summary request the agent's reasoning when the agent's model is the one
+asked for it, also goes ahead of the caller's options, and since it is
+one function a caller's replaces it. The
 resumed session's last failed fold, `session.CompactOptions`, goes
 after them.

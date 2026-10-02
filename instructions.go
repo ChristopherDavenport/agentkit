@@ -267,6 +267,9 @@ func unlistedReason(sk *agentskill.Skill, problems []agentskill.Problem) string 
 // tools that write memory are then withheld from the request and
 // refused, [memoryWrites], since a model shown no block and no word on
 // them would save over entries it was never shown. memory_search stays.
+// The dropped render's manifest shows no entry and lists every entry
+// the block held among the omitted with no reason, which is the mark
+// [droppedRender] reads in a session's record after a restart.
 func memoryPart(ctx context.Context, s *settings, limit int64) (group []Part, man agentmemory.Manifest, omitted []Omission, dropped bool, err error) {
 	usage := agentmemory.Usage()
 	if limit > 0 {

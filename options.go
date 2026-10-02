@@ -382,6 +382,18 @@ func WithoutSkillTool() Option {
 // about a grant says what it was built from; a source function does the
 // same by setting Hash.
 //
+// A grant lives in the engine, so [New] over a resumed session and
+// [Kit.RegrantSkills] grant again what the session's reads left in
+// force, and only for a skill that is what the model read: the digest
+// of the instructions the catalogue's tool served, which agentskill
+// ends with the skill's file list and each file's size, and the digest
+// of its frontmatter. So a skill that writes into its own directory, a
+// draft changelog or a log, is not granted again after a restart, nor
+// is one whose allowed-tools were edited or whose body
+// [Kit.ReloadSkills] picked up with no read after; the front hears each
+// through [WithSkillGrantReport], with [ErrSkillGrantChanged], and a
+// read of the skill grants by the skill as it is now.
+//
 // It has no effect without a policy engine, and none without skills,
 // so a product may add it unconditionally and the two behind flags.
 // [WithoutSkillTool] is the one combination [New] refuses: a grant
@@ -396,16 +408,69 @@ func WithSkillGrants(source func(*agentskill.Skill) agentpolicy.Source) Option {
 // when the next message arrives: a later request that wants the tools
 // reads the skill again. The message may start a run, follow the run's
 // answer through [agentturn.Agent.FollowUp], be steered in between
-// turns, or come with a developer note after it; each revokes. A run
-// that Resume starts after an approval, or that Continue starts, is
-// the same task going on and keeps them, after a restart too, since the
-// scope's revocations are in the session's journal. It is a
-// [agentturn.Config.BeforeTurn] hook that calls [Kit.RevokeSkillGrants]
-// on every turn whose transcript's tail, back to the last item the
-// model or a tool produced, holds a user message, ahead of the
-// product's own BeforeTurn. An output delivered after a steer ends that
-// tail as a Resume's does, and the steer before it does not revoke:
-// [agentturn.TurnStartInfo] does not say what arrived.
+// turns, come with a developer note after it, or arrive in another
+// agent's run, as it does when the kit's agent handed the conversation
+// to another kit's and is handed it back; each revokes. A run that
+// Resume starts after an approval, or that Continue starts, is the same
+// task going on and keeps them, after a restart too, since the scope's
+// revocations are in the session's journal.
+//
+// It is a [agentturn.Config.BeforeTurn] hook, ahead of the product's
+// own. Each grant is bound to the user message in force when the read
+// made it: the count of user messages in the turn's transcript and a
+// digest of the last one, its role and the JSON of its content. The
+// hook calls [Kit.RevokeSkillGrants] on every turn whose transcript
+// holds more user messages than a grant's count, or whose last user
+// message is not the one it digested, and on every turn whose
+// transcript's tail, back to the last item the model or a tool
+// produced, holds a user message, which catches a grant made in no run
+// and so bound to nothing. A grant [New] or [Kit.RegrantSkills] grants
+// again is bound to the message the transcript the agent is seeded
+// with ends under, session.Transcript, the items [Kit.AgentOptions]
+// gives agentturn.New, so the restart's first turn keeps it. A
+// compaction ends nothing by itself, in the run, whose turns keep the
+// message the fold summarised, or across a restart, where the fold's
+// summary stands in for it in the seeded transcript and the grant is
+// bound to that. A steer delivered before an output is one more user
+// message, so it revokes on the turn that follows, which the tail test
+// alone left to [agentturn.TurnStartInfo].
+//
+// Under the scope the model is told, in a developer note at the turn
+// that ended a grant, which skills' tools ended and that a read
+// restores them; and a call that only an ended grant allowed is refused
+// with a reason naming the skill and the tool that reads it again,
+// until the skill is read again. The engine would have deferred the
+// call to a reviewer, whose refusal says nothing of the skill. The
+// refusal is the first hook the kit folds into the engine it builds
+// under [WithPolicy], [agentpolicy.WithHooks], ahead of the product's
+// [WithBeforeToolCall] hooks, so the engine's fold takes the Block, a
+// sibling in the same batch is decided beside it rather than held for a
+// question nobody is asked, and the engine records the decision as the
+// call's verdict under [agentpolicy.VerdictNS]; it is not reported
+// through [WithSkillGrantReport]. There is no refusal under
+// [WithEngine]. A call's subjects are the tool's [agentpolicy.Subjects]
+// split under WithPolicy's matchers, and each must be covered by an
+// ended rule, bare or with a specifier the tool's matcher matches; an
+// ended grant of a skill the catalogue no longer lists, after
+// [Kit.ReloadSkills], covers nothing.
+//
+// The engine has no side-effect-free evaluation to ask whether it
+// would allow the call, so the kit refuses only when the engine's
+// exported state leaves it no way to: for every tool of the call's
+// subjects, every rule naming that tool in [agentpolicy.Engine.Policy]'s
+// allow, deny and ask lists and in every [agentpolicy.Engine.Grants] set
+// is a bare ask, with no specifier and no carve-out; when no rule names
+// the tool, the default does not allow; the call's tool does not say it
+// runs confined, [agenttool.ConfinedBy], which lets a call past a bare
+// ask; and WithPolicy was given no agentpolicy option of the product's.
+// Any specifier naming a tool, any allow or deny naming one, any
+// option: the call goes to the engine, which asks, allows or denies it
+// as it would have. The options are opaque to the kit, so one that
+// would not change the decision, [agentpolicy.WithAliases] among them,
+// turns the refusal off as well; a product on aliases gets the
+// turn-start note alone. The predicate collapses to agentpolicy's
+// side-effect-free `Engine.Would` once that lands, which also lifts
+// that.
 //
 // Only the sources the kit granted are revoked; a product's own
 // [agentpolicy.Engine.GrantSet] calls are left alone. Every run on the
@@ -420,10 +485,18 @@ func WithSkillGrantScope() Option {
 // WithSkillGrantReport is told what the engine did with each skill's
 // allowed-tools: what it granted, what it refused and why, a skill
 // whose allowed-tools would not parse, a read the kit would not grant
-// because its grants belong to another conversation, and, with
-// [SkillGrant.Replayed] set, what a restart granted again. A grant widens what the
-// agent may do, so a front that shows the user the policy in force
-// wants to see it happen.
+// because its grants belong to another conversation, a read the
+// catalogue's tool refused because the skill file is gone, renamed or
+// no longer parses, with Err wrapping [agentskill.ErrSkillChanged],
+// and, with [SkillGrant.Replayed] set, what a restart granted again and
+// the read it will not grant again, with Err wrapping
+// [ErrSkillGrantChanged] when the skill changed since the read and
+// [ErrSkillGrantUnrecorded] when the session records no verdict of the
+// read's grant. A grant widens what the agent may do, so a front that
+// shows the user the policy in force wants to see it happen; and a
+// front reloads the skills, [Kit.ReloadSkills], on a report wrapping
+// agentskill.ErrSkillChanged or with [SkillGrant.FrontmatterChanged]
+// set, since the model is told to discover the skills again and cannot.
 func WithSkillGrantReport(fn func(SkillGrant)) Option {
 	return func(s *settings) { s.skillGrant = fn }
 }
@@ -440,7 +513,11 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 // and the paragraph, and that request is not offered memory_save,
 // memory_patch or memory_forget: the model would be writing over
 // entries it was never shown, with no word on the tools. A write the
-// model makes anyway in that run is refused. memory_search stays
+// model makes anyway in that run is refused, and so is one a policy
+// held and a person approved, which runs in a Resume: the render kept
+// for the call says the block was dropped, and after a restart the
+// manifest recorded at the call does, where it shows no entry and lists
+// one the block held among the omitted. memory_search stays
 // offered, and [Kit.Omitted] lists every entry the drop left out. The
 // block, and the writes, come back on the first render that fits.
 //
@@ -873,6 +950,15 @@ func WithVerdictObserver(fn func(context.Context, agentpolicy.Verdict)) Option {
 // recorder subscribes through [Kit.Attach]; the store stays the
 // caller's to sync, release and close.
 //
+// Every agent built from the kit is attached to it, or prompted under
+// [ContextWithRecorder] with a recorder of its own. A run that is
+// neither is one the session does not record, and the kit writes none
+// of its memory renders there: a record with no run around it would be
+// read as another run's. Such a run's memory_save, held for approval
+// and approved after a restart, is refused, since no session holds the
+// render it was composed from; in the process that rendered it, it is
+// based on that render as any run's is.
+//
 // The recorder is opened with [session.WithInstructionsParts] bound to
 // [Kit.PartsFor], ahead of opts, so its config entries carry the
 // instructions as [Kit.Parts] and what the layers left out as
@@ -893,7 +979,8 @@ func WithSession(store agentsession.Store, h agentsession.Header, opts ...sessio
 // back, which Context().Items leaves out, the model each reasoning item
 // came from, so a request to another model leaves the earlier one's
 // out, and the calls pending at the leaf. The recorder takes the kit's
-// parts as under [WithSession]. Under [WithSkillGrants], the grants the
+// parts, and every agent built from the kit is attached to it or
+// prompted under [ContextWithRecorder], as under [WithSession]. Under [WithSkillGrants], the grants the
 // session's skill reads made are granted again, and under
 // [WithCompaction] the fold backs off from the last fold that failed on
 // the session's path.
@@ -941,9 +1028,25 @@ func WithRecorder(rec *session.Recorder) Option {
 // [WithReasoning] or [WithRequest] one, through a [compact.WithRequest]
 // of the kit's ahead of opts: a thinking model left at its server's
 // default reasons through the summary's cap and answers no text, which
-// fails every fold. compact.WithRequest is one function, so one in opts
-// replaces the kit's, and a product that passes one sets Reasoning in
-// it itself.
+// fails every fold. So for an agent at effort low or above the summary
+// is asked at that effort, and a thinking model spends part of the
+// summary's cap, half the budget, reasoning before it writes: the fold
+// succeeds, later and thinner, and nothing reports it. A product whose
+// agent thinks passes its own, which replaces the kit's since
+// compact.WithRequest is one function:
+//
+//	agentkit.WithCompaction(budget, compact.WithRequest(func(r *openresponses.Request) {
+//		r.Reasoning = openresponses.ReasoningConfig{Effort: openresponses.ReasoningEffortNone}
+//	}))
+//
+// or the lowest effort its provider accepts. The kit does not pick a
+// lower effort itself because it does not know that floor: several
+// reasoning models refuse none, and a fold that succeeds thinner today
+// would then fail every time. Under [WithCompactionModel] the kit
+// passes no reasoning at all, since the product chose that model
+// knowing it and a configuration meant for the agent's model may be
+// refused by, or wasted on, another; a compact.WithRequest in opts sets
+// it there too.
 //
 // With a session [New] resumed, the last fold that failed on its path,
 // [session.CompactOptions], is passed after opts, so a restart does not
@@ -972,7 +1075,9 @@ func WithFoldObserver(fn func(context.Context, compact.Fold)) Option {
 }
 
 // WithCompactionModel folds with a model other than the agent's, which
-// is how a cheap model summarises for an expensive one.
+// is how a cheap model summarises for an expensive one. The summary
+// request carries no reasoning unless a compact.WithRequest in
+// [WithCompaction]'s options sets one; see there.
 func WithCompactionModel(m openresponses.Streamer) Option {
 	return func(s *settings) { s.compactSet, s.compactModel = true, m }
 }
