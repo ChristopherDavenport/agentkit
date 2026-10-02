@@ -408,16 +408,50 @@ func WithSkillGrants(source func(*agentskill.Skill) agentpolicy.Source) Option {
 // when the next message arrives: a later request that wants the tools
 // reads the skill again. The message may start a run, follow the run's
 // answer through [agentturn.Agent.FollowUp], be steered in between
-// turns, or come with a developer note after it; each revokes. A run
-// that Resume starts after an approval, or that Continue starts, is
-// the same task going on and keeps them, after a restart too, since the
-// scope's revocations are in the session's journal. It is a
-// [agentturn.Config.BeforeTurn] hook that calls [Kit.RevokeSkillGrants]
-// on every turn whose transcript's tail, back to the last item the
-// model or a tool produced, holds a user message, ahead of the
-// product's own BeforeTurn. An output delivered after a steer ends that
-// tail as a Resume's does, and the steer before it does not revoke:
-// [agentturn.TurnStartInfo] does not say what arrived.
+// turns, come with a developer note after it, or arrive in another
+// agent's run, as it does when the kit's agent handed the conversation
+// to another kit's and is handed it back; each revokes. A run that
+// Resume starts after an approval, or that Continue starts, is the same
+// task going on and keeps them, after a restart too, since the scope's
+// revocations are in the session's journal.
+//
+// It is a [agentturn.Config.BeforeTurn] hook, ahead of the product's
+// own. Each grant is bound to the user message in force when the read
+// made it: the count of user messages in the turn's transcript and a
+// digest of the last one, its role and the JSON of its content. The
+// hook calls [Kit.RevokeSkillGrants] on every turn whose transcript
+// holds more user messages than a grant's count, or whose last user
+// message is not the one it digested, and on every turn whose
+// transcript's tail, back to the last item the model or a tool
+// produced, holds a user message, which catches a grant made in no run
+// and so bound to nothing. A compaction that folds away older messages
+// lowers the count and keeps the last message, so it ends nothing by
+// itself. A grant [New] or [Kit.RegrantSkills] grants again is bound
+// to the message the session's path ends under, which the agent seeded
+// from it starts under, so the restart's first turn keeps it. A steer
+// delivered before an output is one more user message, so it revokes
+// on the turn that follows, which the tail test alone left to
+// [agentturn.TurnStartInfo].
+//
+// Under the scope the model is told, in a developer note at the turn
+// that ended a grant, which skills' tools ended and that a read
+// restores them; and a call that only an ended grant allowed is refused
+// by the kit's [agentturn.Config.BeforeToolCall] hook, ahead of the
+// engine, with a reason naming the skill and the tool that reads it
+// again, until the skill is read again. The engine would have deferred
+// the call to a reviewer, whose refusal says nothing of the skill. The
+// kit refuses only when the engine cannot allow the call on its own, as
+// far as its exported state says: no rule of the policy or of a grant
+// in force names the call's tools, the default does not allow or an ask
+// rule names them, and the tool does not say it runs confined; a call
+// a deny rule names gets the deny's reason. A call's subjects are the
+// tool's [agentpolicy.Subjects] split under [WithPolicy]'s matchers and
+// each must be covered by an ended rule, bare or with a specifier the
+// tool's matcher matches; under [WithEngine] the kit has no matchers
+// and only a bare rule covers. A hook the product folded into the
+// engine is not consulted first. The refusal is recorded as a verdict
+// under [agentpolicy.VerdictNS], as the engine's would be, and is not
+// reported through [WithSkillGrantReport].
 //
 // Only the sources the kit granted are revoked; a product's own
 // [agentpolicy.Engine.GrantSet] calls are left alone. Every run on the

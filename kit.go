@@ -2,6 +2,8 @@ package agentkit
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -168,6 +170,10 @@ type Kit struct {
 	// it.
 	rendered bounded[memoryRender]
 	saveBase bounded[agentmemory.Manifest]
+	// turnMarks is the user message each run's last turn opened under,
+	// keyed by the run's ID and kept by revokeOnUserMessage, which is what
+	// a skill grant made in that run is bound to; see userMark.
+	turnMarks bounded[userMark]
 
 	// recmu guards recorded, the manifest last written to each session
 	// and the entry that holds it, keyed by the session's ID, and is held
@@ -799,12 +805,14 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 		src := source{name: "WithSkills", tools: []agenttool.Tool{tool}}
 		if s.skillGrants && k.engine != nil {
 			k.grants = &skillGrants{
-				cat:    k.Catalog,
-				engine: k.engine,
-				source: s.skillSource,
-				report: s.skillGrant,
-				conv:   k.conversation,
-				scoped: s.skillGrantScope,
+				cat:      k.Catalog,
+				engine:   k.engine,
+				source:   s.skillSource,
+				report:   s.skillGrant,
+				conv:     k.conversation,
+				mark:     k.markFor,
+				matchers: s.matchers,
+				scoped:   s.skillGrantScope,
 			}
 			if s.engine == nil {
 				k.grants.observe = k.observeVerdicts(s, false)
@@ -1725,35 +1733,136 @@ func saveKey(ctx context.Context, callID string) string {
 }
 
 // revokeOnUserMessage is the BeforeTurn hook WithSkillGrantScope
-// installs: on any turn whose new input holds a message from the user,
-// in the conversation the grants belong to, it revokes every grant a
-// skill's read made, so a grant lasts until the next message, however
-// that message arrived. A message in another conversation the kit serves
-// ends nothing, since nothing was granted there.
+// installs: on any turn that opens under a user message later than the
+// one a grant was made under, or whose new input holds a message from
+// the user, in the conversation the grants belong to, it revokes every
+// grant a skill's read made, so a grant lasts until the next message,
+// however that message arrived and whichever agent's run delivered it.
+// A message in another conversation the kit serves ends nothing, since
+// nothing was granted there.
 //
-// TurnStartInfo does not say what the turn's new input is, so the test
-// is the transcript's tail. A prompt puts the user's message last, or
-// followed by a developer or system note sent with it; a follow-up
+// Each turn it keeps the transcript's user-message mark for the run,
+// [userMark], which is what a grant made during the turn is bound to,
+// [skillGrants.grant]. A grant is stale once the transcript holds more
+// user messages than its mark counted, or its last user message is not
+// the one the mark digested: the user's next message, wherever it sits.
+// A handoff to another kit's agent takes the message in that agent's
+// run, and the kit's first turn after the handback opens on the
+// transfer's output rather than on the message, which the tail test
+// alone passed over. A compaction that folds away older messages lowers
+// the count and keeps the last message, so it ends nothing by itself.
+//
+// TurnStartInfo does not say what the turn's new input is, so the other
+// test is the transcript's tail. A prompt puts the user's message last,
+// or followed by a developer or system note sent with it; a follow-up
 // appends one after the run's answer and the run goes on; a steer
 // appends one between turns, after the batch's outputs. A Resume's first
 // turn has the answered calls' outputs last, and every other turn the
 // model's own output, so an approval and the task it continues keep the
-// grant.
+// grant. It still catches a message the mark cannot: a grant made in no
+// run, which is bound to nothing.
 //
 // When the revocation ended a grant in force, the turn is given a
 // developer note naming the skills and their rules and saying that a
-// read of the skill restores them. A model that has the skill's text in
-// its transcript from the message before goes straight to the tool, and
-// without the note its call is refused as an ordinary ask with no word
-// of the grant that ended.
+// read of the skill restores them, and the kit's guard refuses a call
+// only those grants allowed with the same word, [skillGrants.guard]. A
+// model that has the skill's text in its transcript from the message
+// before goes straight to the tool, and without either its call is
+// refused as an ordinary ask with no word of the grant that ended.
 func (k *Kit) revokeOnUserMessage(ctx context.Context, info agentturn.TurnStartInfo) (openresponses.Items, error) {
-	if !newUserMessage(info.Transcript) || !k.grants.owns(ctx) {
+	mark, marked := userMarkOf(info.Transcript)
+	run := info.RunID
+	if run == "" {
+		run = agentturn.RunIDFromContext(ctx)
+	}
+	if run != "" && marked {
+		k.mu.Lock()
+		k.turnMarks.put(run, mark)
+		k.mu.Unlock()
+	}
+	if !k.grants.owns(ctx) {
+		return nil, nil
+	}
+	if !newUserMessage(info.Transcript) && !(marked && k.grants.stale(mark)) {
 		return nil, nil
 	}
 	if _, ended := k.grants.revokeLive(ctx); len(ended) > 0 {
+		k.grants.keepEnded(ended)
 		return openresponses.Items{openresponses.DeveloperText(grantsEndedNote(ended))}, nil
 	}
 	return nil, nil
+}
+
+// userMark is the user message a transcript is under: how many user
+// messages it holds and a digest of the last one, its role and the JSON
+// of its content. A skill grant is bound to the mark of the turn it was
+// made in, and is stale once a transcript's count is higher or its last
+// message another: the user has sent a message since. A lower count with
+// the same last message is a compaction, which ends nothing.
+type userMark struct {
+	n      int
+	digest string
+}
+
+// stale reports whether now is under a user message later than m.
+func (m userMark) stale(now userMark) bool {
+	return now.n > m.n || now.digest != m.digest
+}
+
+// userMarkOf is the mark of items, hidden or not, and false when they
+// hold no user message.
+func userMarkOf(items openresponses.Items) (userMark, bool) {
+	var mark userMark
+	var last *openresponses.Message
+	for _, item := range items {
+		item, _ := agentturn.Unhide(item)
+		if m, ok := item.(*openresponses.Message); ok && m.Role == openresponses.RoleUser {
+			mark.n++
+			last = m
+		}
+	}
+	if last == nil {
+		return userMark{}, false
+	}
+	content, err := json.Marshal(last.Content)
+	if err != nil {
+		content = []byte(last.Text())
+	}
+	sum := sha256.Sum256(append([]byte(string(last.Role)+"\x00"), content...))
+	mark.digest = hex.EncodeToString(sum[:])
+	return mark, true
+}
+
+// pathMark is the mark of the items on a session's path, which is the
+// mark of the transcript an agent seeded from that path starts under.
+func pathMark(path []agentsession.Entry) (userMark, bool) {
+	var items openresponses.Items
+	for _, e := range path {
+		if ie, ok := e.(*agentsession.ItemEntry); ok {
+			items = append(items, ie.Item)
+		}
+	}
+	return userMarkOf(items)
+}
+
+// markKey carries, on the context of a replay's grant, the mark of the
+// path the grant is replayed from.
+type markKey struct{}
+
+// markFor is the user-message mark a grant made under ctx is bound to:
+// the one a replay put on the context, else the mark of the last turn of
+// the run on the context, else none.
+func (k *Kit) markFor(ctx context.Context) (userMark, bool) {
+	if m, ok := ctx.Value(markKey{}).(userMark); ok {
+		return m, true
+	}
+	run := agentturn.RunIDFromContext(ctx)
+	if run == "" {
+		return userMark{}, false
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.turnMarks.get(run)
 }
 
 // grantsEndedNote is the developer note the scope gives the model when a
@@ -1788,8 +1897,8 @@ func grantsEndedNote(ended []liveGrant) string {
 // version does not know.
 //
 // An output delivered after a steer reads as a Resume's and ends the
-// tail, so the steer before it does not revoke on that turn;
-// TurnStartInfo does not say what arrived, which is agentturn's to add.
+// tail, so the steer before it is not found here; the mark the grant is
+// bound to catches it, since the steer is one more user message.
 func newUserMessage(tr agentturn.Transcript) bool {
 	for i := len(tr) - 1; i >= 0; i-- {
 		item, _ := agentturn.Unhide(tr[i])

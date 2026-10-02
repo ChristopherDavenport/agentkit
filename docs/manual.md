@@ -39,7 +39,7 @@ and no fold is recorded.
 | `ToolProvider` | `WithTools`, `WithSkills`, `WithMemory`, `WithMCP`, `WithChildAgent`, `WithDeferredTools`, `WithToolProvider`, `WithToolFilter`, `WithToolWrap`, `WithPolicy` | `append` the slices, wrap each tool, and wrap the list in `engine.ToolProvider` — see below |
 | `BeforeTurn` | `WithSkillGrantScope`, `WithBeforeTurn` | `agentturn.ChainBeforeTurn(revokeOnUserMessage, yours...)` — see below |
 | `BeforeModelCall` | `WithMemory`, `WithGuards`, `WithVerdictObserver`, `WithBeforeModelCall` | `agentturn.ChainBeforeModelCall(instructions, chain.BeforeModelCall(), yours...)` — see below |
-| `BeforeToolCall` | `WithPolicy`, `WithMemory`, `WithSkillGrants`, `WithBeforeToolCall` | `agentturn.ChainBeforeToolCall(keepSaveBase, grantGuard, engine.BeforeToolCall())`, the engine built with `agentpolicy.WithHooks(yours...)`; with `WithEngine` or no policy, `yours...` after the engine — see below |
+| `BeforeToolCall` | `WithPolicy`, `WithMemory`, `WithSkillGrants`, `WithSkillGrantScope`, `WithBeforeToolCall` | `agentturn.ChainBeforeToolCall(keepSaveBase, grantGuard, engine.BeforeToolCall())`, the engine built with `agentpolicy.WithHooks(yours...)`; with `WithEngine` or no policy, `yours...` after the engine — see below |
 | `AfterToolCall` | `WithAfterToolCall` | assign it; the kit contests nothing here |
 | `OutputGuard` | `WithGuards`, `WithOutputGuard` | `agentturn.ChainOutputGuard(chain.OutputGuard(), yours...)` |
 | `ShouldStopAfterTurn` | `WithGuards`, `WithShouldStopAfterTurn` | `agentturn.ChainShouldStopAfterTurn(chain.ShouldStopAfterTurn(), yours...)` |
@@ -598,9 +598,10 @@ keepSaveBase := func(ctx context.Context, info agentturn.ToolCallInfo) (*agenttu
 }
 
 // grantGuard revokes every skill grant the first time a call is decided
-// in a conversation the grants do not belong to, and decides nothing
-// (WithSkillGrants).
-grantGuard := func(ctx context.Context, _ agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+// in a conversation the grants do not belong to (WithSkillGrants), and
+// under WithSkillGrantScope refuses a call that only a grant the scope
+// ended allowed; it decides nothing else.
+grantGuard := func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
 	if conv := conversation(ctx); owned && !shared && conv != owner { // below
 		shared, tripBy = true, conv
 		octx := agentkit.ContextWithRecorder(context.Background(), ownerRec)
@@ -610,16 +611,94 @@ grantGuard := func(ctx context.Context, _ agentturn.ToolCallInfo) (*agentturn.To
 			engine.Revoke(octx, name)
 		}
 		report(agentkit.SkillGrant{Err: ...}) // wraps ErrSkillGrantConversation, names conv and owner
+		return nil, nil
 	}
-	return nil, nil
+	if !scoped || len(endedBy) == 0 || !owned || shared || conversation(ctx) != owner {
+		return nil, nil
+	}
+	// endedBy is what the last revocations under BeforeTurn ended, by
+	// source, which a read of the skill clears. Every subject of the call
+	// must be covered by an ended rule, or the engine decides it.
+	subjects := []agentpolicy.Subject{{Args: info.Args}}
+	if m := matchers[info.Call.Name]; m.Subjects != nil { // WithPolicy's; none under WithEngine
+		if subjects, err = m.Subjects(info.Args); err != nil || len(subjects) == 0 {
+			return nil, nil // the engine fails it closed
+		}
+	}
+	var skills, tools []string
+	for _, s := range subjects {
+		tool := cmp.Or(s.Tool, info.Call.Name)
+		tools = append(tools, tool)
+		covered := false
+		for _, lg := range endedBy {
+			for _, r := range lg.rules {
+				if _, carve := r.CarveOut(); carve || !r.MatchesTool(tool) {
+					continue
+				}
+				if m := matchers[tool].Match; r.Bare() || m != nil && m(r.Spec, s.Args) {
+					covered, skills = true, append(skills, lg.skill)
+				}
+			}
+		}
+		if !covered {
+			return nil, nil
+		}
+	}
+	if engineMayAllow(ctx, info, tools) { // below
+		return nil, nil
+	}
+	reason := "the tools skill " + skills[0] + " granted ended with the user's last message; " +
+		"read the skill again with the " + agentskill.ToolName + " tool, then make this call again"
+	observe(ctx, agentpolicy.Verdict{RunID: info.RunID, Turn: info.Turn, CallID: info.Call.CallID,
+		Tool: info.Call.Name, Action: agentturn.Block, Reason: reason, By: agentpolicy.ByPolicy})
+	return &agentturn.ToolDecision{Action: agentturn.Block, By: agentpolicy.ByPolicy, Reason: reason}, nil
+}
+
+// engineMayAllow: the engine may allow, or deny, the call on its own, as
+// far as its exported state says, so the call is left to it.
+engineMayAllow := func(ctx context.Context, info agentturn.ToolCallInfo, tools []string) bool {
+	names := func(list []agentpolicy.Rule) bool { /* some rule's MatchesTool is true for some tool */ }
+	p := engine.Policy()
+	asked := names(p.Ask)
+	if names(p.Deny) || names(p.Allow) {
+		return true
+	}
+	for _, set := range engine.Grants() {
+		if names(set.Allow) || names(set.Deny) {
+			return true
+		}
+		asked = asked || names(set.Ask)
+	}
+	if action, _ := p.Default.Action(); action == agentturn.Allow && !asked {
+		return true
+	}
+	confined, _ := agenttool.ConfinedBy(ctx, info.Tool, info.Args)
+	return confined
 }
 cfg.BeforeToolCall = agentturn.ChainBeforeToolCall(keepSaveBase, grantGuard, engine.BeforeToolCall())
 ```
 
-Both decide nothing, so they go first, ahead of whatever may hold or
-allow the call: `keepSaveBase` keeps the base for any holder, and
+Both go first, ahead of whatever may hold or allow the call:
+`keepSaveBase` decides nothing and keeps the base for any holder, and
 `grantGuard` revokes before the engine decides with the grants in
-force. `grantGuard` is under "What the kit does" below.
+force. `grantGuard` decides nothing either, except in one case under
+`WithSkillGrantScope`: a call that every rule of an ended grant would
+have allowed, and that the engine cannot allow on its own, is blocked
+with a reason the model reads, naming the skill and the tool that reads
+it again. The engine would defer it to an ask rule or its default, and
+the refusal the model read then, a reviewer's, said nothing of the
+skill; the note the turn began with is several items up, and a model
+refused acts on the refusal in front of it. The engine has no
+side-effect-free evaluation to ask whether it would allow, so the test
+is conservative, over `Engine.Policy()` and `Engine.Grants()`: a deny
+rule naming any of the call's tools leaves the call to the engine, so
+the deny's reason stands; so does an allow rule of the policy or of any
+grant in force, a default that allows with no ask rule naming the
+tools, and a tool that says it runs confined, which a bare ask rule
+lets past. A hook the product folded into the engine is not consulted
+first. The refusal is recorded as a verdict, since the engine never saw
+the call, and is not reported to `WithSkillGrantReport`. The
+conversation test in `grantGuard` is under "What the kit does" below.
 
 The product's hooks go into the engine rather than after it
 (agentpolicy v0.0.7), so a hook that asks about a call holds its
@@ -685,8 +764,42 @@ the context passes it in `yours`.
 ## `BeforeTurn`
 
 ```go
+// userMarkOf is the user message items are under: how many user
+// messages they hold and a digest of the last one, its role and the JSON
+// of its content; false when they hold none.
+userMarkOf := func(items openresponses.Items) (userMark, bool) {
+	var mark userMark
+	var last *openresponses.Message
+	for _, item := range items {
+		item, _ := agentturn.Unhide(item)
+		if m, ok := item.(*openresponses.Message); ok && m.Role == openresponses.RoleUser {
+			mark.n++
+			last = m
+		}
+	}
+	if last == nil {
+		return userMark{}, false
+	}
+	content, _ := json.Marshal(last.Content)
+	sum := sha256.Sum256(append([]byte(string(last.Role)+"\x00"), content...))
+	return userMark{n: mark.n, digest: hex.EncodeToString(sum[:])}, true
+}
+
 revokeOnUserMessage := func(ctx context.Context, info agentturn.TurnStartInfo) (openresponses.Items, error) {
-	if !newUserMessage(info.Transcript) || !owned || shared || conversation(ctx) != owner {
+	mark, marked := userMarkOf(info.Transcript)
+	if marked {
+		marks[info.RunID] = mark // what a grant made in this run is bound to; a bounded map
+	}
+	if !owned || shared || conversation(ctx) != owner {
+		return nil, nil
+	}
+	stale := false // a grant was made under an earlier user message
+	for _, lg := range live {
+		if lg.bound && (mark.n > lg.under.n || mark.digest != lg.under.digest) {
+			stale = true
+		}
+	}
+	if !newUserMessage(info.Transcript) && !(marked && stale) {
 		return nil, nil
 	}
 	ended := live // the grants in force, by skill, with the rules the engine took
@@ -694,6 +807,9 @@ revokeOnUserMessage := func(ctx context.Context, info agentturn.TurnStartInfo) (
 		engine.Revoke(ctx, name)
 	}
 	live = nil
+	for _, lg := range ended {
+		endedBy[lg.source] = lg // for grantGuard, until the skill is read again
+	}
 	if len(ended) == 0 {
 		return nil, nil
 	}
@@ -729,12 +845,33 @@ This is `WithSkillGrantScope`, and `kit.RevokeSkillGrants(ctx)` is the
 loop in it. The note is a fact on the transcript, so the record holds
 it: a model with the skill's text above from the message before goes
 straight to the tool, and without it the call is refused as an
-ordinary ask with no word of the grant that ended. It runs on every turn, not only the first: a follow-up
-continues the run it joins and a steer arrives between turns, and
-either is a new message that must end the last request's grant. A
-`Resume`'s first turn ends with the answered calls' outputs, so an
-approval keeps the grant. A message in a conversation the grants do not
-belong to revokes nothing, since nothing was granted there.
+ordinary ask with no word of the grant that ended; `grantGuard` above
+refuses that call with the same word. It runs on every turn, not only
+the first: a follow-up continues the run it joins and a steer arrives
+between turns, and either is a new message that must end the last
+request's grant. A `Resume`'s first turn ends with the answered calls'
+outputs, so an approval keeps the grant. A message in a conversation
+the grants do not belong to revokes nothing, since nothing was granted
+there.
+
+The mark is what binds a grant to a message. The skill tool's wrapper,
+after `engine.GrantSet`, keeps `live[source] = liveGrant{skill, rules,
+under: marks[agentturn.RunIDFromContext(ctx)], bound: ok}`: the mark
+the hook kept for the run the read was made in, which is the same ID
+`TurnStartInfo.RunID` carries, and no mark for a read made in no run,
+which the tail test alone then ends. A replayed grant, `New`'s or
+`Kit.RegrantSkills`', is bound to `userMarkOf` over the `ItemEntry`
+items of the session's path, which is the mark the transcript
+`session.Transcript` seeds the agent with starts under, so the first
+turn after a restart does not end what the restart granted again. The
+tail test alone missed a message another agent's run received: the
+kit's agent hands the conversation to another kit's, that agent takes
+the user's next message and hands back, and the kit's first turn opens
+on the transfer's output. It also missed a steer delivered before an
+output, which `TurnStartInfo` does not report. Both are one more user
+message, so the count ends them. A compaction folds older messages
+away and keeps the last, so the count falls and the digest holds, and
+nothing ends; the message after it changes the digest.
 
 ## What the kit does that no line here covers
 

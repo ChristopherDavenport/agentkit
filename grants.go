@@ -148,6 +148,13 @@ type skillGrants struct {
 	// conv names the conversation a run on the context belongs to: the
 	// session its recorder writes, or "" for a run recorded nowhere.
 	conv func(context.Context) string
+	// mark is the user message a grant made under the context is bound
+	// to, Kit.markFor, and false for a grant bound to none.
+	mark func(context.Context) (userMark, bool)
+	// matchers are WithPolicy's, which is how guard reads a call's
+	// subjects and matches an ended rule's specifier against them; nil
+	// under WithEngine, where only a bare rule matches.
+	matchers map[string]agentpolicy.ToolMatcher
 	// scoped is WithSkillGrantScope.
 	scoped bool
 
@@ -164,10 +171,13 @@ type skillGrants struct {
 	// conversation, and tripBy, the conversation of that call. A name
 	// stays in sources once granted: revoking one the engine no longer
 	// holds is a no-op. live is the grants in force, by source, which a
-	// revocation clears, for the note the scope gives the model.
+	// revocation clears, for the note the scope gives the model. ended is
+	// the grants the scope's last revocations ended, by source, newest
+	// kept, which guard refuses a call by until the skill is read again.
 	mu       sync.Mutex
 	sources  map[string]bool
 	live     map[string]liveGrant
+	ended    map[string]liveGrant
 	owner    string
 	ownerRec *session.Recorder
 	bound    bool
@@ -175,11 +185,47 @@ type skillGrants struct {
 	tripBy   string
 }
 
-// liveGrant is a grant in force: the skill's listed name and the rules
-// the engine took.
+// liveGrant is a grant in force: the skill's listed name, the rules the
+// engine took and, when bound is set, the user message it was made
+// under, which the scope ends it after.
 type liveGrant struct {
 	skill string
 	rules []agentpolicy.Rule
+	under userMark
+	bound bool
+}
+
+// stale reports whether a live grant was made under a user message
+// earlier than the one a transcript with mark now is under.
+func (g *skillGrants) stale(now userMark) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, lg := range g.live {
+		if lg.bound && lg.under.stale(now) {
+			return true
+		}
+	}
+	return false
+}
+
+// keepEnded remembers the grants the scope ended, for guard.
+func (g *skillGrants) keepEnded(ended []liveGrant) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.ended == nil {
+		g.ended = map[string]liveGrant{}
+	}
+	for _, lg := range ended {
+		g.ended[g.sourceName(lg)] = lg
+	}
+}
+
+// sourceName is the name of the source a live grant was made under.
+func (g *skillGrants) sourceName(lg liveGrant) string {
+	if sk, ok := g.cat().Lookup(lg.skill); ok {
+		return g.sourceOf(sk).Name
+	}
+	return lg.skill
 }
 
 // claim reports whether grants may be made for the conversation of a run
@@ -205,17 +251,21 @@ func (g *skillGrants) owns(ctx context.Context) bool {
 }
 
 // guard is the BeforeToolCall hook the kit puts ahead of the engine under
-// WithSkillGrants, and decides nothing: the first call it sees in a
-// conversation the grants do not belong to revokes every grant, in the
-// owner's session, before the engine decides that call, and stops the
-// kit granting. [ErrSkillGrantConversation] says why.
-func (g *skillGrants) guard(ctx context.Context, _ agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+// WithSkillGrants. The first call it sees in a conversation the grants do
+// not belong to revokes every grant, in the owner's session, before the
+// engine decides that call, and stops the kit granting;
+// [ErrSkillGrantConversation] says why. Under WithSkillGrantScope, in
+// the owner's conversation, it blocks a call that only a grant the
+// scope ended would have allowed, with a reason that names the skill
+// and says to read it again, [blockEnded]; every other call it leaves to
+// the engine.
+func (g *skillGrants) guard(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
 	conv := g.conv(ctx)
 	g.mu.Lock()
 	trip := g.bound && !g.shared && g.owner != conv
 	g.mu.Unlock()
 	if !trip {
-		return nil, nil
+		return g.blockEnded(ctx, info)
 	}
 	g.gmu.Lock()
 	defer g.gmu.Unlock()
@@ -238,6 +288,147 @@ func (g *skillGrants) guard(ctx context.Context, _ agentturn.ToolCallInfo) (*age
 	g.revoke(octx)
 	g.tell(SkillGrant{Err: fmt.Errorf("%w: the kit decided a call in session %q, so it revoked the grants of session %q and grants nothing after", ErrSkillGrantConversation, conv, owner)})
 	return nil, nil
+}
+
+// blockEnded is the scope's refusal: a call that every rule of a grant
+// the scope ended would have allowed, and that the engine cannot allow
+// on its own, is blocked ahead of the engine with a reason the model
+// reads, naming the skill and the tool that reads it again. The engine
+// would defer the call to an ask rule or its default, and what the model
+// read then was a reviewer's refusal with no word of the skill; the
+// turn-start note is several items up and a model refused acts on the
+// refusal in front of it.
+//
+// A call is allowed by an ended grant when each of its subjects, the
+// tool's [agentpolicy.Subjects] split of it under WithPolicy's matchers
+// or the call itself, is covered by a rule of an ended grant: the rule
+// names the subject's tool and is bare or its specifier matches the
+// subject under the tool's matcher. Without the matchers, under
+// WithEngine, only a bare rule covers.
+//
+// The engine's own decision is not evaluated, since the engine has no
+// side-effect-free evaluation to ask, so the test is conservative, over
+// its exported state: the call passes to the engine untouched when a
+// deny rule names any of its tools, since the deny's reason must stand;
+// when an allow rule of the policy or of any grant in force names one;
+// when the default allows and no ask rule names one; or when the call's
+// tool says it runs confined, which lets it past a bare ask rule. A hook
+// the product folded into the engine is not consulted, so a call it
+// would have allowed is refused here first.
+func (g *skillGrants) blockEnded(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+	if info.Call == nil {
+		return nil, nil
+	}
+	conv := g.conv(ctx)
+	g.mu.Lock()
+	owned := g.scoped && g.bound && !g.shared && g.owner == conv && len(g.ended) > 0
+	names := make([]string, 0, len(g.ended))
+	for name := range g.ended {
+		names = append(names, name)
+	}
+	ended := make([]liveGrant, 0, len(names))
+	sort.Strings(names)
+	for _, name := range names {
+		ended = append(ended, g.ended[name])
+	}
+	g.mu.Unlock()
+	if !owned {
+		return nil, nil
+	}
+	args := info.Args
+	if len(args) == 0 {
+		args = json.RawMessage("{}")
+	}
+	subjects := []agentpolicy.Subject{{Args: args}}
+	if m, ok := g.matchers[info.Call.Name]; ok && m.Subjects != nil {
+		split, err := m.Subjects(args)
+		if err != nil || len(split) == 0 {
+			return nil, nil // the engine fails it closed
+		}
+		subjects = split
+	}
+	var skills, tools []string
+	for _, s := range subjects {
+		tool := s.Tool
+		if tool == "" {
+			tool = info.Call.Name
+		}
+		if !slices.Contains(tools, tool) {
+			tools = append(tools, tool)
+		}
+		covered := false
+		for _, lg := range ended {
+			for _, r := range lg.rules {
+				if !r.MatchesTool(tool) {
+					continue
+				}
+				if _, carve := r.CarveOut(); carve {
+					continue
+				}
+				if m := g.matchers[tool].Match; r.Bare() || m != nil && m(r.Spec, s.Args) {
+					covered = true
+					if !slices.Contains(skills, lg.skill) {
+						skills = append(skills, lg.skill)
+					}
+					break
+				}
+			}
+			if covered {
+				break
+			}
+		}
+		if !covered {
+			return nil, nil
+		}
+	}
+	if g.engineMayAllow(ctx, info, tools, args) {
+		return nil, nil
+	}
+	reason := "the tools skill " + skills[0] + " granted"
+	if len(skills) > 1 {
+		reason = "the tools skills " + strings.Join(skills, " and ") + " granted"
+	}
+	reason += " ended with the user's last message; read the skill again with the " + agentskill.ToolName + " tool, then make this call again"
+	if g.observe != nil {
+		g.observe(ctx, agentpolicy.Verdict{RunID: info.RunID, Turn: info.Turn, CallID: info.Call.CallID, Tool: info.Call.Name, Action: agentturn.Block, Reason: reason, By: agentpolicy.ByPolicy})
+	}
+	return &agentturn.ToolDecision{Action: agentturn.Block, By: agentpolicy.ByPolicy, Reason: reason}, nil
+}
+
+// engineMayAllow reports, from the engine's exported state, whether the
+// engine may allow or deny a call over tools on its own, in which case
+// the kit leaves the call to it; see blockEnded.
+func (g *skillGrants) engineMayAllow(ctx context.Context, info agentturn.ToolCallInfo, tools []string, args json.RawMessage) bool {
+	names := func(list []agentpolicy.Rule) bool {
+		for _, r := range list {
+			for _, tool := range tools {
+				if r.MatchesTool(tool) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	p := g.engine.Policy()
+	if names(p.Deny) || names(p.Allow) {
+		return true
+	}
+	asked := names(p.Ask)
+	for _, set := range g.engine.Grants() {
+		if names(set.Allow) || names(set.Deny) {
+			return true
+		}
+		asked = asked || names(set.Ask)
+	}
+	if action, _ := p.Default.Action(); action == agentturn.Allow && !asked {
+		return true
+	}
+	if info.Tool != nil {
+		if ok, _ := agenttool.ConfinedBy(ctx, info.Tool, args); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // wrap returns the catalogue's tool, or whatever stands in for it,
@@ -347,14 +538,21 @@ func (g *skillGrants) grant(ctx context.Context, sk *agentskill.Skill, out Skill
 		g.sources = map[string]bool{}
 	}
 	g.sources[set.Source.Name] = true
+	// The skill is read again, so a refusal by its ended grant is over.
+	delete(g.ended, set.Source.Name)
 	g.mu.Unlock()
 	out.Granted, out.Refused = g.engine.GrantSet(ctx, set)
+	var mark userMark
+	bound := false
+	if g.mark != nil {
+		mark, bound = g.mark(ctx)
+	}
 	g.mu.Lock()
 	if g.live == nil {
 		g.live = map[string]liveGrant{}
 	}
 	if len(out.Granted) > 0 {
-		g.live[set.Source.Name] = liveGrant{skill: sk.ListedName(), rules: out.Granted}
+		g.live[set.Source.Name] = liveGrant{skill: sk.ListedName(), rules: out.Granted, under: mark, bound: bound}
 	} else {
 		delete(g.live, set.Source.Name)
 	}
@@ -408,6 +606,12 @@ func (g *skillGrants) grant(ctx context.Context, sk *agentskill.Skill, out Skill
 // function that renames its sources between releases loses the match.
 func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, scoped bool) {
 	path := sess.Path(sess.Leaf())
+	// A replayed grant is bound to the user message the path ends under,
+	// which an agent seeded from the path starts under too, so the first
+	// turn after the restart does not end it.
+	if mark, ok := pathMark(path); ok {
+		ctx = context.WithValue(ctx, markKey{}, mark)
+	}
 	from := 0
 	if scoped {
 		for i := len(path) - 1; i >= 0; i-- {
