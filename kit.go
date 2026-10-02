@@ -163,13 +163,13 @@ type Kit struct {
 	// rendered is each run's last render, keyed by the run's ID, which is
 	// what memory_save is based on for a call in that run: the block its
 	// model composed from, not whichever run rendered last. saveBase is
-	// the render a memory_save call was composed from, keyed by the call's
+	// the render a memory write was composed from, keyed by the call's
 	// ID, kept by the kit's BeforeToolCall hook when the call is decided,
-	// so a save held for approval, by any engine or hook, and run by a
+	// so a write held for approval, by any engine or hook, and run by a
 	// Resume, a run of its own that has not rendered, is still based on
-	// it.
+	// it, and still refused when the budget had dropped the block.
 	rendered bounded[memoryRender]
-	saveBase bounded[agentmemory.Manifest]
+	saveBase bounded[memoryRender]
 	// turnMarks is the user message each run's last turn opened under,
 	// keyed by the run's ID and kept by revokeOnUserMessage, which is what
 	// a skill grant made in that run is bound to; see userMark.
@@ -918,26 +918,65 @@ func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
 	return tools, nil
 }
 
-// refuseWhenDropped refuses a memory write in a run whose last render
-// the budget dropped, or, outside any run, when the last render was
-// dropped. The request did not offer the tool, so only a model that
-// calls it anyway, or a run that never rendered, reaches this; a run
-// with no render of its own, a Resume running a held call, is let
-// through to the base saveAsRendered finds.
+// refuseWhenDropped refuses a memory write composed from a render the
+// budget dropped, or, outside any run, when the last render was dropped.
+// The request did not offer the tool, so only a model that calls it
+// anyway reaches this. The render read is, in the order [saveAsRendered]
+// takes its base: the one kept for the call when it was decided,
+// [Kit.keepSaveBase], which is how a write held for approval and run by
+// a Resume, a run with no render of its own, is refused as it would have
+// been outright; the render of the call's run; and, after a restart or
+// once the bounded maps have dropped the run, the manifest in force at
+// the call on the run's session's path, [Kit.manifestAtCall], refused
+// when its shape is a dropped render's, [droppedRender]. A manifest the
+// path cannot attribute to the call's run, or whose shape does not say,
+// is let through to the base saveAsRendered finds, or refuses for.
+//
+// The kept render is consumed here for memory_patch and memory_forget,
+// and for a memory_save refused here, since none of them reaches
+// saveAsRendered, which consumes the one it bases a save on.
 func (k *Kit) refuseWhenDropped(t agenttool.Tool) agenttool.Tool {
+	save := t.Name() == agentmemory.SaveTool
 	return agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+		run := agentturn.RunIDFromContext(ctx)
+		key := saveKey(ctx, call.ID)
 		k.mu.Lock()
-		dropped := k.memDropped
-		if run := agentturn.RunIDFromContext(ctx); run != "" {
-			r, ok := k.rendered.get(run)
-			dropped = ok && r.dropped
+		r, kept := k.saveBase.get(key)
+		known := kept
+		if !known && run != "" {
+			r, known = k.rendered.get(run)
+		}
+		dropped := known && r.dropped
+		if run == "" {
+			dropped, known = k.memDropped, true
+		}
+		if kept && (!save || dropped) {
+			k.saveBase.delete(key)
 		}
 		k.mu.Unlock()
+		if !known {
+			man, ok := k.manifestAtCall(ctx, call.ID)
+			dropped = ok && droppedRender(man)
+		}
 		if dropped {
 			return agenttool.Result{}, errMemoryDropped
 		}
 		return t.Execute(ctx, call)
 	})
+}
+
+// droppedRender reports whether m is the manifest [memoryPart] makes
+// for a render the budget dropped: no entry shown, and among the omitted
+// one with no reason, an entry the block held before the drop moved it
+// there. A block that fit its floor and no entry shows a block and omits
+// every entry with [agentmemory.OmitBudget], so it is not one. A drop
+// whose bounded render had already omitted every entry that way, and a
+// drop of an empty store, leave the same shape as those, and are not
+// told apart from them: a write composed from such a render is refused
+// in the process that rendered it, which kept the flag, and after a
+// restart is based on the manifest at the call, which shows no entry.
+func droppedRender(m agentmemory.Manifest) bool {
+	return len(m.Entries) == 0 && slices.ContainsFunc(m.Omitted, func(e agentmemory.ManifestEntry) bool { return e.Reason == "" })
 }
 
 // saveAsRendered runs a memory_save call against a memory_save based on
@@ -963,14 +1002,13 @@ func (k *Kit) saveAsRendered(t agenttool.Tool, based func(func() agentmemory.Man
 		run := agentturn.RunIDFromContext(ctx)
 		k.mu.Lock()
 		key := saveKey(ctx, call.ID)
-		man, ok := k.saveBase.get(key)
+		r, ok := k.saveBase.get(key)
 		if ok {
 			k.saveBase.delete(key)
 		} else {
-			var r memoryRender
 			r, ok = k.rendered.get(run)
-			man = r.man
 		}
+		man := r.man
 		k.mu.Unlock()
 		if !ok {
 			man, ok = k.manifestAtCall(ctx, call.ID)
@@ -1727,15 +1765,17 @@ func (k *Kit) observeVerdicts(s *settings, guards bool) func(context.Context, ag
 }
 
 // keepSaveBase is the BeforeToolCall hook the kit puts first whenever
-// memory is configured: for a memory_save call decided in a run that
-// rendered, it keeps that run's render as the call's base, and decides
-// nothing. Whoever then holds the call, the kit's engine, one the product
-// built, or a hook of the product's, the base is kept for the Resume that
-// runs it. A Resume decides a call again before any render, and that
+// memory is configured: for a memory write, one of [memoryWrites],
+// decided in a run that rendered, it keeps that run's render, the
+// manifest and whether the budget dropped the block, under the call, and
+// decides nothing. Whoever then holds the call, the kit's engine, one the
+// product built, or a hook of the product's, the render is kept for the
+// Resume that runs it: a save's base, and the drop that refuses any of
+// the three. A Resume decides a call again before any render, and that
 // decision keeps nothing, so the render the held call was decided under
 // stands.
 func (k *Kit) keepSaveBase(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
-	if info.Call == nil || info.Call.Name != agentmemory.SaveTool || info.Call.CallID == "" {
+	if info.Call == nil || !memoryWrites[info.Call.Name] || info.Call.CallID == "" {
 		return nil, nil
 	}
 	run := info.RunID
@@ -1745,7 +1785,7 @@ func (k *Kit) keepSaveBase(ctx context.Context, info agentturn.ToolCallInfo) (*a
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if r, ok := k.rendered.get(run); ok {
-		k.saveBase.put(saveKey(ctx, info.Call.CallID), r.man)
+		k.saveBase.put(saveKey(ctx, info.Call.CallID), r)
 	}
 	return nil, nil
 }

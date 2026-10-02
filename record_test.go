@@ -1684,8 +1684,11 @@ func TestAHeldWriteInARunWhoseBlockWasDroppedIsRefused(t *testing.T) {
 					t.Fatal(err)
 				}
 				got, err := store.Get(t.Context(), "user", "go-version")
-				if err != nil || got.Content != content {
-					t.Fatalf("after the approved %s the entry is %+v, %v; want it untouched, the model was shown no block", name, got, err)
+				if err != nil {
+					t.Fatalf("after the approved %s the entry is gone, %v; want it untouched, the model was shown no block", name, err)
+				}
+				if got.Content != content {
+					t.Fatalf("after the approved %s the entry holds %.40q; want it untouched, the model was shown no block", name, got.Content)
 				}
 				if out := lastToolOutput(model); !strings.Contains(out, "memory cannot be changed") {
 					t.Fatalf("the approved %s was told %q, want the refusal", name, out)

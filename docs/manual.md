@@ -145,7 +145,7 @@ to a memory block that is sent, since `WithMemory` offers
 `agentmemory.Tools`; a block the budget drops takes it along, and the
 writes with it: the request that block was dropped from is not offered
 `memory_save`, `memory_patch` or `memory_forget`, and the run refuses
-them (below).
+them, outright or when a held one is approved (below).
 
 Under `WithInstructionBudget`, the layers that take a bound are given
 one: `agentsmd.Options.Budget` and `agentmemory.WithMaxTotalBytes`, in
@@ -598,12 +598,14 @@ engine, err := agentpolicy.Build(policy, matchers,
 	agentpolicy.WithHooks(yours...), // WithBeforeToolCall
 )
 
-// keepSaveBase keeps a memory_save call's base for the Resume that may
-// run it, and decides nothing (WithMemory).
+// keepSaveBase keeps a memory write's render, the manifest and whether
+// the budget dropped the block, for the Resume that may run it, and
+// decides nothing (WithMemory).
 keepSaveBase := func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
-	if info.Call.Name == agentmemory.SaveTool {
+	switch info.Call.Name {
+	case agentmemory.SaveTool, agentmemory.PatchTool, agentmemory.ForgetTool:
 		if r, ok := rendered[info.RunID]; ok {
-			saveBase[sessionID(ctx)+"\x00"+info.Call.CallID] = r.man
+			saveBase[sessionID(ctx)+"\x00"+info.Call.CallID] = r
 		}
 	}
 	return nil, nil
@@ -691,7 +693,7 @@ cfg.BeforeToolCall = agentturn.ChainBeforeToolCall(keepSaveBase, grantGuard, eng
 ```
 
 Both go first, ahead of whatever may hold or allow the call:
-`keepSaveBase` decides nothing and keeps the base for any holder, and
+`keepSaveBase` decides nothing and keeps the render for any holder, and
 `grantGuard` revokes before the engine decides with the grants in
 force. `grantGuard` decides nothing either, except in one case under
 `WithSkillGrantScope`: a call that every rule of an ended grant would
@@ -711,6 +713,23 @@ lets past. A hook the product folded into the engine is not consulted
 first. The refusal is recorded as a verdict, since the engine never saw
 the call, and is not reported to `WithSkillGrantReport`. The
 conversation test in `grantGuard` is under "What the kit does" below.
+
+The memory tools the kit offers are wrapped with `agenttool.Wrap`
+around what `agentmemory.Tools` returns. The wrapper reads the kept
+render first, then the render of the call's run, then, after a restart
+or once the kit has dropped the run, the manifest in force at the call
+on the run's session's path. `memory_save` runs against a save built
+with `agentmemory.WithRendered` over that manifest, so a held save keeps
+its base across the Resume, and is refused when none is known rather
+than based on another run's render. All three writes are refused when
+the render says the budget dropped the block, whether the model called
+them outright or a person approved a held one: the kept render carries
+the flag, and the manifest recorded at the call carries its shape, no
+entry shown and an entry the block held listed among the omitted with
+no reason. A drop whose bounded render had already omitted every entry
+under the budget, or of an empty store, leaves the shape of a block that
+fit its floor and no entry, and is not told apart from it after a
+restart.
 
 The product's hooks go into the engine rather than after it
 (agentpolicy v0.0.7), so a hook that asks about a call holds its
