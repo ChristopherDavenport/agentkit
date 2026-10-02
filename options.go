@@ -432,12 +432,17 @@ func WithSkillGrantScope() Option {
 // WithSkillGrantReport is told what the engine did with each skill's
 // allowed-tools: what it granted, what it refused and why, a skill
 // whose allowed-tools would not parse, a read the kit would not grant
-// because its grants belong to another conversation, and, with
-// [SkillGrant.Replayed] set, what a restart granted again and the read
-// it will not grant again, with Err wrapping [ErrSkillGrantChanged]
-// when the skill changed since the read. A grant widens what the agent
-// may do, so a front that shows the user the policy in force wants to
-// see it happen.
+// because its grants belong to another conversation, a read the
+// catalogue's tool refused because the skill file is gone, renamed or
+// no longer parses, with Err wrapping [agentskill.ErrSkillChanged],
+// and, with [SkillGrant.Replayed] set, what a restart granted again and
+// the read it will not grant again, with Err wrapping
+// [ErrSkillGrantChanged] when the skill changed since the read. A grant
+// widens what the agent may do, so a front that shows the user the
+// policy in force wants to see it happen; and a front reloads the
+// skills, [Kit.ReloadSkills], on a report wrapping
+// agentskill.ErrSkillChanged or with [SkillGrant.FrontmatterChanged]
+// set, since the model is told to discover the skills again and cannot.
 func WithSkillGrantReport(fn func(SkillGrant)) Option {
 	return func(s *settings) { s.skillGrant = fn }
 }

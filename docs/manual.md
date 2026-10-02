@@ -763,7 +763,22 @@ Nine things, all outside `agentturn.Config`:
   around the catalogue's tool through `agenttool.Wrap`, and
   `Kit.RevokeSkillGrants` calls `agentpolicy.Engine.Revoke` for each
   source it granted under. All four calls are exported; the kit is only
-  the place they meet.
+  the place they meet. A read the tool refuses with
+  `agentskill.ErrSkillChanged`, the skill file gone, renamed or no
+  longer parsing since discovery, is reported too, by the name the
+  call's `name` argument gave, with `Err` wrapping that error; the
+  error goes to the model as before, the earlier read's grant stands,
+  and the front answers with `Kit.ReloadSkills`, since the model is told
+  to discover the skills again and cannot:
+
+  ```go
+  res, err := tool.Execute(ctx, call)
+  if errors.Is(err, agentskill.ErrSkillChanged) {
+  	var args struct{ Name string `json:"name"` }
+  	_ = json.Unmarshal(call.Args, &args)
+  	report(agentkit.SkillGrant{Skill: args.Name, Err: err}) // Location from cat.Lookup(args.Name)
+  }
+  ```
 - `WithSession` and `WithResumedSession` open the recorder with
   `session.WithInstructionsParts(kit.PartsFor)`, so its config entries
   carry `instructions_parts` and `instructions_omitted`. `PartsFor` is

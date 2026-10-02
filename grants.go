@@ -41,7 +41,10 @@ type SkillGrant struct {
 	// Err is set when nothing was granted: because the skill's
 	// allowed-tools would not parse; because the read was made in a
 	// conversation the kit's grants do not belong to,
-	// [ErrSkillGrantConversation]; or, with Replayed set, because a
+	// [ErrSkillGrantConversation]; because the catalogue's tool refused
+	// the read, the skill file gone, renamed or unparseable since
+	// discovery, [agentskill.ErrSkillChanged], a report a front reloads
+	// on with [Kit.ReloadSkills]; or, with Replayed set, because a
 	// restart would not grant a read again: the skill changed since the
 	// read, [ErrSkillGrantChanged], or none of the rules the session
 	// recorded for the read is among the skill's now. A report with no
@@ -223,6 +226,9 @@ func (g *skillGrants) wrap(t agenttool.Tool) agenttool.Tool {
 	return agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
 		res, err := t.Execute(ctx, call)
 		if err != nil {
+			if errors.Is(err, agentskill.ErrSkillChanged) {
+				g.changed(call, err)
+			}
 			return res, err
 		}
 		read, ok := res.Details.(agentskill.Read)
@@ -253,6 +259,27 @@ func (g *skillGrants) wrap(t agenttool.Tool) agenttool.Tool {
 		g.grant(ctx, sk, out, rules)
 		return res, nil
 	})
+}
+
+// changed reports a read the catalogue's tool refused because the skill
+// file is gone, renamed or no longer parses since discovery,
+// [agentskill.ErrSkillChanged]. The model is told to discover the skills
+// again, which it cannot; the product can, through [Kit.ReloadSkills],
+// so it hears the same. The grant of an earlier read stands, as
+// ReloadSkills' doc says grants do. The name is the call's, parsed as
+// the tool parses it, since no Read came back; a name the catalogue no
+// longer lists is reported with no Location.
+func (g *skillGrants) changed(call agenttool.Call, err error) {
+	var args struct {
+		Name string `json:"name"`
+	}
+	_ = json.Unmarshal(call.Args, &args)
+	out := SkillGrant{Skill: args.Name, Err: fmt.Errorf("agentkit: skill %s: read refused: %w", args.Name, err)}
+	if sk, ok := g.cat().Lookup(args.Name); ok {
+		out.Skill, out.Location = sk.ListedName(), sk.Location
+		out.Err = fmt.Errorf("agentkit: skill %s: read refused: %w", sk.ListedName(), err)
+	}
+	g.tell(out)
 }
 
 // refuse reports, and records in the reading conversation's session, a

@@ -2142,7 +2142,9 @@ const earlierConfigs = 8
 // the body the catalogue's tool serves, the skill's file list and each
 // file's size, and the frontmatter, so an edit the reload picked up with
 // no read after it, or a file the skill wrote into its own directory,
-// ends the grant at the next restart.
+// ends the grant at the next restart. A read refused because the skill
+// file is gone, renamed or no longer parses is reported with
+// agentskill.ErrSkillChanged, and this is the call that answers it.
 //
 // It returns an error, and changes nothing, when discovery fails, when
 // New found no skill source and so offers no skill tool, and when the

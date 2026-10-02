@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -1384,5 +1385,90 @@ func TestARestartReportsAReadItPassesOverBecauseTheSkillChanged(t *testing.T) {
 				t.Fatal("the session has no verdict saying the read was not granted again")
 			}
 		})
+	}
+}
+
+// A read refused with agentskill.ErrSkillChanged, the skill file gone,
+// renamed or unparseable since discovery, told the model to "discover
+// the skills again" and told the product nothing, though the product is
+// the one party that can, through Kit.ReloadSkills. The read is now
+// reported with Err wrapping that error; the model still gets the
+// error, and the grant from the earlier read stands. (#73)
+func TestAReadRefusedBecauseTheSkillChangedIsReported(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "deploy", "Bash(git:*)")
+	var ran []string
+	bash := agenttool.New("Bash", "run a command",
+		func(_ context.Context, in struct {
+			Command string `json:"command"`
+		}) (string, error) {
+			ran = append(ran, in.Command)
+			return "", nil
+		})
+	var reports []agentkit.SkillGrant
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn(agentskill.ToolName, `{"name":"deploy"}`),
+		callTurn("Bash", `{"command":"git status"}`),
+		nil, // the first run's answer
+		callTurnID("call-again", agentskill.ToolName, `{"name":"deploy"}`),
+	}}
+	model.turns[2] = func(e *openresponses.Emitter) error {
+		w, err := e.Message(openresponses.PhaseFinalAnswer)
+		if err != nil {
+			return err
+		}
+		if err := w.Text("deployed"); err != nil {
+			return err
+		}
+		return w.Close()
+	}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(model, "m"),
+		agentkit.WithSkills(skills),
+		agentkit.WithTools(bash),
+		agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{
+			Read:    []string{agentskill.ToolName},
+			Execute: []string{"Bash"},
+		}), map[string]agentpolicy.ToolMatcher{
+			"Bash": {Match: agentpolicy.PrefixMatcher("command")},
+		}),
+		agentkit.WithSkillGrants(trustedSkills),
+		agentkit.WithSkillGrantReport(func(g agentkit.SkillGrant) { reports = append(reports, g) }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	agent := agentturn.New(kit.Config())
+	if end, err := agent.Prompt(t.Context(), openresponses.UserText("deploy")); err != nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("the first run ended %+v, %v; want git status run under the grant", end, err)
+	}
+	if !slices.Equal(ran, []string{"git status"}) || len(reports) != 1 {
+		t.Fatalf("ran %v and reported %+v, want git status under one reported grant", ran, reports)
+	}
+	if err := os.Remove(filepath.Join(skills, "deploy", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("deploy again")); err != nil {
+		t.Fatal(err)
+	}
+	told := false
+	for _, item := range model.requests()[len(model.requests())-1].Input {
+		if out, ok := item.(*openresponses.FunctionCallOutput); ok && strings.Contains(outputText(out), agentskill.ErrSkillChanged.Error()) {
+			told = true
+		}
+	}
+	if !told {
+		t.Fatal("the model was not told the skill changed")
+	}
+	if len(reports) != 2 {
+		t.Fatalf("reports after the refused read = %+v, want the read's and the refusal's", reports)
+	}
+	r := reports[1]
+	if !errors.Is(r.Err, agentskill.ErrSkillChanged) || r.Skill != "deploy" || r.Location == "" || r.Replayed {
+		t.Fatalf("the refused read reported %+v, want Skill, Location and Err wrapping agentskill.ErrSkillChanged", r)
+	}
+	if got := len(kit.Engine().Grants()); got != 1 {
+		t.Fatalf("grants in force after the refused read = %d, want the earlier read's to stand", got)
 	}
 }
