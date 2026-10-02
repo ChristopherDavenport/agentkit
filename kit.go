@@ -1068,9 +1068,16 @@ type manifestFold struct {
 	// valid is false while the last record would not fold, so what is in
 	// force is not known.
 	valid bool
-	// recent are the hashes of the distinct manifests in force, most
-	// recent first, as the fold holds them: the bases a delta may name.
-	recent []string
+	// recent are the distinct manifests in force, most recent first, as
+	// the fold holds them, and hashes their hashes: the bases a delta
+	// may name. The fold does not expose the manifests it holds, so they
+	// are kept again here, for the kit that has no last manifest of its
+	// own in memory, after a restart, to write a delta on one of them.
+	// That is at most ManifestFoldDepth manifests per session the kit
+	// records into, recordedSessions sessions at most, each manifest a
+	// line per entry.
+	recent []agentmemory.Manifest
+	hashes []string
 }
 
 // apply folds the manifest record e.
@@ -1081,21 +1088,27 @@ func (f *manifestFold) apply(e *agentsession.CustomEntry) {
 		return
 	}
 	f.valid = true
-	h := f.fold.Manifest().Hash()
-	f.recent = slices.DeleteFunc(f.recent, func(r string) bool { return r == h })
-	f.recent = slices.Insert(f.recent, 0, h)
+	m := f.fold.Manifest()
+	h := m.Hash()
+	if i := slices.Index(f.hashes, h); i >= 0 {
+		f.recent = slices.Delete(f.recent, i, i+1)
+		f.hashes = slices.Delete(f.hashes, i, i+1)
+	}
+	f.recent = slices.Insert(f.recent, 0, m)
+	f.hashes = slices.Insert(f.hashes, 0, h)
 	if len(f.recent) > agentmemory.ManifestFoldDepth {
 		f.recent = f.recent[:agentmemory.ManifestFoldDepth]
+		f.hashes = f.hashes[:agentmemory.ManifestFoldDepth]
 	}
 }
 
 // inForce is the hash of the manifest in force, and false when nothing
 // is known to be.
 func (f *manifestFold) inForce() (string, bool) {
-	if f.at == "" || !f.valid || len(f.recent) == 0 {
+	if f.at == "" || !f.valid || len(f.hashes) == 0 {
 		return "", false
 	}
-	return f.recent[0], true
+	return f.hashes[0], true
 }
 
 // foldPath brings the fold kept for session sid up to path's end and
@@ -1428,8 +1441,11 @@ func guardParts(ctx context.Context, c guard.Chain, parts []Part) ([]Part, error
 // [agentmemory.Manifest.RecordSince], on what is in force or, when that
 // is smaller, on this kit's own last manifest while the fold still
 // resolves it: after a handoff the manifest in force is the other kit's,
-// and a delta on it would be the whole manifest. Whole only when nothing
-// folds there. When the store cannot open the session the write is
+// and a delta on it would be the whole manifest. A kit with no last
+// manifest in memory for the session, one restarted into the handoff,
+// takes whichever manifest the fold holds gives the smallest record,
+// which is its own last one while that is still among them. Whole only
+// when nothing folds there. When the store cannot open the session the write is
 // whole, and is skipped only while the render has not moved and the last
 // manifest any kit in the process wrote to that session through that
 // recorder is this kit's.
@@ -1473,9 +1489,20 @@ func (k *Kit) record(ctx context.Context, man agentmemory.Manifest) error {
 		// shares nothing with this one, so a delta on it is the whole
 		// manifest. This kit's own last one is a base the fold still
 		// resolves while it is among the last few in force.
-		if ph := prev.man.Hash(); seen && ph != f.recent[0] && slices.Contains(f.recent, ph) {
+		switch ph := prev.man.Hash(); {
+		case seen && ph != f.hashes[0] && slices.Contains(f.hashes, ph):
 			if ns2, own := man.RecordSince(prev.man); len(own) < len(data) {
 				ns, data = ns2, own
+			}
+		case !seen:
+			// A restarted kit has no last manifest in memory, but the
+			// fold may still hold the one it wrote before: whichever
+			// of the manifests in force gives the smallest record, the
+			// most recent on a tie.
+			for _, m := range f.recent[1:] {
+				if ns2, own := man.RecordSince(m); len(own) < len(data) {
+					ns, data = ns2, own
+				}
 			}
 		}
 	}

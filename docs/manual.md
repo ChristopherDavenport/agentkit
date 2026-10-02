@@ -498,9 +498,16 @@ record := func(ctx context.Context, r *session.Recorder, m agentmemory.Manifest)
 	ns, data := m.Record()
 	if folds {
 		ns, data = m.RecordSince(f.Manifest()) // a delta on the one in force
-		if seen && prev.man.Hash() != f.inForce() && f.holds(prev.man.Hash()) {
+		switch {
+		case seen && prev.man.Hash() != f.inForce() && f.holds(prev.man.Hash()):
 			if ns2, own := m.RecordSince(prev.man); len(own) < len(data) {
 				ns, data = ns2, own // after a handoff: a delta on this kit's own last one
+			}
+		case !seen: // a restarted kit: its own last one may be among those the fold holds
+			for _, held := range f.held()[1:] {
+				if ns2, own := m.RecordSince(held); len(own) < len(data) {
+					ns, data = ns2, own
+				}
 			}
 		}
 	}
@@ -514,11 +521,12 @@ record := func(ctx context.Context, r *session.Recorder, m agentmemory.Manifest)
 ```
 
 `fold` is an `agentmemory.ManifestFold` kept per session with the ID of
-the last record it folded and the hashes of the distinct manifests it
-holds in force, the last `agentmemory.ManifestFoldDepth`: `upTo` folds
+the last record it folded and the distinct manifests it holds in force,
+the last `agentmemory.ManifestFoldDepth`, kept again beside the fold
+with their hashes, since the fold does not expose them: `upTo` folds
 the records after that one on the path, or the whole path again when it
 is no longer there, after a `Rebase`; `holds` says whether a delta on a
-manifest resolves.
+manifest resolves, and `held` is the manifests, most recent first.
 
 This is what `WithMemory`, `WithGuards`, `WithVerdictObserver` and
 `WithBeforeModelCall` compose to, and it is the whole of it. The
@@ -547,7 +555,11 @@ this kit's own last manifest while the fold still resolves it: whole
 only where nothing is in force, a new session or a child's. In a
 handoff the manifest in force is the other kit's, which shares nothing
 with this one, and a delta on it was the whole manifest at every
-hand-back. Such a delta is refused by `agentmemory.ApplyManifestRecord`,
+hand-back. A kit restarted into the handoff has no last manifest of its
+own in memory, so it tries every manifest the fold holds and writes the
+smallest record, which is a delta on its own last one while that is
+among them; past `ManifestFoldDepth` other manifests it writes whole, as
+a kit that was never restarted does. Such a delta is refused by `agentmemory.ApplyManifestRecord`,
 so a reader of the session folds with `agentmemory.ManifestFold`
 (agentmemory v0.0.9), as the kit does. The path is read through the
 recorder's store: `Open` on a session a store holds hands back the live
