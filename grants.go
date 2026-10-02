@@ -38,14 +38,16 @@ type SkillGrant struct {
 	// Refused are the rules it would not take, each with the engine's
 	// reason.
 	Refused []agentpolicy.Refusal
-	// Err is set when nothing was granted because the skill's
-	// allowed-tools would not parse, because the read was made in a
+	// Err is set when nothing was granted: because the skill's
+	// allowed-tools would not parse; because the read was made in a
 	// conversation the kit's grants do not belong to,
-	// [ErrSkillGrantConversation], or because a replay found none of the
-	// rules the session recorded for the read among the skill's. A
-	// report with no Skill is the kit's grants ending because it decided
-	// a call in another conversation; its Err wraps
-	// ErrSkillGrantConversation and names both.
+	// [ErrSkillGrantConversation]; or, with Replayed set, because a
+	// restart would not grant a read again: the skill changed since the
+	// read, [ErrSkillGrantChanged], or none of the rules the session
+	// recorded for the read is among the skill's now. A report with no
+	// Skill is the kit's grants ending because it decided a call in
+	// another conversation; its Err wraps ErrSkillGrantConversation and
+	// names both.
 	Err error
 	// Replayed is true for a grant made again from a session's records,
 	// at [New] or by [Kit.RegrantSkills], rather than for a read the
@@ -84,6 +86,17 @@ type SkillGrant struct {
 // name no session and that the kit records nowhere are one conversation
 // to the kit, which cannot tell them apart.
 var ErrSkillGrantConversation = errors.New("agentkit: this kit's skill grants belong to another conversation")
+
+// ErrSkillGrantChanged is the [SkillGrant.Err] of a read a restart will
+// not grant again because the skill is not what the model read: the
+// digest of the instructions the catalogue's tool serves for it now, or
+// of its frontmatter, is not the one the read recorded. The report has
+// [SkillGrant.Replayed] set and [SkillGrant.FrontmatterChanged] says
+// which digest moved; the session records a verdict saying the same.
+// Nothing is granted: a read of the skill grants by the skill as it is
+// now, and a front that shows the user the policy in force shows that
+// the skill changed since they approved it.
+var ErrSkillGrantChanged = errors.New("agentkit: the skill changed since it was read, so its grant was not made again")
 
 // skillGrants is the meeting of a skill's allowed-tools and the policy
 // engine: reading a skill grants that skill's rules.
@@ -316,9 +329,12 @@ func (g *skillGrants) grant(ctx context.Context, sk *agentskill.Skill, out Skill
 // Kit.RevokeSkillGrants or anything else revoked it; the kit records
 // the revocation of a set that held no rules itself, since the engine
 // does not. A record whose name the catalogue now gives a skill at
-// another location is passed over, and so is one whose digest is not
-// what the catalogue's tool serves for the name now: that is not the
-// skill the model read.
+// another location is passed over. One whose digest is not what the
+// catalogue's tool serves for the name now, or whose frontmatter digest
+// is not the skill's, is not the skill the model read: it is left
+// live, so a revocation after it still ends it, and what would have
+// been granted at the end is instead reported with
+// [ErrSkillGrantChanged] and recorded as a verdict in the session.
 //
 // A restart may narrow a grant and never widen it. When the kit built
 // the engine, and so recorded its verdicts, what is granted again is
@@ -361,11 +377,21 @@ func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, s
 		// frontmatter it was granted from and the catalogue's skill has
 		// it still, so its allowed-tools are what the verdicts were about.
 		recorded bool
+		// seen is true when the path holds a verdict naming the source
+		// since its last read record or revocation: the engine observes
+		// one for every rule a GrantSet grants or refuses, so none means
+		// the read's grant was recorded nowhere.
+		seen bool
+		// changed is set when the skill is not what the read recorded,
+		// and frontmatter when it is the frontmatter's digest that moved.
+		changed, frontmatter bool
 	}
 	var granted []live
 	// pending is the rules each source was granted since its last read
-	// record or revocation, which the next read record of it takes.
+	// record or revocation, which the next read record of it takes, and
+	// seen the sources a verdict named since.
 	pending := map[string]map[string]bool{}
+	seen := map[string]bool{}
 	drop := func(source string) {
 		granted = slices.DeleteFunc(granted, func(l live) bool { return l.source == source })
 	}
@@ -386,21 +412,22 @@ func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, s
 			}
 			source := g.sourceOf(sk).Name
 			drop(source)
-			rules := pending[source]
+			l := live{name: read.Name, source: source, rules: pending[source], seen: seen[source], recorded: read.FrontmatterSHA256 != ""}
 			delete(pending, source)
-			if servedSHA(sk) != read.SHA256 {
-				continue
-			}
+			delete(seen, source)
 			// A read recorded before agentskill v0.0.10 has no frontmatter
 			// digest, and the instructions' digest does not cover
 			// allowed-tools.
-			if read.FrontmatterSHA256 != "" && read.FrontmatterSHA256 != sk.FrontmatterSHA256() {
-				continue
+			switch {
+			case servedSHA(sk) != read.SHA256:
+				l.changed = true
+			case read.FrontmatterSHA256 != "" && read.FrontmatterSHA256 != sk.FrontmatterSHA256():
+				l.changed, l.frontmatter = true, true
 			}
-			if g.observe != nil && rules == nil {
-				rules = map[string]bool{}
+			if g.observe != nil && l.rules == nil {
+				l.rules = map[string]bool{}
 			}
-			granted = append(granted, live{name: read.Name, source: source, rules: rules, recorded: read.FrontmatterSHA256 != ""})
+			granted = append(granted, l)
 		case agentpolicy.VerdictNS:
 			var v struct {
 				Action string `json:"action"`
@@ -411,11 +438,15 @@ func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, s
 			if json.Unmarshal(c.Data, &v) != nil {
 				continue
 			}
+			if v.Source != "" {
+				seen[v.Source] = true
+			}
 			switch {
 			case strings.HasPrefix(v.Reason, revokedPrefix):
 				source := strings.TrimPrefix(v.Reason, revokedPrefix)
 				drop(source)
 				delete(pending, source)
+				delete(seen, source)
 			case v.Action == "allow" && v.Rule != "" && strings.HasPrefix(v.Reason, "granted "):
 				if pending[v.Source] == nil {
 					pending[v.Source] = map[string]bool{}
@@ -430,6 +461,21 @@ func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, s
 			continue
 		}
 		out := SkillGrant{Skill: sk.ListedName(), Location: sk.Location, Replayed: true}
+		if l.changed {
+			what := "its instructions or the files in its directory"
+			if l.frontmatter {
+				what = "its frontmatter"
+			}
+			out.FrontmatterChanged = l.frontmatter
+			out.Err = fmt.Errorf("%w: skill %s: %s changed since the read; a read grants by the skill as it is now", ErrSkillGrantChanged, sk.ListedName(), what)
+			if g.observe != nil {
+				// On ctx as it is, not a replay's: the observer passes a
+				// replay over, and this is not a verdict the path holds.
+				g.observe(ctx, agentpolicy.Verdict{Tool: agentskill.ToolName, Action: agentturn.Block, Reason: "not granted again the tools of skill " + sk.ListedName() + ": the skill changed since it was read", By: agentpolicy.ByPolicy})
+			}
+			g.tell(out)
+			continue
+		}
 		rules, err := skillRules(sk)
 		if err != nil {
 			continue

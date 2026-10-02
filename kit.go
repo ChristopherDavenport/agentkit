@@ -2137,7 +2137,12 @@ const earlierConfigs = 8
 //
 // Grants already made stand, by the rules they were made with. A read
 // after the reload grants by the new catalogue's rules, and a restart's
-// replay passes over a read whose skill has changed since.
+// replay passes over a read whose skill has changed since, reporting
+// it with [ErrSkillGrantChanged]: the digest the replay compares covers
+// the body the catalogue's tool serves, the skill's file list and each
+// file's size, and the frontmatter, so an edit the reload picked up with
+// no read after it, or a file the skill wrote into its own directory,
+// ends the grant at the next restart.
 //
 // It returns an error, and changes nothing, when discovery fails, when
 // New found no skill source and so offers no skill tool, and when the

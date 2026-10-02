@@ -1280,3 +1280,109 @@ func TestReloadSkillsFindsASkillWrittenAfterNew(t *testing.T) {
 		t.Fatal("the config before the reload is no longer the kit's")
 	}
 }
+
+// A restart passes over a live read whose skill changed since, which is
+// right, but said nothing: the front saw a Replayed report for every
+// other skill and nothing for the one it lost. Each pass-over is now
+// reported with ErrSkillGrantChanged, FrontmatterChanged saying which
+// digest moved, and the session records a verdict. The served
+// instructions' digest covers the skill's file list and each file's
+// size, so a file that grew by one byte is a change too. (#72)
+func TestARestartReportsAReadItPassesOverBecauseTheSkillChanged(t *testing.T) {
+	body := func(text string) string {
+		return "---\nname: release\ndescription: what release is for\nallowed-tools: Bash(git:*) Bash(make:*)\n---\n\n" + text + "\n"
+	}
+	cases := []struct {
+		name               string
+		change             func(t *testing.T, skills string, kit *agentkit.Kit)
+		changed            bool
+		frontmatterChanged bool
+	}{
+		{"allowed-tools narrowed", func(t *testing.T, skills string, _ *agentkit.Kit) {
+			skillWithTools(t, skills, "release", "Bash(git:*)")
+		}, true, true},
+		{"a file in the skill grew by one byte", func(t *testing.T, skills string, _ *agentkit.Kit) {
+			writeFile(t, filepath.Join(skills, "release", "CHANGELOG.draft"), "notes\n\n")
+		}, true, false},
+		{"edited and reloaded, not read again", func(t *testing.T, skills string, kit *agentkit.Kit) {
+			writeFile(t, filepath.Join(skills, "release", "SKILL.md"), body("do the thing, carefully"))
+			if err := kit.ReloadSkills(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+		}, true, false},
+		{"unchanged", nil, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			skills := filepath.Join(t.TempDir(), "skills")
+			writeFile(t, filepath.Join(skills, "release", "SKILL.md"), body("do the thing"))
+			writeFile(t, filepath.Join(skills, "release", "CHANGELOG.draft"), "notes\n")
+			sessions := agentsession.NewMemoryStore()
+			var reports []agentkit.SkillGrant
+			build := func(model agentturn.Model, sess agentkit.Option) *agentkit.Kit {
+				kit, err := agentkit.New(t.Context(),
+					agentkit.WithModel(model, "m"),
+					agentkit.WithSkills(skills),
+					agentkit.WithPolicy(agentpolicy.FullAuto(agentpolicy.Tools{Read: []string{agentskill.ToolName}}),
+						map[string]agentpolicy.ToolMatcher{"Bash": {Match: agentpolicy.PrefixMatcher("command")}}),
+					agentkit.WithSkillGrants(trustedSkills),
+					agentkit.WithSkillGrantReport(func(g agentkit.SkillGrant) { reports = append(reports, g) }),
+					sess,
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = kit.Close() })
+				return kit
+			}
+			first := build(&scriptModel{turns: []func(*openresponses.Emitter) error{
+				callTurn(agentskill.ToolName, `{"name":"release"}`),
+			}}, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))
+			agent := agentturn.New(first.Config())
+			unsubscribe := first.Attach(agent)
+			if _, err := agent.Prompt(t.Context(), openresponses.UserText("cut the release")); err != nil {
+				t.Fatal(err)
+			}
+			unsubscribe()
+			if len(reports) != 1 || len(reports[0].Granted) != 2 {
+				t.Fatalf("the read reported %+v, want one report granting both rules", reports)
+			}
+			if tc.change != nil {
+				tc.change(t, skills, first)
+			}
+			_ = first.Close()
+
+			reports = nil
+			second := build(&scriptModel{}, agentkit.WithResumedSession(sessions, first.SessionID()))
+			if len(reports) != 1 || !reports[0].Replayed || reports[0].Skill != "release" || reports[0].Location == "" {
+				t.Fatalf("the restart reported %+v, want one report marked Replayed naming the skill", reports)
+			}
+			r := reports[0]
+			grants := second.Engine().Grants()
+			if !tc.changed {
+				if r.Err != nil || len(r.Granted) != 2 || len(grants) != 1 {
+					t.Fatalf("the control restart reported %+v and holds %d set(s), want the grant made again", r, len(grants))
+				}
+				return
+			}
+			if !errors.Is(r.Err, agentkit.ErrSkillGrantChanged) {
+				t.Fatalf("Err = %v, want ErrSkillGrantChanged", r.Err)
+			}
+			if r.FrontmatterChanged != tc.frontmatterChanged {
+				t.Fatalf("FrontmatterChanged = %v, want %v: %v", r.FrontmatterChanged, tc.frontmatterChanged, r.Err)
+			}
+			if len(r.Granted) != 0 || len(r.Refused) != 0 || len(grants) != 0 {
+				t.Fatalf("a changed skill was granted again: report %+v, %d set(s) in force", r, len(grants))
+			}
+			said := false
+			for _, c := range customEntries(openSession(t, sessions, first.SessionID()), agentpolicy.VerdictNS) {
+				if strings.Contains(string(c.Data), "not granted again the tools of skill release") {
+					said = true
+				}
+			}
+			if !said {
+				t.Fatal("the session has no verdict saying the read was not granted again")
+			}
+		})
+	}
+}

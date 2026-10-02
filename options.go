@@ -382,6 +382,18 @@ func WithoutSkillTool() Option {
 // about a grant says what it was built from; a source function does the
 // same by setting Hash.
 //
+// A grant lives in the engine, so [New] over a resumed session and
+// [Kit.RegrantSkills] grant again what the session's reads left in
+// force, and only for a skill that is what the model read: the digest
+// of the instructions the catalogue's tool served, which agentskill
+// ends with the skill's file list and each file's size, and the digest
+// of its frontmatter. So a skill that writes into its own directory, a
+// draft changelog or a log, is not granted again after a restart, nor
+// is one whose allowed-tools were edited or whose body
+// [Kit.ReloadSkills] picked up with no read after; the front hears each
+// through [WithSkillGrantReport], with [ErrSkillGrantChanged], and a
+// read of the skill grants by the skill as it is now.
+//
 // It has no effect without a policy engine, and none without skills,
 // so a product may add it unconditionally and the two behind flags.
 // [WithoutSkillTool] is the one combination [New] refuses: a grant
@@ -421,9 +433,11 @@ func WithSkillGrantScope() Option {
 // allowed-tools: what it granted, what it refused and why, a skill
 // whose allowed-tools would not parse, a read the kit would not grant
 // because its grants belong to another conversation, and, with
-// [SkillGrant.Replayed] set, what a restart granted again. A grant widens what the
-// agent may do, so a front that shows the user the policy in force
-// wants to see it happen.
+// [SkillGrant.Replayed] set, what a restart granted again and the read
+// it will not grant again, with Err wrapping [ErrSkillGrantChanged]
+// when the skill changed since the read. A grant widens what the agent
+// may do, so a front that shows the user the policy in force wants to
+// see it happen.
 func WithSkillGrantReport(fn func(SkillGrant)) Option {
 	return func(s *settings) { s.skillGrant = fn }
 }

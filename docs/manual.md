@@ -840,9 +840,20 @@ Nine things, all outside `agentturn.Config`:
   none, an untrusted skill's or one whose rules were all refused,
   whether the scope or `Kit.RevokeSkillGrants` revoked it. A record
   whose name the catalogue now gives a skill at another `Location` is
-  passed over, and so is one whose `SHA256` is not the digest of
-  `agentskill.Skill.Instructions()` now, or whose `FrontmatterSHA256` is
-  not `Skill.FrontmatterSHA256()`. What is granted again is the rules
+  passed over. One whose `SHA256` is not the digest of
+  `agentskill.Skill.Instructions()` now, which agentskill ends with the
+  skill's file list and each file's size, or whose `FrontmatterSHA256`
+  is not `Skill.FrontmatterSHA256()`, is not the skill the model read:
+  it stays live until a revocation after it, and at the end, instead of
+  a grant, the report is told with `Replayed` set, `FrontmatterChanged`
+  saying which digest moved, and `Err` wrapping
+  `agentkit.ErrSkillGrantChanged`, and the session gets a verdict,
+  through `observe` on the restart's own context, whose reason is `not
+  granted again the tools of skill <name>: the skill changed since it
+  was read`. So a skill that writes into its own directory, or whose
+  `allowed-tools` were narrowed, or whose edit `Kit.ReloadSkills` picked
+  up with no read after, is not granted again after a restart, and the
+  front hears it. What is granted again is the rules
   the `granted <rule> by <source>` verdicts written just before the
   read's record name. When the record carries the frontmatter's digest,
   the skill's `allowed-tools` are as they were, so those rules are
