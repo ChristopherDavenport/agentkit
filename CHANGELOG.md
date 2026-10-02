@@ -29,7 +29,9 @@ The round 8 findings (#66 to #76).
   for every memory write it decides, `memory_patch` and `memory_forget`
   as well as `memory_save`, and the refusal reads it first; after a
   restart, a manifest folded at the call that shows no entry and lists
-  one the block held among the omitted is refused on that. (#69)
+  one the block held among the omitted is refused on that; agentmemory's
+  next release adds `OmitBlock`, the reason the kit will write on those
+  omissions so the shape is explicit. (#69)
 
 ### Fixed
 
@@ -87,7 +89,8 @@ The round 8 findings (#66 to #76).
   session's path holds in force, not only their hashes, and a kit with
   no last manifest in memory writes a delta on whichever of them gives
   the smallest record. agentmemory's next release adds
-  `ManifestFold.Record`, which the kit's copies shrink to. (#68)
+  `ManifestFold.Record`, the smallest record over the manifests the fold
+  holds, which the kit's copies shrink to on that bump. (#68)
 - A render of a run the kit's session does not record, an agent built
   from the kit and attached to nothing or to another recorder with no
   recorder on its context, was written into that session with no run
