@@ -51,6 +51,16 @@ import (
 // to many conversations, each its own session, prompts each run under
 // [ContextWithRecorder] so what the kit records lands in the right one.
 //
+// Every agent built from a kit with a session is attached to it,
+// [Kit.Attach], or prompted under [ContextWithRecorder]. A run that is
+// neither, an agent attached to nothing or to a recorder of its own
+// with no recorder on its context, is one the kit's session does not
+// record: its renders are not written there, since a record with no run
+// around it would be read as another run's, and its own memory_save,
+// held for approval across a restart, is refused rather than based on a
+// render the path cannot attribute to it. In the process that rendered
+// it, its saves are based on its own render as any run's are.
+//
 // That is the right sharing for concurrent runs of one agent and the
 // wrong sharing for two agents, which want two prompts, two manifests
 // and usually two sessions. Give each agent its own kit.
@@ -1511,7 +1521,18 @@ func (k *Kit) record(ctx context.Context, man agentmemory.Manifest) error {
 	)
 	sess := k.sessionOf(ctx, rec, sid)
 	if sess != nil {
-		f = k.foldPath(sid, sess.Path(sess.Leaf()))
+		path := sess.Path(sess.Leaf())
+		if run := agentturn.RunIDFromContext(ctx); run != "" && !recordsRun(path, run) {
+			// The session records runs, and not this one: an agent built
+			// from the kit and attached to nothing, or to another
+			// recorder, with no recorder on its context. Its render
+			// would land here with no run around it, where foldAtCall
+			// would read it as the render of whichever run was open.
+			// The render in k.rendered still serves the run's own
+			// saves.
+			return nil
+		}
+		f = k.foldPath(sid, path)
 		var inForce string
 		if inForce, folds = f.inForce(); folds && inForce == hash {
 			k.rememberManifest(sid, recordedManifest{man: man, entry: f.at})
@@ -1551,6 +1572,29 @@ func (k *Kit) record(ctx context.Context, man agentmemory.Manifest) error {
 	k.rememberManifest(sid, recordedManifest{man: man, entry: entry})
 	lastWritten.put(rec, sid, entry)
 	return nil
+}
+
+// recordsRun reports whether the session whose path this is records the
+// run id: a run entry starts it and none has ended it, or the path holds
+// no run entry at all, a session something that writes no runs records,
+// which is read as one run. The agent delivers run_start to its
+// subscribers before it builds the run's first request, and the recorder
+// writes the entry as it is delivered, so a run the recorder is attached
+// to is open on the path at every one of its model calls. The path is
+// walked from the leaf, where an open run's entries are near.
+func recordsRun(path []agentsession.Entry, id string) bool {
+	runs := false
+	for i := len(path) - 1; i >= 0; i-- {
+		r, ok := path[i].(*agentsession.RunEntry)
+		if !ok {
+			continue
+		}
+		if r.RunID == id {
+			return r.IsStart()
+		}
+		runs = true
+	}
+	return !runs
 }
 
 // rememberManifest keeps the manifest last recorded in session sid. The caller

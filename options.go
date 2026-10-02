@@ -931,6 +931,15 @@ func WithVerdictObserver(fn func(context.Context, agentpolicy.Verdict)) Option {
 // recorder subscribes through [Kit.Attach]; the store stays the
 // caller's to sync, release and close.
 //
+// Every agent built from the kit is attached to it, or prompted under
+// [ContextWithRecorder] with a recorder of its own. A run that is
+// neither is one the session does not record, and the kit writes none
+// of its memory renders there: a record with no run around it would be
+// read as another run's. Such a run's memory_save, held for approval
+// and approved after a restart, is refused, since no session holds the
+// render it was composed from; in the process that rendered it, it is
+// based on that render as any run's is.
+//
 // The recorder is opened with [session.WithInstructionsParts] bound to
 // [Kit.PartsFor], ahead of opts, so its config entries carry the
 // instructions as [Kit.Parts] and what the layers left out as
@@ -951,7 +960,8 @@ func WithSession(store agentsession.Store, h agentsession.Header, opts ...sessio
 // back, which Context().Items leaves out, the model each reasoning item
 // came from, so a request to another model leaves the earlier one's
 // out, and the calls pending at the leaf. The recorder takes the kit's
-// parts as under [WithSession]. Under [WithSkillGrants], the grants the
+// parts, and every agent built from the kit is attached to it or
+// prompted under [ContextWithRecorder], as under [WithSession]. Under [WithSkillGrants], the grants the
 // session's skill reads made are granted again, and under
 // [WithCompaction] the fold backs off from the last fold that failed on
 // the session's path.

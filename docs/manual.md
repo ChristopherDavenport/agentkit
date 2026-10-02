@@ -487,7 +487,11 @@ record := func(ctx context.Context, r *session.Recorder, m agentmemory.Manifest)
 	var f *fold
 	folds := false
 	if sess, err := r.Store().Open(ctx, sid); err == nil { // the live session the store holds
-		f = folded[sid].upTo(sess.Path(sess.Leaf())) // an agentmemory.ManifestFold, from the record it last reached
+		path := sess.Path(sess.Leaf())
+		if run := agentturn.RunIDFromContext(ctx); run != "" && !recordsRun(path, run) {
+			return nil // a run the session does not record: an agent attached to nothing
+		}
+		f = folded[sid].upTo(path) // an agentmemory.ManifestFold, from the record it last reached
 		if folds = f.inForce() != ""; folds && f.inForce() == m.Hash() {
 			recorded[sid] = recordedManifest{m, f.at}
 			return nil // nothing moved
@@ -527,6 +531,9 @@ with their hashes, since the fold does not expose them: `upTo` folds
 the records after that one on the path, or the whole path again when it
 is no longer there, after a `Rebase`; `holds` says whether a delta on a
 manifest resolves, and `held` is the manifests, most recent first.
+`recordsRun` says whether the path records the run: a run entry starts
+it and none has ended it, or the path holds no run entry at all, a
+session something that writes no runs records, read as one run.
 
 This is what `WithMemory`, `WithGuards`, `WithVerdictObserver` and
 `WithBeforeModelCall` compose to, and it is the whole of it. The
@@ -565,7 +572,16 @@ so a reader of the session folds with `agentmemory.ManifestFold`
 recorder's store: `Open` on a session a store holds hands back the live
 session it holds, which is how the recorder itself reopens one, so the
 session `New` opened, one on a run's context and a child's are read
-alike. What is in force is the fold of the path's records, whoever
+alike. Every agent built from a kit with a session is attached to it or
+prompted under `ContextWithRecorder`; a run that is neither, an agent
+attached to nothing or to a recorder of its own with none on its
+context, is one the session does not record, and its renders are not
+written there: the agent delivers run_start to the recorder before the
+run's first model call, so a run the recorder is attached to is open on
+the path at every one of its model calls, and a record with no run
+around it would be read, by `foldAtCall` after a restart, as the render
+of whichever run was open. Such a run's own held save, approved after a
+restart, is refused. What is in force is the fold of the path's records, whoever
 wrote them: another kit's of a handoff, a `Rebase` or `/clear`, a
 restart. So a kit handed
 back to after another kit wrote records its render again even when it
