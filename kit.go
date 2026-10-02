@@ -361,7 +361,7 @@ func New(ctx context.Context, opts ...Option) (*Kit, error) {
 	}
 	if k.grants != nil && k.sess != nil {
 		k.grants.gmu.Lock()
-		k.grants.regrant(agentpolicy.ContextWithGrantScope(ctx, k.conversationOf(k.rec, "")), k.sess, k.grants.scoped)
+		k.grants.regrant(agentpolicy.ContextWithGrantScope(ctx, k.resumeScope(ctx, k.rec, "")), k.sess, k.grants.scoped)
 		k.grants.gmu.Unlock()
 	}
 	return k, nil
@@ -1779,6 +1779,19 @@ func (k *Kit) GrantScope(ctx context.Context) string {
 	return k.conversationOf(RecorderFromContext(ctx), session.SessionIDFromContext(ctx))
 }
 
+// resumeScope is the grant scope a resumed session's grants are made
+// again under: the one ctx carries, when the front scopes its
+// conversations itself with [agentpolicy.ContextWithGrantScope], as
+// [Kit.GrantScope] reads it for a run, else the conversation of rec and
+// sid. The session does not record the scope a grant was made under, so
+// a front that names its own passes the same one here as to its runs.
+func (k *Kit) resumeScope(ctx context.Context, rec *session.Recorder, sid string) string {
+	if scope := agentpolicy.GrantScopeFromContext(ctx); scope != "" {
+		return scope
+	}
+	return k.conversationOf(rec, sid)
+}
+
 // noConversation is the grant scope of runs the kit records nowhere and
 // that name no session.
 const noConversation = "agentkit:no-session"
@@ -2359,7 +2372,10 @@ func (k *Kit) Tools() []ToolOrigin {
 // RegrantSkills grants again, under [WithSkillGrants], what the skill
 // reads on sess's path granted and nothing revoked, as [New] does for a
 // session it resumes, under the grant scope of sess's conversation,
-// [Kit.GrantScope]. It is for a front that resumes a conversation
+// [Kit.GrantScope], or under the scope ctx carries when the front names
+// its conversations' scopes itself with
+// [agentpolicy.ContextWithGrantScope]; the session does not record the
+// scope, so such a front passes the one its runs use. It is for a front that resumes a conversation
 // itself, with session.Resume under [ContextWithRecorder], so a call
 // held before a restart is approved with the tools its task had. ctx
 // carries that conversation's recorder, ContextWithRecorder, which is
@@ -2396,8 +2412,9 @@ func (k *Kit) RegrantSkills(ctx context.Context, sess *agentsession.Session) err
 			return fmt.Errorf("%w: session %q: neither ctx nor the kit carries a recorder writing it, so the grants' verdicts and a later revocation would be recorded nowhere; put the conversation's recorder on ctx with ContextWithRecorder", ErrSkillGrantRecorder, sess.ID())
 		}
 	}
-	// The conversation sess is, as a run recorded by rec or naming it is.
-	ctx = agentpolicy.ContextWithGrantScope(ctx, k.conversationOf(rec, sess.ID()))
+	// The conversation sess is, as a run recorded by rec or naming it is,
+	// unless the front names its scope itself.
+	ctx = agentpolicy.ContextWithGrantScope(ctx, k.resumeScope(ctx, rec, sess.ID()))
 	g.gmu.Lock()
 	defer g.gmu.Unlock()
 	g.regrant(ctx, sess, g.scoped)

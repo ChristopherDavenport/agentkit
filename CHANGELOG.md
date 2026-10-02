@@ -175,8 +175,10 @@ The round 8 findings (#66 to #76).
   is its alone, and its conversation's next message ends the grants of
   the children run under it, also a message the transcript's tail test
   does not see, since a child's grants are bound to its parent's turn's
-  user-message mark. The children of a scope are recorded when one of
-  them grants and ended exactly, never matched by name, so scopes a front
+  user-message mark. The children of a scope are recorded when each
+  child's run starts, so a grandchild that reads a skill under a child
+  that read none is reached too, and ended exactly, never matched by
+  name, so scopes a front
   names "user/4" and "user/42" are two conversations. Without skill
   grants the kit puts no scope on a child's context, and a scope the
   product put on the host's, with grants of its own under it, is the
@@ -193,7 +195,10 @@ The round 8 findings (#66 to #76).
   Each revocation is still a verdict per source in the conversation's
   session, `revoked the rules granted by <source>`, so a restart replays
   it as before, and `RegrantSkills` and `New` grant a session's reads
-  again under its scope; a replay also reads `Engine.RevokeScope`'s
+  again under its scope, or under the scope their context carries when
+  the front names its conversations' scopes with
+  `agentpolicy.ContextWithGrantScope`, since the session does not record
+  it; a replay also reads `Engine.RevokeScope`'s
   verdict as ending every grant of the conversation. `RegrantSkills` no
   longer refuses a second session.
 - Under `WithSkillGrantScope` a call that only an ended grant would have

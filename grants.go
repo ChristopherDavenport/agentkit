@@ -150,15 +150,13 @@ type skillGrants struct {
 	mu     sync.Mutex
 	scopes map[string]*scopeGrants
 	// children is the grant scopes of the child agents run under each
-	// scope, recorded when a child's read grants under its own scope, so
-	// a conversation's message ends exactly those and not a scope whose
-	// name merely begins with its own.
+	// scope, recorded when the child's run context is made,
+	// [Kit.childContext], whether or not the child reads a skill, so a
+	// grandchild's grant is reached through a child that granted nothing,
+	// and a conversation's message ends exactly those and not a scope
+	// whose name merely begins with its own.
 	children map[string]map[string]bool
 }
-
-// parentScopeKey carries, on the context of a child agent's run, the
-// grant scope its parent runs under, [Kit.childContext].
-type parentScopeKey struct{}
 
 // link records scope as a child scope of parent. The caller holds mu.
 func (g *skillGrants) link(parent, scope string) {
@@ -528,9 +526,6 @@ func (g *skillGrants) grant(ctx context.Context, sk *agentskill.Skill, out Skill
 		st.sources = map[string]bool{}
 	}
 	st.sources[set.Source.Name] = true
-	if parent, _ := ctx.Value(parentScopeKey{}).(string); parent != "" && parent != scope {
-		g.link(parent, scope)
-	}
 	g.mu.Unlock()
 	out.Granted, out.Refused = g.engine.GrantSet(ctx, set)
 	var mark userMark
