@@ -176,7 +176,10 @@ The round 8 findings (#66 to #76).
   kept of them. The engine consults every set not so ended for every
   decision, so a server whose conversations end for good calls it, or
   runs under `WithSkillGrantScope`. A call with a bare context revokes
-  the kit's no-session scope and no conversation's.
+  the kit's no-session scope and no conversation's. The scope state is guarded by one lock across
+  conversations, held across the engine's `GrantSet` and `Revoke` and the
+  journal writes they trigger, so a slow session store in one conversation
+  delays a skill read in another; a lock per scope would remove that.
   Each revocation is still a verdict per source in the conversation's
   session, `revoked the rules granted by <source>`, so a restart replays
   it as before, and `RegrantSkills` and `New` grant a session's reads

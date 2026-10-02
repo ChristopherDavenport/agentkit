@@ -140,6 +140,9 @@ type skillGrants struct {
 	// gmu is held from the start of a grant to the end of its GrantSet,
 	// and across a revocation, so no grant lands in the engine after the
 	// revocation that was to end it and goes unrecorded.
+	// It is one lock for every conversation, so a slow journal write in
+	// one delays a skill read in another; a lock per scope would remove
+	// that.
 	gmu sync.Mutex
 
 	// mu guards scopes, the state of each grant scope a read has granted
