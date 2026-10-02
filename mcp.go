@@ -29,9 +29,11 @@ type addedMCP struct {
 // The dial runs off the kit's lock, since it may wait on that sign-in,
 // so [Kit.Tools], [Kit.RemoveMCP] and [Kit.Close] answer meanwhile, and
 // two servers added at once are dialed at once. Each takes its number
-// before it dials, so the two are numbered apart; a dial that fails
-// keeps its number, so the labels are not dense. The clash check runs
-// when the dial ends, against what the kit offers then.
+// before it dials, so the two are numbered apart. A server that is
+// refused, or whose dial fails, gives its number back unless another
+// was numbered meanwhile, so the labels are dense unless servers are
+// added at once, when a refusal leaves a gap. The clash check runs when
+// the dial ends, against what the kit offers then.
 //
 // A tool whose name is taken by one the kit offers now is an error, as
 // at New, and the server is closed: this is when the product can still
@@ -81,6 +83,9 @@ func (k *Kit) addMCP(ctx context.Context, d mcpDial) (string, error) {
 	defer context.AfterFunc(k.closeCtx, cancel)()
 	remote, err := k.connect(dctx, d, n)
 	if err != nil {
+		k.mcpMu.Lock()
+		k.giveBack(n)
+		k.mcpMu.Unlock()
 		if k.closeCtx.Err() != nil {
 			return "", fmt.Errorf("%w: the kit closed while the server was being dialed: %w", errAddAfterClose, err)
 		}
@@ -107,6 +112,7 @@ func (k *Kit) addMCP(ctx context.Context, d mcpDial) (string, error) {
 		}
 	}
 	if len(errs) > 0 {
+		k.giveBack(n)
 		k.mcpMu.Unlock()
 		return "", errors.Join(append(errs, remote.Close())...)
 	}
@@ -119,6 +125,15 @@ func (k *Kit) addMCP(ctx context.Context, d mcpDial) (string, error) {
 	}
 	k.mcpMu.Unlock()
 	return label, nil
+}
+
+// giveBack returns the number a server that was not added took, when
+// no server was numbered after it, so the next is numbered as if the
+// refused one had never been. Under mcpMu.
+func (k *Kit) giveBack(n int) {
+	if k.mcpNext == n+1 {
+		k.mcpNext = n
+	}
 }
 
 // RemoveMCP closes a server [Kit.AddMCP] or [Kit.AddMCPTransport]

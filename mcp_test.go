@@ -340,8 +340,14 @@ func TestAServerAddedWithATakenNameIsRefused(t *testing.T) {
 	if got := strings.Join(toolNames(kit.Config().ResolveTools(t.Context())), " "); got != "read provided" {
 		t.Fatalf("tools = %s after two refused servers, want them unchanged", got)
 	}
-	if _, err := kit.AddMCPTransport(t.Context(), serveMCP(t, "read"), mcpclient.WithPrefix("fs")); err != nil {
+	// The refused servers took no number, so the first server added is
+	// the first.
+	label, err := kit.AddMCPTransport(t.Context(), serveMCP(t, "read"), mcpclient.WithPrefix("fs"))
+	if err != nil {
 		t.Fatalf("a prefixed server = %v, want it added", err)
+	}
+	if !strings.HasPrefix(label, "mcp:#1 ") {
+		t.Fatalf("label = %q after two refused servers, want the first number", label)
 	}
 }
 
