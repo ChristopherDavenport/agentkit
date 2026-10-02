@@ -1349,6 +1349,208 @@ func TestAChildAgentHasAGrantScopeOfItsOwn(t *testing.T) {
 	}
 }
 
+// The children of a conversation are the scopes recorded as run under
+// it, not the scopes whose names begin with its own: a front that names
+// its conversations "user/4", "user/42" and "user/42/chat7" has three
+// conversations, and a message in the first ends nothing of the others,
+// nor does ending the second end the third's.
+func TestAScopeIsNotTheParentOfAScopeItsNameBeginsWith(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "release", "Bash(git:*)")
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithSkills(skills),
+		agentkit.WithTools(namedTool(t, "Bash")),
+		agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{
+			Read:    []string{agentskill.ToolName},
+			Execute: []string{"Bash"},
+		}), map[string]agentpolicy.ToolMatcher{
+			"Bash": {Match: agentpolicy.PrefixMatcher("command")},
+		}),
+		agentkit.WithSkillGrants(trustedSkills),
+		agentkit.WithSkillGrantScope(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	scopes := []string{"user/4", "user/42", "user/42/chat7"}
+	ctxOf := func(scope string) context.Context { return agentpolicy.ContextWithGrantScope(t.Context(), scope) }
+	tool := skillTool(t, kit)
+	for _, scope := range scopes {
+		args := json.RawMessage(`{"name":"release"}`)
+		if _, err := tool.Execute(ctxOf(scope), agenttool.Call{ID: "call-" + scope, Args: args}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inForce := func() []int {
+		var out []int
+		for _, scope := range scopes {
+			out = append(out, len(kit.Engine().GrantsFor(ctxOf(scope))))
+		}
+		return out
+	}
+	if got := inForce(); !slices.Equal(got, []int{1, 1, 1}) {
+		t.Fatalf("grants in force after each read the skill = %v, want one in each", got)
+	}
+
+	// A message in user/4 ends user/4's grant alone.
+	turn := func(scope string) {
+		t.Helper()
+		info := agentturn.TurnStartInfo{RunID: "run-" + scope, Transcript: agentturn.Transcript{openresponses.UserText("hello")}}
+		if _, err := kit.Config().BeforeTurn(ctxOf(scope), info); err != nil {
+			t.Fatal(err)
+		}
+	}
+	turn("user/4")
+	if got := inForce(); !slices.Equal(got, []int{0, 1, 1}) {
+		t.Fatalf("grants in force after a message in user/4 = %v, want 0, 1, 1", got)
+	}
+	// Ending user/42 ends user/42's grant alone, and a message in it too.
+	if n := kit.RevokeSkillGrants(ctxOf("user/42")); n != 1 {
+		t.Fatalf("RevokeSkillGrants(user/42) removed %d rules, want its own one", n)
+	}
+	if got := inForce(); !slices.Equal(got, []int{0, 0, 1}) {
+		t.Fatalf("grants in force after user/42 ended = %v, want 0, 0, 1", got)
+	}
+	turn("user/42")
+	if got := inForce(); !slices.Equal(got, []int{0, 0, 1}) {
+		t.Fatalf("grants in force after a message in user/42 = %v, want user/42/chat7's kept", got)
+	}
+}
+
+// A message the transcript's tail test does not see, a steer delivered
+// before an output, still ends the grants of the child agents of its
+// conversation: they are bound to the user message their parent's turn
+// was under, and the count of the transcript now is higher. The
+// conversation holds no grant of its own here, so nothing else would end
+// them.
+func TestAMessageTheTailMissesEndsTheChildrensGrants(t *testing.T) {
+	for _, byCall := range []bool{false, true} {
+		t.Run(fmt.Sprintf("RevokeSkillGrants=%v", byCall), func(t *testing.T) {
+			skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "release", "Bash(git:*)")
+			sessions := agentsession.NewMemoryStore()
+			var kit *agentkit.Kit
+			read := agenttool.New("read_release", "read the release skill",
+				func(ctx context.Context, _ agenttool.NoArgs) (string, error) {
+					tool, ok := kit.LookupTool(agentskill.ToolName)
+					if !ok {
+						return "", errors.New("no skill tool")
+					}
+					_, err := tool.Execute(ctx, agenttool.Call{ID: "call-read", Args: json.RawMessage(`{"name":"release"}`)})
+					return "", err
+				})
+			child := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("read_release", `{}`)}}
+			parent := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("explore", `{"input":"read the skill"}`)}}
+			var err error
+			kit, err = agentkit.New(t.Context(),
+				agentkit.WithModel(parent, "m"),
+				agentkit.WithSkills(skills),
+				agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{
+					Read: []string{agentskill.ToolName, "read_release", "explore"},
+				}), map[string]agentpolicy.ToolMatcher{"Bash": {Match: agentpolicy.PrefixMatcher("command")}}),
+				agentkit.WithSkillGrants(trustedSkills),
+				agentkit.WithSkillGrantScope(),
+				agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
+				agentkit.WithChildAgent(agentturn.Config{
+					Name: "explore", Description: "delegate", Model: child, ModelName: "m",
+					Tools: []agenttool.Tool{read},
+					BeforeToolCall: func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+						return kit.Engine().BeforeToolCall()(ctx, info)
+					},
+				}),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer kit.Close()
+			agent := agentturn.New(kit.Config())
+			defer kit.Attach(agent)()
+			if _, err := agent.Prompt(t.Context(), openresponses.UserText("go")); err != nil {
+				t.Fatal(err)
+			}
+			if n := len(kit.Engine().Grants()); n != 1 {
+				t.Fatalf("grants in force after the child read the skill = %d, want the child's one", n)
+			}
+
+			ctx := agentkit.ContextWithRecorder(session.ContextWithSessionID(t.Context(), kit.SessionID()), kit.Recorder())
+			if byCall {
+				// Ending the conversation ends its children's grants too.
+				if n := kit.RevokeSkillGrants(ctx); n != 1 {
+					t.Fatalf("RevokeSkillGrants removed %d rules, want the child's one", n)
+				}
+			} else {
+				// Two user messages and an output last: the tail test sees none.
+				transcript := agentturn.Transcript{
+					openresponses.UserText("go"),
+					openresponses.UserText("a steer"),
+					openresponses.NewFunctionCallOutput("call-x", "done"),
+				}
+				if _, err := kit.Config().BeforeTurn(ctx, agentturn.TurnStartInfo{RunID: "later", Transcript: transcript}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if n := len(kit.Engine().Grants()); n != 0 {
+				t.Fatalf("grants in force after the conversation's message or end = %d, want the child's ended", n)
+			}
+		})
+	}
+}
+
+// Without skill grants the kit puts no grant scope on a child agent's
+// context: a scope the product put on the host's, and grants of its own
+// under it, are the child's as they are any tool call's.
+func TestAChildKeepsTheProductsOwnGrantScopeWithoutSkillGrants(t *testing.T) {
+	var ran []string
+	bash := agenttool.New("Bash", "run a command",
+		func(_ context.Context, in struct {
+			Command string `json:"command"`
+		}) (string, error) {
+			ran = append(ran, in.Command)
+			return "", nil
+		})
+	var kit *agentkit.Kit
+	child := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("Bash", `{"command":"git status"}`)}}
+	parent := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("explore", `{"input":"look"}`)}}
+	var err error
+	kit, err = agentkit.New(t.Context(),
+		agentkit.WithModel(parent, "m"),
+		agentkit.WithTools(bash),
+		agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{
+			Read:    []string{"explore"},
+			Execute: []string{"Bash"},
+		}), map[string]agentpolicy.ToolMatcher{"Bash": {Match: agentpolicy.PrefixMatcher("command")}}),
+		agentkit.WithSession(agentsession.NewMemoryStore(), agentsession.Header{CWD: t.TempDir()}),
+		agentkit.WithChildAgent(agentturn.Config{
+			Name: "explore", Description: "delegate", Model: child, ModelName: "m",
+			Tools: []agenttool.Tool{bash},
+			BeforeToolCall: func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+				return kit.Engine().BeforeToolCall()(ctx, info)
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	ctx := agentpolicy.ContextWithGrantScope(t.Context(), "host")
+	granted, refused := kit.Engine().GrantSet(ctx, agentpolicy.RuleSet{
+		Source: agentpolicy.Source{Name: "product", Trusted: true},
+		Allow:  []agentpolicy.Rule{{Tool: "Bash", Spec: "git:*"}},
+	})
+	if len(granted) != 1 || len(refused) != 0 {
+		t.Fatalf("the product's grant: granted %v, refused %v", granted, refused)
+	}
+	agent := agentturn.New(kit.Config())
+	defer kit.Attach(agent)()
+	if _, err := agent.Prompt(ctx, openresponses.UserText("go")); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ran, []string{"git status"}) {
+		t.Fatalf("the child ran %v, want git status under the product's own grant scope", ran)
+	}
+}
+
 // Under the scope, a user message that ends a grant in force tells the
 // model so, and how to get it back: a model with the skill's text above
 // went straight to the tool and was refused as an ordinary ask. (#61)

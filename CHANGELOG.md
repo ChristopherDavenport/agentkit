@@ -159,13 +159,24 @@ The round 8 findings (#66 to #76).
   scope a front puts on the context with `agentpolicy.ContextWithGrantScope`
   is the conversation's scope; a run with no session and no recorder has
   one scope of the kit's own, not the unscoped one, which would decide
-  every conversation's calls. A child agent `WithChildAgent` offers runs
-  under a scope of its own, under its conversation's: its parent's skills
-  grant it nothing, a skill it reads is its alone, and its conversation's
-  next message under `WithSkillGrantScope` ends the grants of the
-  children run under it. `Kit.RevokeSkillGrants(ctx)` ends one
-  conversation's grants and its children's, and is what a front calls
-  when a conversation is over; the kit then forgets what it kept of them.
+  every conversation's calls. Under `WithSkillGrants` a child agent
+  `WithChildAgent` offers runs under a scope of its own, under its
+  conversation's: its parent's skills grant it nothing, a skill it reads
+  is its alone, and its conversation's next message ends the grants of
+  the children run under it, also a message the transcript's tail test
+  does not see, since a child's grants are bound to its parent's turn's
+  user-message mark. The children of a scope are recorded when one of
+  them grants and ended exactly, never matched by name, so scopes a front
+  names "user/4" and "user/42" are two conversations. Without skill
+  grants the kit puts no scope on a child's context, and a scope the
+  product put on the host's, with grants of its own under it, is the
+  child's. `Kit.RevokeSkillGrants(ctx)` ends one conversation's grants
+  and its children's, and is what a front calls when a conversation is
+  over, since nothing else tells the kit; the kit then forgets what it
+  kept of them. The engine consults every set not so ended for every
+  decision, so a server whose conversations end for good calls it, or
+  runs under `WithSkillGrantScope`. A call with a bare context revokes
+  the kit's no-session scope and no conversation's.
   Each revocation is still a verdict per source in the conversation's
   session, `revoked the rules granted by <source>`, so a restart replays
   it as before, and `RegrantSkills` and `New` grant a session's reads

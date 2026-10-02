@@ -176,7 +176,10 @@ tools = append(tools, childagent.New(childCfg,
 				}
 			}
 		}
-		// The child's own grant scope, under its conversation's (WithPolicy).
+		// Under WithSkillGrants only: the child's own grant scope, under its
+		// conversation's, which the child's skill reads grant under, and a
+		// record of whose child it is, so the conversation's next message
+		// ends its grants: they are bound to the parent's user-message mark.
 		return agentpolicy.ContextWithGrantScope(ctx, parent+"/"+child)
 	})))
 // The catalogue's tool as it stands: ReloadSkills puts another
@@ -1131,12 +1134,21 @@ Nine things, all outside `agentturn.Config`:
 
   so a front that names its conversations with
   `session.ContextWithSessionID` alone is several conversations, and a
-  read in one grants nothing in another. A child agent
-  `WithChildAgent` offers runs under a scope of its own, its
-  conversation's and a slash and its session ID, `parent+"/"+child` in
-  the `ToolProvider` block above, so its parent's skills grant it
-  nothing and the conversation's next message ends its grants with its
-  own. The kit forgets what it kept of a conversation's grants at
+  read in one grants nothing in another. Under `WithSkillGrants` a
+  child agent `WithChildAgent` offers runs under a scope of its own, its
+  conversation's and a slash and its session ID (the call's ID and a
+  number without a recording), `parent+"/"+child` in the `ToolProvider`
+  block above, so its parent's skills grant it nothing. The slash makes
+  a name that reads well and nothing more: the kit records which scopes
+  are a conversation's children when one of them grants, and the
+  conversation's next message, or `Kit.RevokeSkillGrants`, ends exactly
+  those, `engine.RevokeScope` for each, never a scope whose name merely
+  begins with the conversation's. A child's grants are bound to the
+  user-message mark of its parent's turn, so a message the transcript's
+  tail test misses ends them as it ends the parent's. Without skill
+  grants the kit puts no scope on a child, and a scope the product
+  put on the host's context, with its own grants under it, is the
+  child's. The kit forgets what it kept of a conversation's grants at
   `Kit.RevokeSkillGrants(ctx)`, which a front calls when the
   conversation ends, as it calls `engine.RevokeScope` for grants of its
   own under the scope. `WithSkillGrantReport` hears every conversation's

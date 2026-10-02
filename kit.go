@@ -148,6 +148,8 @@ type Kit struct {
 	union     atomic.Pointer[map[string]agenttool.Tool]
 	umu       sync.Mutex
 	runUnions bounded[map[string]agenttool.Tool]
+	// childSeq numbers the scopes of child agents run with no recording.
+	childSeq atomic.Uint64
 
 	// mu guards the skill catalogue and its tool, which ReloadSkills
 	// replaces, and the parts, the memory manifest and the memory
@@ -1999,11 +2001,21 @@ func (k *Kit) refuseEndedGrant(ctx context.Context, info agentturn.ToolCallInfo)
 // path the grant is replayed from.
 type markKey struct{}
 
+// parentMarkKey carries, on the context of a child agent's run, the mark
+// of its parent's turn, for the kit that made the child's context: a
+// child that is itself another kit has marks of its own.
+type parentMarkKey struct{ k *Kit }
+
 // markFor is the user-message mark a grant made under ctx is bound to:
 // the one a replay put on the context, else the mark of the last turn of
 // the run on the context, else none.
 func (k *Kit) markFor(ctx context.Context) (userMark, bool) {
 	if m, ok := ctx.Value(markKey{}).(userMark); ok {
+		return m, true
+	}
+	// A child agent's grants are bound to the message its parent's turn
+	// was under, this kit's, which the child's own run knows nothing of.
+	if m, ok := ctx.Value(parentMarkKey{k}).(userMark); ok {
 		return m, true
 	}
 	run := agentturn.RunIDFromContext(ctx)

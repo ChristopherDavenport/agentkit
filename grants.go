@@ -146,6 +146,46 @@ type skillGrants struct {
 	// in.
 	mu     sync.Mutex
 	scopes map[string]*scopeGrants
+	// children is the grant scopes of the child agents run under each
+	// scope, recorded when a child's read grants under its own scope, so
+	// a conversation's message ends exactly those and not a scope whose
+	// name merely begins with its own.
+	children map[string]map[string]bool
+}
+
+// parentScopeKey carries, on the context of a child agent's run, the
+// grant scope its parent runs under, [Kit.childContext].
+type parentScopeKey struct{}
+
+// link records scope as a child scope of parent. The caller holds mu.
+func (g *skillGrants) link(parent, scope string) {
+	if g.children == nil {
+		g.children = map[string]map[string]bool{}
+	}
+	if g.children[parent] == nil {
+		g.children[parent] = map[string]bool{}
+	}
+	g.children[parent][scope] = true
+}
+
+// descendants returns every scope run under scope, children and their
+// children, in no order. The caller holds mu.
+func (g *skillGrants) descendants(scope string) []string {
+	var out []string
+	seen := map[string]bool{scope: true}
+	queue := []string{scope}
+	for len(queue) > 0 {
+		next := queue[0]
+		queue = queue[1:]
+		for child := range g.children[next] {
+			if !seen[child] {
+				seen[child] = true
+				out = append(out, child)
+				queue = append(queue, child)
+			}
+		}
+	}
+	return out
 }
 
 // scopeGrants is what the kit keeps of the grants of one grant scope:
@@ -194,20 +234,24 @@ func (g *skillGrants) scopedCtx(ctx context.Context) context.Context {
 	return agentpolicy.ContextWithGrantScope(ctx, g.scope(ctx))
 }
 
-// stale reports whether a live grant in the grant scope of ctx was made
-// under a user message earlier than the one a transcript with mark now
-// is under.
+// stale reports whether a live grant in the grant scope of ctx, or in a
+// child agent's under it, was made under a user message earlier than the
+// one a transcript with mark now is under. A child's grant is bound to
+// its parent's mark, [Kit.markFor], so a message in the conversation is
+// one that ends it.
 func (g *skillGrants) stale(ctx context.Context, now userMark) bool {
 	scope := g.scope(ctx)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	st := g.scopes[scope]
-	if st == nil {
-		return false
-	}
-	for _, lg := range st.live {
-		if lg.bound && lg.under.stale(now) {
-			return true
+	for _, sc := range append([]string{scope}, g.descendants(scope)...) {
+		st := g.scopes[sc]
+		if st == nil {
+			continue
+		}
+		for _, lg := range st.live {
+			if lg.bound && lg.under.stale(now) {
+				return true
+			}
 		}
 	}
 	return false
@@ -481,6 +525,9 @@ func (g *skillGrants) grant(ctx context.Context, sk *agentskill.Skill, out Skill
 		st.sources = map[string]bool{}
 	}
 	st.sources[set.Source.Name] = true
+	if parent, _ := ctx.Value(parentScopeKey{}).(string); parent != "" && parent != scope {
+		g.link(parent, scope)
+	}
 	g.mu.Unlock()
 	out.Granted, out.Refused = g.engine.GrantSet(ctx, set)
 	var mark userMark
@@ -824,7 +871,9 @@ const revokedPrefix = "revoked the rules granted by "
 const revokedScopePrefix = "revoked the rules granted under "
 
 // childSep joins a grant scope to the scope of a child agent run under
-// it, see [Kit.childContext].
+// it, see [Kit.childContext]. It only makes a name that reads well: the
+// children of a scope are the ones recorded, never the scopes whose names
+// begin with it.
 const childSep = "/"
 
 // revoke revokes every source a read granted under in the grant scope of
@@ -894,28 +943,31 @@ func (g *skillGrants) revokeLive(ctx context.Context, drop bool) (int, []liveGra
 }
 
 // endChildren ends every grant of the child agents run under the grant
-// scope of ctx, [Kit.childContext], and forgets their scopes: a child
-// is one run of a conversation, nothing revokes its grants when it ends,
-// and a scope no run reaches again would be a rule set the engine
-// consults for every decision for as long as it lives. It returns the
-// number of rules the engine removed.
+// scope of ctx, [Kit.childContext], and their own children's, and
+// forgets their scopes: a child is one run of a conversation, nothing
+// revokes its grants when it ends, and a scope no run reaches again
+// would be a rule set the engine consults for every decision for as long
+// as it lives. The scopes are those recorded as the conversation's
+// children, and the sets under them are the kit's own, so a product's
+// that it made under one are ended too. It takes gmu as a revocation
+// does, so a read that is granting in a child's scope is not half undone.
+// It returns the number of rules the engine removed.
 func (g *skillGrants) endChildren(ctx context.Context) int {
-	prefix := g.scope(ctx) + childSep
+	scope := g.scope(ctx)
+	g.gmu.Lock()
+	defer g.gmu.Unlock()
 	g.mu.Lock()
-	var children []string
-	for scope := range g.scopes {
-		if strings.HasPrefix(scope, prefix) {
-			children = append(children, scope)
-		}
+	children := g.descendants(scope)
+	for _, child := range children {
+		delete(g.scopes, child)
+		delete(g.children, child)
 	}
-	for _, scope := range children {
-		delete(g.scopes, scope)
-	}
+	delete(g.children, scope)
 	g.mu.Unlock()
 	sort.Strings(children)
 	n := 0
-	for _, scope := range children {
-		n += g.engine.RevokeScope(agentpolicy.ContextWithGrantScope(ctx, scope))
+	for _, child := range children {
+		n += g.engine.RevokeScope(agentpolicy.ContextWithGrantScope(ctx, child))
 	}
 	return n
 }

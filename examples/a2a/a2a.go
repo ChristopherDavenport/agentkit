@@ -86,8 +86,12 @@ func Serve(ctx context.Context, kit *agentkit.Kit, url, version string, opts ...
 //
 // One kit serves every conversation here. A skill grant is its
 // conversation's, kept under the grant scope the conversation's session
-// names ([agentkit.Kit.GrantScope]), and a conversation that is over
-// ends its grants with [agentkit.Kit.RevokeSkillGrants]. An MCP
+// names ([agentkit.Kit.GrantScope]). The kit cannot tell when a
+// conversation is over, and RecordEach does not call
+// [agentkit.Kit.RevokeSkillGrants] when a task ends, since the next
+// message resumes the conversation under the grants it had; a server
+// whose conversations end for good calls it then, or builds the kit with
+// WithSkillGrantScope, which ends them at each message. An MCP
 // server's connection is the kit's rather than a conversation's: its
 // identity every conversation shares. A server that needs that per
 // conversation or per user builds a kit for each.

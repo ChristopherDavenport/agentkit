@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strconv"
 
 	"github.com/ChristopherDavenport/agentmemory"
 	"github.com/ChristopherDavenport/agentpolicy"
@@ -354,11 +355,18 @@ func WithoutSkillTool() Option {
 // decides only the calls made under it, so one kit serves any number of
 // conversations and a skill read in one grants nothing in another. A
 // child agent [WithChildAgent] offers has a scope of its own, under its
-// conversation's. A front that ends a conversation calls
-// [Kit.RevokeSkillGrants] with its context, which is also when the kit
-// forgets what it kept of the conversation's grants; the verdicts and
-// reports of every conversation reach the one engine and the one
-// [WithSkillGrantReport] function, [SkillGrant.Scope] saying whose.
+// conversation's, which the kit makes and ends, with
+// [agentpolicy.Engine.RevokeScope], with the conversation's. Nothing
+// ends a conversation for the kit, so a front that does calls
+// [Kit.RevokeSkillGrants] with the conversation's context, which is also
+// when the kit forgets what it kept of its grants; the engine holds the
+// sets of every conversation not so ended and consults them for every
+// decision, and [WithSkillGrantScope] ends a conversation's at its next
+// message. The scope comes from the context, so a call with a bare one
+// revokes the kit's no-session scope and no conversation's. The
+// verdicts and reports of every conversation reach the one engine and
+// the one [WithSkillGrantReport] function, [SkillGrant.Scope] saying
+// whose.
 // [WithSkillGrantScope]
 // revokes every skill's grant when the user's next message arrives, which is the lifetime
 // Claude Code gives allowed-tools; without it a grant lasts the life of
@@ -816,11 +824,14 @@ func WithDeferredTools(fn func(*Kit) []agenttool.Tool) Option {
 // context carries the child's session ID under
 // [agentmemory.WithSession], which is the key the memory journal
 // reads: a memory the child saves names the child's session. Under
-// [WithPolicy] the run context also carries a grant scope of the
+// [WithSkillGrants] the run context also carries a grant scope of the
 // child's own, under its conversation's, [agentpolicy.ContextWithGrantScope]:
-// the child's session ID, or the call's ID without a recording. A skill
-// its parent read grants the child's calls nothing, and one the child
-// reads is the child's alone; see [WithSkillGrants]. Those
+// the child's session ID, or the call's ID and a number without a
+// recording. A skill its parent read grants the child's calls nothing,
+// and one the child reads is the child's alone, ended with its
+// conversation's next message; see [WithSkillGrants]. Without skill
+// grants the kit puts no scope there, and a scope the product put on the
+// host's context is the child's. Those
 // bindings are the reason this option exists rather than the child
 // going in through [WithTools]: the recorder does not exist until [New]
 // has opened the session, so a product doing this by hand reaches for
@@ -1207,27 +1218,43 @@ func (k *Kit) observeChild(ctx context.Context, ev agentturn.Event) {
 // puts the child's session ID on the context under the session
 // package's key, and, with memory configured, the same ID under
 // agentmemory's, since the memory journal reads its own key and neither
-// package imports the other. The child run has a grant scope of its own,
-// under its conversation's, [agentpolicy.ContextWithGrantScope]: the
-// child's session ID, or the call's without one, so the skills its
-// parent read do not grant what the child's calls may do, and the ones
-// the child reads are not the parent's. Without a recorder it is ctx
-// with the scope.
+// package imports the other. Under [WithSkillGrants] the child run also
+// has a grant scope of its own, under its conversation's,
+// [agentpolicy.ContextWithGrantScope]: the child's session ID, or the
+// call's with a number of the kit's without a recording, so the skills
+// its parent read do not grant what the child's calls may do and the
+// ones the child reads are not the parent's. The context says whose
+// child it is, and which user message its grants are bound to, the
+// parent's, so the conversation's next message ends them. Without skill
+// grants the kit puts no scope on the context, and a scope the product
+// put there, with grants of its own under it, is the child's.
 func (k *Kit) childContext(ctx context.Context, callID string) context.Context {
-	parent := k.GrantScope(ctx)
+	parentCtx := ctx
 	rec := k.recorderFor(ctx)
 	if rec != nil {
 		ctx = rec.ChildContext(ctx, callID)
 	}
-	child := callID
+	child := ""
 	if id := session.SessionIDFromContext(ctx); rec != nil && id != "" {
 		child = id
 		if k.memory {
 			ctx = agentmemory.WithSession(ctx, id)
 		}
 	}
-	if k.engine != nil {
-		ctx = agentpolicy.ContextWithGrantScope(ctx, parent+childSep+child)
+	if k.grants == nil {
+		return ctx
+	}
+	if child == "" {
+		// Not the call's ID alone: a provider that numbers its calls the
+		// same every turn would put two children of one message in one
+		// scope.
+		child = callID + "#" + strconv.FormatUint(k.childSeq.Add(1), 10)
+	}
+	parent := k.GrantScope(parentCtx)
+	ctx = agentpolicy.ContextWithGrantScope(ctx, parent+childSep+child)
+	ctx = context.WithValue(ctx, parentScopeKey{}, parent)
+	if m, ok := k.markFor(parentCtx); ok {
+		ctx = context.WithValue(ctx, parentMarkKey{k}, m)
 	}
 	return ctx
 }

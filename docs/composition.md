@@ -141,7 +141,9 @@ childagent.WithRunContext(func(ctx context.Context, callID string) context.Conte
 	parent := kit.GrantScope(ctx)
 	ctx = rec.ChildContext(ctx, callID)
 	ctx = agentmemory.WithSession(ctx, session.SessionIDFromContext(ctx))
-	// The child's own grant scope, under its conversation's (WithPolicy).
+	// Under WithSkillGrants only: the child's own grant scope, under its
+	// conversation's. The kit also records whose child it is and which user
+	// message its grants are bound to, for the conversation's next message.
 	return agentpolicy.ContextWithGrantScope(ctx, parent+"/"+session.SessionIDFromContext(ctx))
 })
 ```
@@ -149,11 +151,14 @@ childagent.WithRunContext(func(ctx context.Context, callID string) context.Conte
 The grant scope is the third binding. A skill a conversation read grants
 its tools to that conversation's calls, and a child run from a tool call
 inherits its parent's context, so without a scope of its own it would
-run under what its parent was granted. Under `WithPolicy` the kit gives
-the child's context one, the child's session ID under its
-conversation's, or the call's ID when there is no recording; a skill the
-child reads is the child's alone, and the conversation's next message,
-or `kit.RevokeSkillGrants`, ends it with the conversation's own.
+run under what its parent was granted. Under `WithSkillGrants` the kit
+gives the child's context one, the child's session ID under its
+conversation's, or the call's ID and a number when there is no
+recording; a skill the child reads is the child's alone, and the
+conversation's next message, or `kit.RevokeSkillGrants`, ends it with
+the conversation's own. Without skill grants the kit puts no scope on
+the child's context, and a scope the product put on the host's, with
+grants of its own under it, is the child's.
 
 The recorder does not exist until `New` has opened the session, so
 those bindings are not something a product can do in the option list
