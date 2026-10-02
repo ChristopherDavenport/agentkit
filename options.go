@@ -465,8 +465,12 @@ func WithSkillGrants(source func(*agentskill.Skill) agentpolicy.Source) Option {
 // ask; and WithPolicy was given no agentpolicy option of the product's.
 // Any specifier naming a tool, any allow or deny naming one, any
 // option: the call goes to the engine, which asks, allows or denies it
-// as it would have. The predicate collapses to agentpolicy's
-// side-effect-free `Engine.Would` once that lands.
+// as it would have. The options are opaque to the kit, so one that
+// would not change the decision, [agentpolicy.WithAliases] among them,
+// turns the refusal off as well; a product on aliases gets the
+// turn-start note alone. The predicate collapses to agentpolicy's
+// side-effect-free `Engine.Would` once that lands, which also lifts
+// that.
 //
 // Only the sources the kit granted are revoked; a product's own
 // [agentpolicy.Engine.GrantSet] calls are left alone. Every run on the

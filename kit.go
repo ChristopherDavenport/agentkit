@@ -1902,12 +1902,12 @@ func saveKey(ctx context.Context, callID string) string {
 //
 // When the revocation ended a grant in force, the turn is given a
 // developer note naming the skills and their rules and saying that a
-// read of the skill restores them, and the kit's guard refuses a call
-// only those grants allowed with the same word, [skillGrants.guard]. A
+// read of the skill restores them, and the kit refuses a call only
+// those grants allowed with the same word, [Kit.refuseEndedGrant]. A
 // model that has the skill's text in its transcript from the message
 // before goes straight to the tool, and without either its call is
 // refused as an ordinary ask with no word of the grant that ended. The
-// guard is a hook inside the engine the kit built, so there is none
+// refusal is a hook inside the engine the kit built, so there is none
 // under WithEngine.
 func (k *Kit) revokeOnUserMessage(ctx context.Context, info agentturn.TurnStartInfo) (openresponses.Items, error) {
 	mark, marked := userMarkOf(info.Transcript)

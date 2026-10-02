@@ -1788,8 +1788,8 @@ func TestAReplayedGrantIsBoundToThePathsLastUserMessage(t *testing.T) {
 
 // Under the scope, a call that only an ended grant allowed is refused by
 // the kit with a reason that names the skill and says to read it again,
-// ahead of the engine, so the model that reads the refusal knows what to
-// do and no reviewer is asked. The engine decides every other call as
+// as the first hook inside the engine, so the model that reads the
+// refusal knows what to do and no reviewer is asked. The engine decides every other call as
 // before. (#76)
 func TestACallOnlyAnEndedGrantAllowedIsRefusedNamingTheSkill(t *testing.T) {
 	type tc struct {

@@ -76,7 +76,8 @@ The round 8 findings (#66 to #76).
   every rule naming the call's tools, in the policy and in every grant
   in force, is a bare ask with no specifier and no carve-out, the
   default does not allow a tool no rule names, the tool does not say it
-  runs confined, and `WithPolicy` was given no agentpolicy option; any
+  runs confined, and `WithPolicy` was given no agentpolicy option,
+  `WithAliases` among them, since the options are opaque to the kit; any
   specifier, allow, deny or option leaves the call to the engine, which
   asks, allows or denies it as before. There is no refusal under
   `WithEngine`. An ended grant is kept by the source it was made under,

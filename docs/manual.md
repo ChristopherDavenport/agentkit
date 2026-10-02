@@ -975,8 +975,8 @@ This is `WithSkillGrantScope`, and `kit.RevokeSkillGrants(ctx)` is the
 loop in it. The note is a fact on the transcript, so the record holds
 it: a model with the skill's text above from the message before goes
 straight to the tool, and without it the call is refused as an
-ordinary ask with no word of the grant that ended; `grantGuard` above
-refuses that call with the same word. It runs on every turn, not only
+ordinary ask with no word of the grant that ended; `refuseEndedGrant`
+above refuses that call with the same word. It runs on every turn, not only
 the first: a follow-up continues the run it joins and a steer arrives
 between turns, and either is a new message that must end the last
 request's grant. A `Resume`'s first turn ends with the answered calls'

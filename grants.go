@@ -157,6 +157,10 @@ type skillGrants struct {
 	// extraOpts is set when WithPolicy was given agentpolicy options of
 	// the product's, which may change how the engine decides in ways
 	// its exported state does not show, so blockEnded refuses nothing.
+	// The options are opaque, so one that would not, WithAliases among
+	// them, since the engine's lists and the grants are both expanded,
+	// disables the refusal too; agentpolicy's side-effect-free
+	// evaluation is what lifts that.
 	extraOpts bool
 	// scoped is WithSkillGrantScope.
 	scoped bool
@@ -176,7 +180,8 @@ type skillGrants struct {
 	// holds is a no-op. live is the grants in force, by source, which a
 	// revocation clears, for the note the scope gives the model. ended is
 	// the grants the scope's last revocations ended, by source, newest
-	// kept, which guard refuses a call by until the skill is read again.
+	// kept, which blockEnded, the hook the kit folds into the engine,
+	// refuses a call by until the skill is read again.
 	mu       sync.Mutex
 	sources  map[string]bool
 	live     map[string]liveGrant
