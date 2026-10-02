@@ -101,7 +101,6 @@ type Kit struct {
 	// the last fold on its path that failed, which the fold backs off
 	// from.
 	failedFold []compact.Option
-	remotes    []*mcpclient.Remote
 
 	// tools is the union the config's ToolProvider reads, which a server
 	// AddMCP connects joins; nil when the kit has no tool source.
@@ -110,12 +109,21 @@ type Kit struct {
 	// AddMCP dials the same way.
 	mcpStderr io.Writer
 	mcpElicit bool
-	// mcpMu guards added, the servers AddMCP connected and RemoveMCP has
-	// not removed, mcpNext, the number the next one is labelled with,
-	// and origins, which Kit.Tools reads and AddMCP and RemoveMCP change.
+	// mcpMu guards remotes, the servers New dialed, added, the servers
+	// AddMCP connected and RemoveMCP has not removed, mcpNext, the
+	// number the next one is labelled with, and origins, which Kit.Tools
+	// reads and AddMCP and RemoveMCP change. It is never held across a
+	// dial or a close, which may wait on a sign-in or a server, so none
+	// of those waits holds Kit.Tools, RemoveMCP or Close.
 	mcpMu   sync.Mutex
+	remotes []*mcpclient.Remote
 	added   []addedMCP
 	mcpNext int
+	// closeCtx ends when Close begins, and cancelClose ends it. A dial
+	// AddMCP has in flight is bound to it, so Close does not wait for a
+	// sign-in nobody will finish.
+	closeCtx    context.Context
+	cancelClose context.CancelFunc
 
 	// ownRec is true when the kit opened the recorder, and so is the one
 	// to attach it; false under WithRecorder, whose owner attaches it.
@@ -320,6 +328,7 @@ func New(ctx context.Context, opts ...Option) (*Kit, error) {
 	}
 
 	k := &Kit{memory: s.memStore != nil}
+	k.closeCtx, k.cancelClose = context.WithCancel(context.Background())
 	fail := func(err error) (*Kit, error) {
 		return nil, errors.Join(err, k.Close())
 	}
@@ -2464,7 +2473,11 @@ func (k *Kit) ReloadSkills(ctx context.Context) error {
 
 // Engine is the policy engine, or nil when no policy was configured. A
 // front reads [agentpolicy.Engine.Deferred] and calls
-// [agentpolicy.Engine.Release] through it.
+// [agentpolicy.Engine.Release] through it. The kit has no run-end hook,
+// so a front also calls [agentpolicy.Engine.Forget] with the run's ID
+// for a run that ended with no pending call, as that method's doc asks:
+// a nested call the hook deferred and the elicitor answered stays
+// remembered otherwise.
 func (k *Kit) Engine() *agentpolicy.Engine { return k.engine }
 
 // Catalog is the skill catalogue, or nil when no skills were
@@ -2546,30 +2559,47 @@ func (k *Kit) MemoryManifest() agentmemory.Manifest {
 	return k.manifest
 }
 
-// Close releases what [New] opened, in reverse order, joining the
-// errors: the MCP clients, those [Kit.AddMCP] connected first. The stores a caller passed in — the memory
-// store, the session store — stay the caller's to sync, release and
-// close, since the kit did not open them.
+// Close releases what [New] opened, joining the errors: every MCP
+// client, those [Kit.AddMCP] connected and those New dialed, closed
+// together, so closing costs one server's wait and not one per server,
+// and the errors joined in reverse order of connection. A dial
+// [Kit.AddMCP] has in flight is cancelled, and that AddMCP returns an
+// error. The stores a caller passed in — the memory store, the session
+// store — stay the caller's to sync, release and close, since the kit
+// did not open them.
 //
 // A config handed out before Close keeps working and stops offering
 // the closed servers' tools, so a run that outlives the kit is offered
-// what it can still reach. Close is safe to call twice.
+// what it can still reach. Close is safe to call twice, and
+// [Kit.Tools] answers while it waits.
 func (k *Kit) Close() error {
 	k.closed.Store(true)
-	var errs []error
+	if k.cancelClose != nil {
+		k.cancelClose()
+	}
 	k.mcpMu.Lock()
-	for i := len(k.added) - 1; i >= 0; i-- {
-		if err := k.added[i].remote.Close(); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	k.added = nil
+	added, remotes := k.added, k.remotes
+	k.added, k.remotes = nil, nil
 	k.mcpMu.Unlock()
-	for i := len(k.remotes) - 1; i >= 0; i-- {
-		if err := k.remotes[i].Close(); err != nil {
-			errs = append(errs, err)
-		}
+
+	// All at once, off the lock: a close may wait for the server's calls
+	// in flight. The errors keep a stable order, the added servers' then
+	// New's, each latest first.
+	errs := make([]error, len(added)+len(remotes))
+	var wg sync.WaitGroup
+	closeAt := func(i int, r *mcpclient.Remote) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = r.Close()
+		}()
 	}
-	k.remotes = nil
+	for i, a := range added {
+		closeAt(len(added)-1-i, a.remote)
+	}
+	for i, r := range remotes {
+		closeAt(len(added)+len(remotes)-1-i, r)
+	}
+	wg.Wait()
 	return errors.Join(errs...)
 }
