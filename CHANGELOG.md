@@ -17,8 +17,11 @@ The round 8 findings (#66 to #76).
   handoff, whose hand-back opened the holder's turn on the transfer's
   output, ended nothing, and the holder ran under the first message's
   grant. A steer delivered before an output is one more message too. A
-  grant a restart makes again is bound to the message the session's path
-  ends under, so the restart's first turn keeps it. (#66)
+  grant a restart makes again is bound to the message the transcript the
+  agent is seeded with ends under, `session.Transcript`, so the restart's
+  first turn keeps it, after a fold past the last prompt too, where the
+  fold's summary stands in for it: a compaction ends nothing by itself,
+  in the run or across a restart. (#66)
 - A memory write a policy held and a person approved ran in the Resume
   past #53's refusal when the budget had dropped the block of the run
   that composed it: the Resume has no render, so the drop was not seen.
@@ -57,16 +60,27 @@ The round 8 findings (#66 to #76).
   kit records its engine's verdicts and no recorder, on `ctx` or the
   kit's own, writes the session. (#74)
 - Under `WithSkillGrantScope` a call that only a grant the scope ended
-  would have allowed is refused by the kit's BeforeToolCall hook, ahead
-  of the engine, with a reason the model reads naming the skill and the
-  tool that reads it again, until the skill is read again. The engine
-  deferred it to the ask rule and what the model read was a reviewer's
-  refusal with no word of the skill; the turn-start note was several
-  items up, and a model refused acts on the refusal in front of it. The
-  kit refuses only when the engine cannot allow the call on its own, as
-  far as `Engine.Policy()` and `Engine.Grants()` say, so a call the
-  policy allows, denies or confines goes to the engine as before. The
-  refusal is recorded as a verdict. (#76)
+  would have allowed is refused with a reason the model reads naming the
+  skill and the tool that reads it again, until the skill is read again.
+  The engine deferred it to the ask rule and what the model read was a
+  reviewer's refusal with no word of the skill; the turn-start note was
+  several items up, and a model refused acts on the refusal in front of
+  it. The refusal is the first hook the kit folds into the engine it
+  builds under `WithPolicy`, ahead of the product's, so the engine's
+  fold takes the Block: a sibling in the same batch is decided beside it
+  and runs when allowed, where a Block chained ahead of the engine left
+  the siblings held for a question nobody was asked, and the engine
+  records the refusal as the call's verdict. The kit refuses only when
+  every rule naming the call's tools, in the policy and in every grant
+  in force, is a bare ask with no specifier and no carve-out, the
+  default does not allow a tool no rule names, the tool does not say it
+  runs confined, and `WithPolicy` was given no agentpolicy option; any
+  specifier, allow, deny or option leaves the call to the engine, which
+  asks, allows or denies it as before. There is no refusal under
+  `WithEngine`. An ended grant is kept by the source it was made under,
+  and `Kit.ReloadSkills` forgets one whose skill the catalogue no longer
+  lists, so a deleted skill does not refuse its tool for the rest of the
+  conversation. (#76)
 - A kit restarted into a handoff wrote its whole memory manifest on its
   first hand-back, since its own last manifest, the base of the delta,
   lives in the kit object. The kit's fold now keeps the manifests the
@@ -102,10 +116,16 @@ The round 8 findings (#66 to #76).
   the engine held it for the ask rule and a reviewer answered (#76). A
   front that showed such a call as pending sees a run that ends `done`
   with the refusal in its output instead, and the model reads the
-  skill again before it calls; a call the policy allows, denies or
-  confines on its own still goes to the engine. The predicate is a
-  conservative reading of `Engine.Policy()` and `Engine.Grants()`, and
-  shrinks to a side-effect-free evaluation once agentpolicy exports one.
+  skill again before it calls; the other calls of its batch are decided
+  as they would have been without it, so an allowed sibling runs rather
+  than waiting on the refused call. The kit refuses only when every rule
+  naming the call's tools, in the policy and in every grant in force, is
+  a bare ask, the default does not allow a tool no rule names, the tool
+  does not say it runs confined, and `WithPolicy` was given no
+  agentpolicy option; any specifier, allow, deny or option leaves the
+  call to the engine, which asks, allows or denies it as before, and
+  under `WithEngine` nothing is refused. The predicate collapses to
+  agentpolicy's side-effect-free `Engine.Would` once that lands.
 - `Kit.RegrantSkills` returns `ErrSkillGrantRecorder` instead of nil
   when the kit records its engine's verdicts and no recorder, on `ctx`
   or the kit's own, writes the session it was given; it granted
