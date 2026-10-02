@@ -468,8 +468,10 @@ func WithSkillGrants(source func(*agentskill.Skill) agentpolicy.Source) Option {
 // denied by a rule a grant never beats, so both are the engine's. The
 // product's [WithBeforeToolCall] hooks are among those folded, and are
 // called once more for the question, so a hook must decide a call the
-// same way however often it is asked; one that asks about the call
-// itself makes the refusal name a skill that would not have helped.
+// same way however often it is asked. With such hooks, or agentpolicy
+// options that may add some, the kit refuses only when an ask rule is
+// behind the verdict, since a hook's question would be asked whatever
+// a grant did and the verdict does not say whose it is.
 //
 // Only the sources the kit granted are revoked; a product's own
 // [agentpolicy.Engine.GrantSet] calls are left alone. A message ends

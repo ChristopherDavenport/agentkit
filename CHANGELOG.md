@@ -87,7 +87,10 @@ The round 8 findings (#66 to #76).
   the hooks folded into the engine, so the refusal no longer gives up
   under an option of the product's, `WithAliases` among them, and no
   longer refuses a call a specifier or a carve-out leaves allowed. The
-  product's hooks are called once more for the question. There is no
+  product's hooks are called once more for the question, and with hooks
+  of the product's, or agentpolicy options that may add some, the kit
+  refuses only when an ask rule is behind the verdict, since a hook's
+  question would be asked whatever a grant did. There is no
   refusal under `WithEngine`. An ended grant is kept by the source it was made under,
   and `Kit.ReloadSkills` forgets one whose skill the catalogue no longer
   lists, so a deleted skill does not refuse its tool for the rest of the
@@ -130,8 +133,10 @@ The round 8 findings (#66 to #76).
   provider last returned to the run the context belongs to; the engine
   the kit builds is given it through `agentpolicy.WithToolsFor`, so two
   runs off one kit whose tool lists differ each read their own, where
-  `Kit.LookupTool` read whichever list was offered last. `LookupTool`
-  stays, for a context with no run. (#43 of agentpolicy)
+  `Kit.LookupTool` read whichever list was offered last. A run the kit
+  has no list for reads the kit's own, the one offered outside any run,
+  never another run's, and `LookupTool` now answers that list too, for a
+  context with no run. (#43 of agentpolicy)
 
 ### Changed
 

@@ -247,7 +247,11 @@ for i, t := range tools {
 
 offered := engine.ToolProvider(func(ctx context.Context) []agenttool.Tool {
 	list := append(tools, remote.Tools()...) // the MCP list per turn
-	unions[agentturn.RunIDFromContext(ctx)], last = byName(list), byName(list) // for lookup, below
+	if run := agentturn.RunIDFromContext(ctx); run != "" {
+		unions[run] = byName(list) // for lookup, below
+	} else {
+		own = byName(list)
+	}
 	return list
 })
 cfg.ToolProvider = func(ctx context.Context) []agenttool.Tool {
@@ -629,12 +633,12 @@ it is given (agentpolicy v0.0.6), so a product's own
 ```go
 // lookup resolves a name in the union the provider last returned to the
 // run whose call is decided, which is what Kit.LookupToolFor does: the
-// run's own list by the run's ID, and the last union offered outside a
-// run or for a run it has none for.
+// run's own list by the run's ID, and for a run it has none for, or none,
+// the kit's own: the list offered outside any run, never another run's.
 lookup := func(ctx context.Context, name string) (agenttool.Tool, bool) {
 	union, ok := unions[agentturn.RunIDFromContext(ctx)] // a bounded map, filled by the provider
 	if !ok {
-		union = last
+		union = own
 	}
 	t, found := union[name]
 	return t, found
@@ -733,6 +737,9 @@ refuseEndedGrant := func(ctx context.Context, info agentturn.ToolCallInfo) (*age
 	if err != nil || v.Action != agentturn.Defer {
 		return nil, nil
 	}
+	if v.Rule == nil && hooksGiven { // yours..., or WithPolicy's options, which may add some
+		return nil, nil // the default's ask or a hook's: a grant would not have changed it
+	}
 	reason := "the tools skill " + skills[0] + " granted ended with the user's last message; " +
 		"read the skill again with the " + agentskill.ToolName + " tool, then make this call again"
 	return &agentturn.ToolDecision{Action: agentturn.Block, By: agentpolicy.ByPolicy, Reason: reason}, nil
@@ -781,8 +788,10 @@ so a denied call never reaches this one, and a deny rule beats a grant
 in any case. Because the hooks are folded into `Would`, this one is
 among them, which is what `asking` is for, and the product's are called
 once more for it, so a hook must decide a call the same way however
-often it is asked; one that asks about the call itself makes the refusal
-name a skill that would not have helped. An agentpolicy option of the
+often it is asked. With hooks of the product's, or options that may add
+some, the kit refuses only when an ask rule is behind the verdict
+(`v.Rule`), since a hook's question would be asked whatever a grant did
+and the verdict does not say whose it is. An agentpolicy option of the
 product's, `WithAliases` or `WithConfinement` among them, is read as the
 engine reads it, where the conservative test this replaced, over
 `Engine.Policy()` and `Engine.Grants()`, gave up on any option.
@@ -1090,8 +1099,10 @@ Nine things, all outside `agentturn.Config`:
 - `Kit.LookupToolFor(ctx, name)` reads the union the provider last
   returned to the run the context belongs to, and is what the kit's
   engine is given through `agentpolicy.WithToolsFor`; `Kit.LookupTool(name)`
-  reads the one offered last, whichever run it went to, the fallback
-  for a context with no run.
+  reads the kit's own, the union offered outside any run, the fallback
+  for a context with no run or a run the kit has no union for: never
+  another run's, which under concurrent conversations can be another
+  conversation's tools.
 - `WithSkillGrants`' grants belong to the conversation that read the
   skill. `GrantSet` and `Revoke` take the grant scope off the context
   they are called with, and the engine consults the unscoped sets and

@@ -133,6 +133,9 @@ type skillGrants struct {
 	matchers map[string]agentpolicy.ToolMatcher
 	// scoped is WithSkillGrantScope.
 	scoped bool
+	// hooks is set when the engine was given hooks of the product's, the
+	// WithBeforeToolCall ones or agentpolicy options that may add some.
+	hooks bool
 
 	// gmu is held from the start of a grant to the end of its GrantSet,
 	// and across a revocation, so no grant lands in the engine after the
@@ -287,7 +290,9 @@ type wouldKey struct{}
 // answer, the decision before the batch hold with the same rules, the
 // grants still in force, the call's confinement and the hooks folded in,
 // the product's among them, which are called once more for it. The kit
-// refuses when the engine would ask, which is what the grant answered. A
+// refuses when the engine would ask, which is what the grant answered,
+// unless the product gave the engine hooks and no ask rule is behind the
+// verdict: it may be a hook's, which a grant would not have changed. A
 // call the engine would allow is left to it, since an allow needs no
 // grant. One it would deny is too: the engine folds its hooks in after a
 // policy that denies, so this hook is not asked, and a deny rule beats
@@ -366,6 +371,14 @@ func (g *skillGrants) blockEnded(ctx context.Context, info agentturn.ToolCallInf
 		return nil, nil // the decision reports it
 	}
 	if v.Action != agentturn.Defer {
+		return nil, nil
+	}
+	if v.Rule == nil && g.hooks {
+		// No ask rule is behind it: the policy's default, or a hook the
+		// product folded into the engine, which would defer the call
+		// whatever a grant did. The verdict does not say which, so the
+		// engine decides, and a hook's question is not answered with a
+		// refusal naming a skill that would not have helped.
 		return nil, nil
 	}
 	reason := "the tools skill " + skills[0] + " granted"

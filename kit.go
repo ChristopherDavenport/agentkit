@@ -137,8 +137,9 @@ type Kit struct {
 	// handed out before Close may still be called through.
 	closed atomic.Bool
 
-	// union is the tools the provider last returned, by name, before the
-	// policy's filter: what [Kit.LookupTool] reads. runUnions is the
+	// union is the tools the provider last returned outside any run, by
+	// name, before the policy's filter: the kit's own configuration,
+	// what [Kit.LookupTool] reads. runUnions is the
 	// union each run's provider call last returned, keyed by the run's
 	// ID and guarded by umu, which [Kit.LookupToolFor] reads, and
 	// through it the engine the kit builds, which reads a call's
@@ -848,6 +849,7 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 				mark:     k.markFor,
 				matchers: s.matchers,
 				scoped:   s.skillGrantScope,
+				hooks:    len(s.beforeToolCall) > 0 || len(s.engineOpts) > 0,
 			}
 			if s.engine == nil {
 				k.grants.observe = k.observeVerdicts(s, false)
@@ -2236,20 +2238,24 @@ func (k *Kit) OmittedParts() []agentsession.OmittedPart {
 	return out
 }
 
-// remember keeps the union the provider returned for [Kit.LookupTool],
-// and, for a provider call made in a run, for [Kit.LookupToolFor] under
-// the run's ID.
+// remember keeps the union the provider returned. A call made in a run
+// is kept for [Kit.LookupToolFor] under the run's ID alone: another
+// conversation's run must not become what a run the kit has no union for
+// reads. A call outside any run, New's among them, is the kit's own
+// configuration, which [Kit.LookupTool] reads and LookupToolFor falls
+// back to.
 func (k *Kit) remember(ctx context.Context, tools []agenttool.Tool) {
 	byName := make(map[string]agenttool.Tool, len(tools))
 	for _, t := range tools {
 		byName[t.Name()] = t
 	}
-	k.union.Store(&byName)
 	if run := agentturn.RunIDFromContext(ctx); run != "" {
 		k.umu.Lock()
 		k.runUnions.put(run, byName)
 		k.umu.Unlock()
+		return
 	}
+	k.union.Store(&byName)
 }
 
 // LookupToolFor returns the tool of the given name in the union the
@@ -2270,8 +2276,9 @@ func (k *Kit) remember(ctx context.Context, tools []agenttool.Tool) {
 //	kit, err = agentkit.New(ctx, agentkit.WithEngine(engine), ...)
 //
 // A context outside any run, or of a run the kit has no union for, the
-// kit keeps the last 1024 runs', reads the union offered last, as
-// [Kit.LookupTool] does. It is safe on a nil kit, which has no tools.
+// kit keeps the last 1024 runs', reads what [Kit.LookupTool] answers,
+// the kit's own configuration, and never another run's list. It is safe
+// on a nil kit, which has no tools.
 func (k *Kit) LookupToolFor(ctx context.Context, name string) (agenttool.Tool, bool) {
 	if k == nil {
 		return nil, false
@@ -2289,12 +2296,15 @@ func (k *Kit) LookupToolFor(ctx context.Context, name string) (agenttool.Tool, b
 }
 
 // LookupTool returns the tool of the given name in the union the kit
-// offered last, before the policy's filter, whichever run it was
-// offered to. [Kit.LookupToolFor] answers for a run, which is what the
-// engine the kit builds reads, and what a product passes
-// [agentpolicy.WithToolsFor] when it builds its own; LookupTool has the
-// signature of [agentpolicy.WithTools], for a product whose runs all
-// see one list, and it is the fallback for a context with no run.
+// offers outside any run, before the policy's filter: its own
+// configuration, as of New and of the last [Kit.Config] tools resolved
+// with a context that names no run, which is where a server
+// [Kit.AddMCP] connected shows. A run's own list is [Kit.LookupToolFor]'s,
+// which is what the engine the kit builds reads, and what a product
+// passes [agentpolicy.WithToolsFor] when it builds its own; LookupTool
+// has the signature of [agentpolicy.WithTools], for a product whose runs
+// all see one list, and it is the fallback for a context with no run or
+// one the kit has no union for.
 //
 // It is safe on a nil kit, which has no tools.
 func (k *Kit) LookupTool(name string) (agenttool.Tool, bool) {

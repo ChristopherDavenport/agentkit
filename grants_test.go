@@ -1952,10 +1952,11 @@ func TestACallOnlyAnEndedGrantAllowedIsRefusedNamingTheSkill(t *testing.T) {
 		policy   agentpolicy.Policy
 		matchers map[string]agentpolicy.ToolMatcher
 		opts     []agentpolicy.Option
-		tool     string // the tool the model calls after the user's next message
-		first    string // the args it calls the tool with under the grant
-		second   string // the args it calls it with after the message
-		want     string // "blocked", "ran", "asked" or "denied"
+		hook     func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) // WithBeforeToolCall
+		tool     string                                                                         // the tool the model calls after the user's next message
+		first    string                                                                         // the args it calls the tool with under the grant
+		second   string                                                                         // the args it calls it with after the message
+		want     string                                                                         // "blocked", "ran", "asked" or "denied"
 	}
 	rules := func(text string) []agentpolicy.Rule {
 		out, err := agentpolicy.ParseRules(text)
@@ -1979,6 +1980,14 @@ func TestACallOnlyAnEndedGrantAllowedIsRefusedNamingTheSkill(t *testing.T) {
 		return out, nil
 	}
 	bashMatchers := map[string]agentpolicy.ToolMatcher{"bash": {Match: agentpolicy.PrefixMatcher("command"), Subjects: split}}
+	// deferSecondCall asks about the call the model makes after the
+	// grant ended, as a product's own hook asks about a call of its own.
+	deferSecondCall := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+		if info.Call != nil && info.Call.CallID == "call-second" {
+			return &agentturn.ToolDecision{Action: agentturn.Defer, Reason: "the product wants to know"}, nil
+		}
+		return nil, nil
+	}
 	it := `{"what":"it"}`
 	cases := []tc{
 		{name: "the filing: a bare ask rule the grant answered", allowed: "act",
@@ -2026,6 +2035,16 @@ func TestACallOnlyAnEndedGrantAllowedIsRefusedNamingTheSkill(t *testing.T) {
 				return nil, nil
 			})},
 			tool: "act", first: it, second: it, want: "blocked"},
+		// A hook of the product's that defers is the engine's to decide
+		// with: the kit does not answer its question with a refusal naming
+		// a skill that would not have helped, and does when an ask rule is
+		// behind the verdict as well.
+		{name: "a product hook that defers a call the policy allows", allowed: "act",
+			policy: agentpolicy.Policy{Allow: rules("act"), Default: agentpolicy.Ask()}, hook: deferSecondCall,
+			tool: "act", first: it, second: it, want: "asked"},
+		{name: "a product hook that defers beside an ask rule", allowed: "act",
+			policy: agentpolicy.Policy{Ask: rules("act"), Default: agentpolicy.Allow()}, hook: deferSecondCall,
+			tool: "act", first: it, second: it, want: "blocked"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -2055,7 +2074,11 @@ func TestACallOnlyAnEndedGrantAllowedIsRefusedNamingTheSkill(t *testing.T) {
 				callTurnID("call-reread", agentskill.ToolName, `{"name":"clock"}`),
 				callTurnID("call-third", c.tool, c.second),
 			}}
-			kit, err := agentkit.New(t.Context(),
+			var hooks []agentkit.Option
+			if c.hook != nil {
+				hooks = append(hooks, agentkit.WithBeforeToolCall(c.hook))
+			}
+			kit, err := agentkit.New(t.Context(), append(hooks,
 				agentkit.WithModel(model, "m"),
 				agentkit.WithSkills(skills),
 				agentkit.WithTools(tool("act"), tool("other"), tool("bash")),
@@ -2065,7 +2088,7 @@ func TestACallOnlyAnEndedGrantAllowedIsRefusedNamingTheSkill(t *testing.T) {
 				}),
 				agentkit.WithSkillGrantScope(),
 				agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
-			)
+			)...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2113,6 +2136,96 @@ func TestACallOnlyAnEndedGrantAllowedIsRefusedNamingTheSkill(t *testing.T) {
 				if len(ours) != 0 || len(denied) == 0 || runs[c.tool] != 0 {
 					t.Fatalf("refusals %q, denials %q, %s ran %d times; want the deny's reason alone", ours, denied, c.tool, runs[c.tool])
 				}
+			}
+		})
+	}
+}
+
+// The kit asks the engine what it would decide, Engine.Would, which
+// folds the product's hooks in as the decision does, and its contract is
+// that the question is no decision: a hook's answer reached that way is
+// not observed as a verdict and nothing is remembered as held for it. The
+// hook is called once more for the question, the call's own verdict is
+// recorded once, and the one deferral the engine holds is the call's own.
+func TestTheKitsQuestionToTheEngineIsNoDecision(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		// ask is whether an ask rule names the tool, so the kit's refusal
+		// answers the call before the hook the engine folds in after it.
+		ask       bool
+		wantHook  int  // calls of the hook for the second call
+		wantHeld  bool // the engine holds the call as deferred
+		wantEnded agentturn.Reason
+	}{
+		{name: "an ask rule is behind the verdict", ask: true, wantHook: 1, wantHeld: false, wantEnded: agentturn.ReasonDone},
+		{name: "a hook's question is the only one", ask: false, wantHook: 2, wantHeld: true, wantEnded: agentturn.ReasonInputRequired},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "clock", "act")
+			var (
+				hookCalls int
+				verdicts  = map[string]int{}
+			)
+			asks := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+				if info.Call != nil && info.Call.CallID == "call-second" {
+					hookCalls++
+					return &agentturn.ToolDecision{Action: agentturn.Defer, Reason: "the product wants to know"}, nil
+				}
+				return nil, nil
+			}
+			act := agenttool.New("act", "a tool", func(context.Context, agenttool.NoArgs) (string, error) { return "ran", nil })
+			rules, err := agentpolicy.ParseRules("act " + agentskill.ToolName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := agentpolicy.Policy{Allow: rules, Default: agentpolicy.Allow()}
+			if c.ask {
+				p = agentpolicy.Policy{Ask: rules[:1], Allow: rules[1:], Default: agentpolicy.Allow()}
+			}
+			model := &scriptModel{turns: []func(*openresponses.Emitter) error{
+				callTurn(agentskill.ToolName, `{"name":"clock"}`),
+				callTurnID("call-first", "act", `{}`),
+				textTurn("done it"),
+				callTurnID("call-second", "act", `{}`),
+			}}
+			kit, err := agentkit.New(t.Context(),
+				agentkit.WithModel(model, "m"),
+				agentkit.WithSkills(skills),
+				agentkit.WithTools(act),
+				agentkit.WithPolicy(p, nil),
+				agentkit.WithBeforeToolCall(asks),
+				agentkit.WithVerdictObserver(func(_ context.Context, v agentpolicy.Verdict) { verdicts[v.CallID]++ }),
+				agentkit.WithSkillGrants(trustedSkills),
+				agentkit.WithSkillGrantScope(),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer kit.Close()
+			agent := agentturn.New(kit.Config())
+			if _, err := agent.Prompt(t.Context(), openresponses.UserText("use the skill")); err != nil {
+				t.Fatal(err)
+			}
+			end, err := agent.Prompt(t.Context(), openresponses.UserText("act again"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if end.Reason != c.wantEnded {
+				t.Fatalf("run ended %q, want %q", end.Reason, c.wantEnded)
+			}
+			// Where no ask rule is behind the question, the product's hook
+			// is respected: it defers the call, and the kit refuses nothing.
+			if c.wantHeld && len(outputsSaying(agent.State().Transcript, "ended with the user's last message")) != 0 {
+				t.Fatal("the kit answered a hook's question with a refusal naming a skill")
+			}
+			if hookCalls != c.wantHook {
+				t.Fatalf("the product's hook decided the call %d times, want %d: once for the kit's question when the fold goes on to it", hookCalls, c.wantHook)
+			}
+			if verdicts["call-second"] != 1 {
+				t.Fatalf("the call has %d verdicts, want one, the decision's own; the question records none", verdicts["call-second"])
+			}
+			if _, held := kit.Engine().Deferred(end.RunID, "call-second"); held != c.wantHeld {
+				t.Fatalf("the engine holds the call as deferred = %v, want %v; the question remembers nothing", held, c.wantHeld)
 			}
 		})
 	}
