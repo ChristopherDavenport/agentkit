@@ -3,6 +3,139 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+The round 8 findings (#66 to #76).
+
+### Security
+
+- Under `WithSkillGrantScope` a grant is bound to the user message in
+  force when the read made it, the count of user messages in the turn's
+  transcript and a digest of the last one, and ends on any turn whose
+  transcript holds a later one, wherever it sits. The scope read only
+  the transcript's tail, so a message another kit's agent received in a
+  handoff, whose hand-back opened the holder's turn on the transfer's
+  output, ended nothing, and the holder ran under the first message's
+  grant. A steer delivered before an output is one more message too. A
+  grant a restart makes again is bound to the message the session's path
+  ends under, so the restart's first turn keeps it. (#66)
+- A memory write a policy held and a person approved ran in the Resume
+  past #53's refusal when the budget had dropped the block of the run
+  that composed it: the Resume has no render, so the drop was not seen.
+  The kit's BeforeToolCall hook now keeps the render, manifest and drop,
+  for every memory write it decides, `memory_patch` and `memory_forget`
+  as well as `memory_save`, and the refusal reads it first; after a
+  restart, a manifest folded at the call that shows no entry and lists
+  one the block held among the omitted is refused on that. (#69)
+
+### Fixed
+
+- A restart that passes over a skill read because the skill changed
+  since, its served instructions, which agentskill ends with the skill's
+  file list and each file's size, or its frontmatter, reports it with
+  `Replayed` set, `FrontmatterChanged` saying which digest moved and
+  `Err` wrapping the new `ErrSkillGrantChanged`, and the session records
+  a verdict saying so. Both cases were a bare `continue`, so a grant in
+  force when the process stopped vanished with nothing to say why: an
+  `allowed-tools` narrowed, a file in the skill grown by a byte, or an
+  edit `Kit.ReloadSkills` picked up with no read after. `WithSkillGrants`
+  and `ReloadSkills` say what the digest covers. (#72)
+- A read the skill tool refuses with `agentskill.ErrSkillChanged`, the
+  skill file gone, renamed or no longer parsing since discovery, is
+  reported to `WithSkillGrantReport` with `Err` wrapping that error, by
+  the name the call gave. The model was told to discover the skills
+  again, which it cannot, and the product, which can through
+  `Kit.ReloadSkills`, was told nothing. (#73)
+- A front that names each conversation with `session.ContextWithSessionID`
+  and no `ContextWithRecorder` had the kit's observer write every grant
+  verdict nowhere, so a restart's `RegrantSkills` found the read with no
+  recorded rules, granted nothing and said nothing. A live read of a
+  skill with rules that the session records no verdict for, granted or
+  refused, is reported with `Err` wrapping the new
+  `ErrSkillGrantUnrecorded`, and `Kit.RegrantSkills` returns the new
+  `ErrSkillGrantRecorder` before binding or granting anything when the
+  kit records its engine's verdicts and no recorder, on `ctx` or the
+  kit's own, writes the session. (#74)
+- Under `WithSkillGrantScope` a call that only a grant the scope ended
+  would have allowed is refused by the kit's BeforeToolCall hook, ahead
+  of the engine, with a reason the model reads naming the skill and the
+  tool that reads it again, until the skill is read again. The engine
+  deferred it to the ask rule and what the model read was a reviewer's
+  refusal with no word of the skill; the turn-start note was several
+  items up, and a model refused acts on the refusal in front of it. The
+  kit refuses only when the engine cannot allow the call on its own, as
+  far as `Engine.Policy()` and `Engine.Grants()` say, so a call the
+  policy allows, denies or confines goes to the engine as before. The
+  refusal is recorded as a verdict. (#76)
+- A kit restarted into a handoff wrote its whole memory manifest on its
+  first hand-back, since its own last manifest, the base of the delta,
+  lives in the kit object. The kit's fold now keeps the manifests the
+  session's path holds in force, not only their hashes, and a kit with
+  no last manifest in memory writes a delta on whichever of them gives
+  the smallest record. agentmemory's next release adds
+  `ManifestFold.Record`, which the kit's copies shrink to. (#68)
+- A render of a run the kit's session does not record, an agent built
+  from the kit and attached to nothing or to another recorder with no
+  recorder on its context, was written into that session with no run
+  around it, where `foldAtCall` read it as the render of whichever run
+  was open, and a save held across a restart was based on it. Such a
+  render is not recorded; the run's own saves are based on it in the
+  process that rendered it, and a held save of its own after a restart
+  is refused. The `Kit` and `WithSession` docs say every agent built
+  from a kit with a session is attached to it or prompted under
+  `ContextWithRecorder`. (#70)
+- `AddMCP`, `RemoveMCP` and `Close` no longer hold the kit's MCP lock
+  across a dial or a close, so `Kit.Tools()`, removing another server
+  and quitting answer while a sign-in waits in a browser or a server
+  takes its grace to close. `AddMCP` takes its number under the lock and
+  dials off it; `RemoveMCP` takes the server out of the lists and closes
+  it after; `Close` takes every server under the lock and closes them
+  together, so quitting costs one grace and not one per server, and
+  cancels a dial `AddMCP` has in flight, whose `AddMCP` returns an
+  error. `RemoveMCP`'s doc says what the close waits for under agenttool
+  v0.0.14, with and without `WithToolElicitor`. (#71)
+
+### Changed
+
+- Under `WithSkillGrantScope` a call that only an ended grant would have
+  allowed is now refused by the kit with a reason naming the skill, where
+  the engine held it for the ask rule and a reviewer answered (#76). A
+  front that showed such a call as pending sees a run that ends `done`
+  with the refusal in its output instead, and the model reads the
+  skill again before it calls; a call the policy allows, denies or
+  confines on its own still goes to the engine. The predicate is a
+  conservative reading of `Engine.Policy()` and `Engine.Grants()`, and
+  shrinks to a side-effect-free evaluation once agentpolicy exports one.
+- `Kit.RegrantSkills` returns `ErrSkillGrantRecorder` instead of nil
+  when the kit records its engine's verdicts and no recorder, on `ctx`
+  or the kit's own, writes the session it was given; it granted
+  nothing in that case before, and now says so (#74). A front that
+  called it on a bare context passes the conversation's recorder with
+  `ContextWithRecorder`. Under `WithEngine` nothing changes.
+- `WithCompaction` sends the summary request under the agent's
+  reasoning only when the agent's model writes the summary. Under
+  `WithCompactionModel` or `WithCompactor` it sets none: the product
+  chose that model knowing it, and a configuration meant for the agent's
+  may be refused by, or wasted on, another. For an agent at effort low
+  or above the summary is still asked at that effort, and the doc says a
+  thinking model spends part of the summary's cap reasoning, so a
+  product whose agent thinks passes a `compact.WithRequest` at effort
+  none, or the lowest its provider accepts; the kit does not pick a
+  lower effort itself because it does not know that floor, and several
+  reasoning models refuse none. (#75)
+
+### Documentation
+
+- The by-hand `AddMCP` block in `docs/manual.md` checked `Connect`'s
+  error after it used the server, so a server that failed to start
+  panicked; it checks first, and every elided value in the manual's Go
+  blocks is spelled out. `TestManualGoBlocksParse` parses every Go block
+  of the manual and the README, so a block that stops parsing fails the
+  build. (#67)
+- `Kit.Engine` says a front calls `Engine.Forget` for a run that ended
+  with no pending call, since the kit has no run-end hook (agentturn
+  #208).
+
 ## v0.0.6 - 2026-10-01
 
 The round 7 findings (#52 to #64), and the siblings' round 7 releases
