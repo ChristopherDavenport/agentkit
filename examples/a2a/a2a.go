@@ -84,12 +84,17 @@ func Serve(ctx context.Context, kit *agentkit.Kit, url, version string, opts ...
 // and no other process can open one: not the agentsession CLI, a second
 // replica, or an auditor.
 //
-// One kit serves every conversation here, and two things it holds are
-// the kit's rather than a conversation's: a skill grant, which the kit
-// revokes the first time it serves a second conversation
-// ([agentkit.ErrSkillGrantConversation]), and an MCP server's
-// connection, whose identity every conversation shares. A server that
-// needs either per conversation or per user builds a kit for each.
+// One kit serves every conversation here. A skill grant is its
+// conversation's, kept under the grant scope the conversation's session
+// names ([agentkit.Kit.GrantScope]). The kit cannot tell when a
+// conversation is over, and RecordEach does not call
+// [agentkit.Kit.RevokeSkillGrants] when a task ends, since the next
+// message resumes the conversation under the grants it had; a server
+// whose conversations end for good calls it then, or builds the kit with
+// WithSkillGrantScope, which ends them at each message. An MCP
+// server's connection is the kit's rather than a conversation's: its
+// identity every conversation shares. A server that needs that per
+// conversation or per user builds a kit for each.
 func RecordEach(kit *agentkit.Kit, store agentsession.Store, cwd string) fronta2a.Option {
 	type conversation struct {
 		id    string // the session ID

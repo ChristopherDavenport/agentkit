@@ -743,12 +743,11 @@ func grantedVerdicts(s *agentsession.Session) int {
 	return n
 }
 
-// One kit serving two conversations, each its own session: a skill read
-// in the first grants it there, and the first call the kit decides in the
-// second revokes that grant before deciding, so the second conversation
-// runs nothing under it; a read in the second grants nothing and says
-// why. The revocation is written to the first conversation's session.
-// (#44)
+// One kit serving several conversations, each its own session: a skill
+// read in one is granted there, under that conversation's grant scope,
+// and decides no other conversation's calls; a read in another is
+// granted there, and ending one conversation's grants ends no other's.
+// (#44, #18)
 func TestASkillGrantDoesNotReachAnotherConversation(t *testing.T) {
 	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "release", "Bash(git:*)")
 	sessions := agentsession.NewMemoryStore()
@@ -810,8 +809,20 @@ func TestASkillGrantDoesNotReachAnotherConversation(t *testing.T) {
 	if end.Reason != agentturn.ReasonInputRequired || len(ran) != 1 {
 		t.Fatalf("in another conversation git clean ran under the first one's grant: %q, ran %v", end.Reason, ran)
 	}
-	if g := kit.Engine().Grants(); len(g) != 0 {
-		t.Fatalf("grants after a second conversation = %+v, want none", g)
+	inCtx := func(rec *session.Recorder) context.Context {
+		return agentkit.ContextWithRecorder(session.ContextWithSessionID(t.Context(), rec.SessionID()), rec)
+	}
+	// The engine holds the grant under the conversation that read the
+	// skill, and decides no one else's calls by it; the second
+	// conversation's call did not end it.
+	if got := kit.GrantScope(inCtx(alice)); got != alice.SessionID() {
+		t.Fatalf("the grant scope of the first conversation = %q, want its session %q", got, alice.SessionID())
+	}
+	grantsOf := func(rec *session.Recorder) int {
+		return len(kit.Engine().GrantsFor(agentpolicy.ContextWithGrantScope(t.Context(), kit.GrantScope(inCtx(rec)))))
+	}
+	if a, b := grantsOf(alice), grantsOf(bob); a != 1 || b != 0 {
+		t.Fatalf("grants in force: %d for the owner's conversation, %d for the other's; want 1 and 0", a, b)
 	}
 	revoked := func(rec *session.Recorder) int {
 		n := 0
@@ -822,14 +833,33 @@ func TestASkillGrantDoesNotReachAnotherConversation(t *testing.T) {
 		}
 		return n
 	}
-	if a, b := revoked(alice), revoked(bob); a != 1 || b != 0 {
-		t.Fatalf("revocations recorded: %d in the owner's session, %d in the other's; want 1 and 0", a, b)
+	if a, b := revoked(alice), revoked(bob); a != 0 || b != 0 {
+		t.Fatalf("revocations recorded: %d in the owner's session, %d in the other's; want none, the second conversation ended nothing", a, b)
 	}
 
+	// The second conversation reads the skill and is granted it, a grant
+	// of its own, reported under its own scope.
 	reports = nil
-	serve(callTurn(agentskill.ToolName, `{"name":"release"}`))
-	if len(reports) != 1 || !errors.Is(reports[0].Err, agentkit.ErrSkillGrantConversation) || len(kit.Engine().Grants()) != 0 {
-		t.Fatalf("a read in another conversation reported %+v and left %d grants, want ErrSkillGrantConversation and none", reports, len(kit.Engine().Grants()))
+	carol, end := serve(callTurn(agentskill.ToolName, `{"name":"release"}`), callTurn("Bash", `{"command":"git log"}`))
+	if end.Reason == agentturn.ReasonInputRequired || !slices.Equal(ran, []string{"git status", "git log"}) {
+		t.Fatalf("a read in another conversation did not grant it the skill: %q, ran %v", end.Reason, ran)
+	}
+	if len(reports) != 1 || reports[0].Err != nil || reports[0].Scope != carol.SessionID() || len(reports[0].Granted) == 0 {
+		t.Fatalf("a read in another conversation reported %+v, want a grant under scope %s", reports, carol.SessionID())
+	}
+	if a, c := grantsOf(alice), grantsOf(carol); a != 1 || c != 1 || len(kit.Engine().Grants()) != 2 {
+		t.Fatalf("grants in force: %d and %d, %d in all; want one for each of two conversations", a, c, len(kit.Engine().Grants()))
+	}
+
+	// Ending one conversation ends its grants and no other's.
+	if n := kit.RevokeSkillGrants(inCtx(alice)); n != 1 {
+		t.Fatalf("RevokeSkillGrants removed %d rules, want the one conversation's one", n)
+	}
+	if a, c := grantsOf(alice), grantsOf(carol); a != 0 || c != 1 {
+		t.Fatalf("grants in force after the first conversation ended: %d and %d, want 0 and 1", a, c)
+	}
+	if a := revoked(alice); a != 1 {
+		t.Fatalf("revocations recorded in the ended conversation's session: %d, want 1", a)
 	}
 }
 
@@ -1126,14 +1156,14 @@ func TestConversationsNamedOnlyByTheirSessionIDAreApart(t *testing.T) {
 	}
 }
 
-// When another conversation's call ends a kit's grants, the owner's
-// session says why and the report is told once, and the owner's own
-// read after it names the conversation that ended them, not itself
-// twice. (#59)
-func TestGrantsEndedByAnotherConversationSayWhy(t *testing.T) {
+// Under the scope a conversation's grant ends with that conversation's
+// next message, and another conversation's message ends nothing of it:
+// the grants are each their conversation's, so the kit's one engine
+// serves a second conversation's first message without touching the
+// first's grant. (#59, #18)
+func TestAConversationsMessageEndsOnlyItsOwnGrants(t *testing.T) {
 	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "release", "Bash(git:*)")
 	sessions := agentsession.NewMemoryStore()
-	var reports []agentkit.SkillGrant
 	kit, err := agentkit.New(t.Context(),
 		agentkit.WithModel(stubModel{}, "m"),
 		agentkit.WithSkills(skills),
@@ -1145,12 +1175,15 @@ func TestGrantsEndedByAnotherConversationSayWhy(t *testing.T) {
 			"Bash": {Match: agentpolicy.PrefixMatcher("command")},
 		}),
 		agentkit.WithSkillGrants(trustedSkills),
-		agentkit.WithSkillGrantReport(func(g agentkit.SkillGrant) { reports = append(reports, g) }),
+		agentkit.WithSkillGrantScope(),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer kit.Close()
+	ctxOf := func(rec *session.Recorder) context.Context {
+		return agentkit.ContextWithRecorder(session.ContextWithSessionID(t.Context(), rec.SessionID()), rec)
+	}
 	serve := func(rec *session.Recorder, turns ...func(*openresponses.Emitter) error) {
 		t.Helper()
 		cfg := kit.Config()
@@ -1158,8 +1191,7 @@ func TestGrantsEndedByAnotherConversationSayWhy(t *testing.T) {
 		cfg.ToolRecorder = rec.RecordFunc()
 		agent := agentturn.New(cfg)
 		defer rec.Attach(agent)()
-		ctx := agentkit.ContextWithRecorder(session.ContextWithSessionID(t.Context(), rec.SessionID()), rec)
-		if _, err := agent.Prompt(ctx, openresponses.UserText("go")); err != nil {
+		if _, err := agent.Prompt(ctxOf(rec), openresponses.UserText("go")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1170,28 +1202,352 @@ func TestGrantsEndedByAnotherConversationSayWhy(t *testing.T) {
 		}
 		return rec
 	}
+	inForce := func(rec *session.Recorder) int {
+		ctx := ctxOf(rec)
+		return len(kit.Engine().GrantsFor(agentpolicy.ContextWithGrantScope(ctx, kit.GrantScope(ctx))))
+	}
 	alice, bob := start(), start()
 	serve(alice, callTurn(agentskill.ToolName, `{"name":"release"}`))
-	reports = nil
-	serve(bob, callTurn("Bash", `{"command":"git status"}`))
-
-	if len(reports) != 1 || reports[0].Skill != "" || !errors.Is(reports[0].Err, agentkit.ErrSkillGrantConversation) || !strings.Contains(reports[0].Err.Error(), bob.SessionID()) {
-		t.Fatalf("the trip reported %+v, want one report naming %s", reports, bob.SessionID())
+	serve(bob, callTurn(agentskill.ToolName, `{"name":"release"}`))
+	if a, b := inForce(alice), inForce(bob); a != 1 || b != 1 {
+		t.Fatalf("grants in force after each read the skill: %d and %d, want one each", a, b)
 	}
-	named := false
-	for _, c := range customEntries(openSession(t, sessions, alice.SessionID()), agentpolicy.VerdictNS) {
-		if strings.Contains(string(c.Data), "skill grants ended") && strings.Contains(string(c.Data), bob.SessionID()) {
-			named = true
+
+	// Bob's next message ends Bob's grant, and Alice's stays.
+	serve(bob, textTurn("hello"))
+	if a, b := inForce(alice), inForce(bob); a != 1 || b != 0 {
+		t.Fatalf("grants in force after Bob's next message: %d for Alice, %d for Bob; want 1 and 0", a, b)
+	}
+	revoked := func(rec *session.Recorder) int {
+		n := 0
+		for _, c := range customEntries(openSession(t, sessions, rec.SessionID()), agentpolicy.VerdictNS) {
+			if strings.Contains(string(c.Data), "revoked the rules granted by skill:release") {
+				n++
+			}
+		}
+		return n
+	}
+	if a, b := revoked(alice), revoked(bob); a != 0 || b != 1 {
+		t.Fatalf("revocations recorded: %d in Alice's session, %d in Bob's; want 0 and 1", a, b)
+	}
+	serve(alice, textTurn("hello"))
+	if a := inForce(alice); a != 0 {
+		t.Fatalf("grants in force after Alice's next message: %d, want 0", a)
+	}
+}
+
+// A child agent runs under a grant scope of its own, under its
+// conversation's: what its parent read grants the child nothing, a skill
+// the child reads is granted to the child alone, and the parent's next
+// message ends the child's grant with the parent's. (#18)
+func TestAChildAgentHasAGrantScopeOfItsOwn(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "release", "Bash(git:*)")
+	sessions := agentsession.NewMemoryStore()
+	var (
+		kit    *agentkit.Kit
+		ran    []string
+		scopes []string
+	)
+	bash := agenttool.New("Bash", "run a command",
+		func(_ context.Context, in struct {
+			Command string `json:"command"`
+		}) (string, error) {
+			ran = append(ran, in.Command)
+			return "", nil
+		})
+	probe := agenttool.New("probe", "report the grant scope",
+		func(ctx context.Context, _ agenttool.NoArgs) (string, error) {
+			scopes = append(scopes, agentpolicy.GrantScopeFromContext(ctx))
+			return "", nil
+		})
+	// The child reads the skill through the kit's own tool, which is the
+	// one that grants.
+	read := agenttool.New("read_release", "read the release skill",
+		func(ctx context.Context, _ agenttool.NoArgs) (string, error) {
+			tool, ok := kit.LookupTool(agentskill.ToolName)
+			if !ok {
+				return "", errors.New("no skill tool")
+			}
+			_, err := tool.Execute(ctx, agenttool.Call{ID: "call-read", Args: json.RawMessage(`{"name":"release"}`)})
+			return "", err
+		})
+	// The first child tries git status, which asks, and ends; the second
+	// reads the skill itself and reports its scope.
+	child := &scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn("probe", `{}`),
+		callTurn("Bash", `{"command":"git status"}`),
+		callTurn("read_release", `{}`),
+		callTurn("probe", `{}`),
+	}}
+	parent := &scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn(agentskill.ToolName, `{"name":"release"}`),
+		callTurnID("call-first", "explore", `{"input":"look around"}`),
+		callTurnID("call-second", "explore", `{"input":"read the skill"}`),
+		callTurn("Bash", `{"command":"git log"}`),
+	}}
+	var err error
+	kit, err = agentkit.New(t.Context(),
+		agentkit.WithModel(parent, "m"),
+		agentkit.WithSkills(skills),
+		agentkit.WithTools(bash),
+		agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{
+			Read:    []string{agentskill.ToolName, "probe", "read_release", "explore"},
+			Execute: []string{"Bash"},
+		}), map[string]agentpolicy.ToolMatcher{
+			"Bash": {Match: agentpolicy.PrefixMatcher("command")},
+		}),
+		agentkit.WithSkillGrants(trustedSkills),
+		agentkit.WithSkillGrantScope(),
+		agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
+		agentkit.WithChildAgent(agentturn.Config{
+			Name:        "explore",
+			Description: "delegate",
+			Model:       child,
+			ModelName:   "m",
+			Tools:       []agenttool.Tool{probe, bash, read},
+			// The child's calls are decided by the kit's engine, as a
+			// product that shares its policy with its children does.
+			BeforeToolCall: func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+				return kit.Engine().BeforeToolCall()(ctx, info)
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	agent := agentturn.New(kit.Config())
+	defer kit.Attach(agent)()
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("go")); err != nil {
+		t.Fatal(err)
+	}
+
+	parentScope := kit.SessionID()
+	firstScope := parentScope + "/" + agentsession.SubsessionID(parentScope, "call-first")
+	childScope := parentScope + "/" + agentsession.SubsessionID(parentScope, "call-second")
+	if len(scopes) != 2 || scopes[0] != firstScope || scopes[1] != childScope {
+		t.Fatalf("the children's tools ran under scopes %q, want each its own, %q and %q", scopes, firstScope, childScope)
+	}
+	if slices.Contains(ran, "git status") {
+		t.Fatalf("the child ran git status under its parent's grant: %v", ran)
+	}
+	if !slices.Contains(ran, "git log") {
+		t.Fatalf("the parent did not run git log under its own grant: %v", ran)
+	}
+	ctxOf := func(scope string) context.Context { return agentpolicy.ContextWithGrantScope(t.Context(), scope) }
+	if p, c := len(kit.Engine().GrantsFor(ctxOf(parentScope))), len(kit.Engine().GrantsFor(ctxOf(childScope))); p != 1 || c != 1 {
+		t.Fatalf("grants in force: %d for the parent, %d for the child; want one each, the child's read granted it alone", p, c)
+	}
+
+	// The parent's next message ends the child's grant with its own.
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("again")); err != nil {
+		t.Fatal(err)
+	}
+	if p, c := len(kit.Engine().GrantsFor(ctxOf(parentScope))), len(kit.Engine().GrantsFor(ctxOf(childScope))); p != 0 || c != 0 || len(kit.Engine().Grants()) != 0 {
+		t.Fatalf("grants in force after the parent's next message: %d, %d, %d in all; want none", p, c, len(kit.Engine().Grants()))
+	}
+}
+
+// The children of a conversation are the scopes recorded as run under
+// it, not the scopes whose names begin with its own: a front that names
+// its conversations "user/4", "user/42" and "user/42/chat7" has three
+// conversations, and a message in the first ends nothing of the others,
+// nor does ending the second end the third's.
+func TestAScopeIsNotTheParentOfAScopeItsNameBeginsWith(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "release", "Bash(git:*)")
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithSkills(skills),
+		agentkit.WithTools(namedTool(t, "Bash")),
+		agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{
+			Read:    []string{agentskill.ToolName},
+			Execute: []string{"Bash"},
+		}), map[string]agentpolicy.ToolMatcher{
+			"Bash": {Match: agentpolicy.PrefixMatcher("command")},
+		}),
+		agentkit.WithSkillGrants(trustedSkills),
+		agentkit.WithSkillGrantScope(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	scopes := []string{"user/4", "user/42", "user/42/chat7"}
+	ctxOf := func(scope string) context.Context { return agentpolicy.ContextWithGrantScope(t.Context(), scope) }
+	tool := skillTool(t, kit)
+	for _, scope := range scopes {
+		args := json.RawMessage(`{"name":"release"}`)
+		if _, err := tool.Execute(ctxOf(scope), agenttool.Call{ID: "call-" + scope, Args: args}); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if !named {
-		t.Fatal("the owner's session has no verdict saying which conversation ended its grants")
+	inForce := func() []int {
+		var out []int
+		for _, scope := range scopes {
+			out = append(out, len(kit.Engine().GrantsFor(ctxOf(scope))))
+		}
+		return out
+	}
+	if got := inForce(); !slices.Equal(got, []int{1, 1, 1}) {
+		t.Fatalf("grants in force after each read the skill = %v, want one in each", got)
 	}
 
-	reports = nil
-	serve(alice, callTurnID("call-again", agentskill.ToolName, `{"name":"release"}`))
-	if len(reports) != 1 || !strings.Contains(reports[0].Err.Error(), "decided a call in session \""+bob.SessionID()+"\"") {
-		t.Fatalf("the owner's read after the trip reported %+v, want one naming %s", reports, bob.SessionID())
+	// A message in user/4 ends user/4's grant alone.
+	turn := func(scope string) {
+		t.Helper()
+		info := agentturn.TurnStartInfo{RunID: "run-" + scope, Transcript: agentturn.Transcript{openresponses.UserText("hello")}}
+		if _, err := kit.Config().BeforeTurn(ctxOf(scope), info); err != nil {
+			t.Fatal(err)
+		}
+	}
+	turn("user/4")
+	if got := inForce(); !slices.Equal(got, []int{0, 1, 1}) {
+		t.Fatalf("grants in force after a message in user/4 = %v, want 0, 1, 1", got)
+	}
+	// Ending user/42 ends user/42's grant alone, and a message in it too.
+	if n := kit.RevokeSkillGrants(ctxOf("user/42")); n != 1 {
+		t.Fatalf("RevokeSkillGrants(user/42) removed %d rules, want its own one", n)
+	}
+	if got := inForce(); !slices.Equal(got, []int{0, 0, 1}) {
+		t.Fatalf("grants in force after user/42 ended = %v, want 0, 0, 1", got)
+	}
+	turn("user/42")
+	if got := inForce(); !slices.Equal(got, []int{0, 0, 1}) {
+		t.Fatalf("grants in force after a message in user/42 = %v, want user/42/chat7's kept", got)
+	}
+}
+
+// A message the transcript's tail test does not see, a steer delivered
+// before an output, still ends the grants of the child agents of its
+// conversation: they are bound to the user message their parent's turn
+// was under, and the count of the transcript now is higher. The
+// conversation holds no grant of its own here, so nothing else would end
+// them.
+func TestAMessageTheTailMissesEndsTheChildrensGrants(t *testing.T) {
+	for _, byCall := range []bool{false, true} {
+		t.Run(fmt.Sprintf("RevokeSkillGrants=%v", byCall), func(t *testing.T) {
+			skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "release", "Bash(git:*)")
+			sessions := agentsession.NewMemoryStore()
+			var kit *agentkit.Kit
+			read := agenttool.New("read_release", "read the release skill",
+				func(ctx context.Context, _ agenttool.NoArgs) (string, error) {
+					tool, ok := kit.LookupTool(agentskill.ToolName)
+					if !ok {
+						return "", errors.New("no skill tool")
+					}
+					_, err := tool.Execute(ctx, agenttool.Call{ID: "call-read", Args: json.RawMessage(`{"name":"release"}`)})
+					return "", err
+				})
+			child := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("read_release", `{}`)}}
+			parent := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("explore", `{"input":"read the skill"}`)}}
+			var err error
+			kit, err = agentkit.New(t.Context(),
+				agentkit.WithModel(parent, "m"),
+				agentkit.WithSkills(skills),
+				agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{
+					Read: []string{agentskill.ToolName, "read_release", "explore"},
+				}), map[string]agentpolicy.ToolMatcher{"Bash": {Match: agentpolicy.PrefixMatcher("command")}}),
+				agentkit.WithSkillGrants(trustedSkills),
+				agentkit.WithSkillGrantScope(),
+				agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
+				agentkit.WithChildAgent(agentturn.Config{
+					Name: "explore", Description: "delegate", Model: child, ModelName: "m",
+					Tools: []agenttool.Tool{read},
+					BeforeToolCall: func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+						return kit.Engine().BeforeToolCall()(ctx, info)
+					},
+				}),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer kit.Close()
+			agent := agentturn.New(kit.Config())
+			defer kit.Attach(agent)()
+			if _, err := agent.Prompt(t.Context(), openresponses.UserText("go")); err != nil {
+				t.Fatal(err)
+			}
+			if n := len(kit.Engine().Grants()); n != 1 {
+				t.Fatalf("grants in force after the child read the skill = %d, want the child's one", n)
+			}
+
+			ctx := agentkit.ContextWithRecorder(session.ContextWithSessionID(t.Context(), kit.SessionID()), kit.Recorder())
+			if byCall {
+				// Ending the conversation ends its children's grants too.
+				if n := kit.RevokeSkillGrants(ctx); n != 1 {
+					t.Fatalf("RevokeSkillGrants removed %d rules, want the child's one", n)
+				}
+			} else {
+				// Two user messages and an output last: the tail test sees none.
+				transcript := agentturn.Transcript{
+					openresponses.UserText("go"),
+					openresponses.UserText("a steer"),
+					openresponses.NewFunctionCallOutput("call-x", "done"),
+				}
+				if _, err := kit.Config().BeforeTurn(ctx, agentturn.TurnStartInfo{RunID: "later", Transcript: transcript}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if n := len(kit.Engine().Grants()); n != 0 {
+				t.Fatalf("grants in force after the conversation's message or end = %d, want the child's ended", n)
+			}
+		})
+	}
+}
+
+// Without skill grants the kit puts no grant scope on a child agent's
+// context: a scope the product put on the host's, and grants of its own
+// under it, are the child's as they are any tool call's.
+func TestAChildKeepsTheProductsOwnGrantScopeWithoutSkillGrants(t *testing.T) {
+	var ran []string
+	bash := agenttool.New("Bash", "run a command",
+		func(_ context.Context, in struct {
+			Command string `json:"command"`
+		}) (string, error) {
+			ran = append(ran, in.Command)
+			return "", nil
+		})
+	var kit *agentkit.Kit
+	child := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("Bash", `{"command":"git status"}`)}}
+	parent := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("explore", `{"input":"look"}`)}}
+	var err error
+	kit, err = agentkit.New(t.Context(),
+		agentkit.WithModel(parent, "m"),
+		agentkit.WithTools(bash),
+		agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{
+			Read:    []string{"explore"},
+			Execute: []string{"Bash"},
+		}), map[string]agentpolicy.ToolMatcher{"Bash": {Match: agentpolicy.PrefixMatcher("command")}}),
+		agentkit.WithSession(agentsession.NewMemoryStore(), agentsession.Header{CWD: t.TempDir()}),
+		agentkit.WithChildAgent(agentturn.Config{
+			Name: "explore", Description: "delegate", Model: child, ModelName: "m",
+			Tools: []agenttool.Tool{bash},
+			BeforeToolCall: func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+				return kit.Engine().BeforeToolCall()(ctx, info)
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	ctx := agentpolicy.ContextWithGrantScope(t.Context(), "host")
+	granted, refused := kit.Engine().GrantSet(ctx, agentpolicy.RuleSet{
+		Source: agentpolicy.Source{Name: "product", Trusted: true},
+		Allow:  []agentpolicy.Rule{{Tool: "Bash", Spec: "git:*"}},
+	})
+	if len(granted) != 1 || len(refused) != 0 {
+		t.Fatalf("the product's grant: granted %v, refused %v", granted, refused)
+	}
+	agent := agentturn.New(kit.Config())
+	defer kit.Attach(agent)()
+	if _, err := agent.Prompt(ctx, openresponses.UserText("go")); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ran, []string{"git status"}) {
+		t.Fatalf("the child ran %v, want git status under the product's own grant scope", ran)
 	}
 }
 
@@ -1798,10 +2154,11 @@ func TestACallOnlyAnEndedGrantAllowedIsRefusedNamingTheSkill(t *testing.T) {
 		policy   agentpolicy.Policy
 		matchers map[string]agentpolicy.ToolMatcher
 		opts     []agentpolicy.Option
-		tool     string // the tool the model calls after the user's next message
-		first    string // the args it calls the tool with under the grant
-		second   string // the args it calls it with after the message
-		want     string // "blocked", "ran", "asked" or "denied"
+		hook     func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) // WithBeforeToolCall
+		tool     string                                                                         // the tool the model calls after the user's next message
+		first    string                                                                         // the args it calls the tool with under the grant
+		second   string                                                                         // the args it calls it with after the message
+		want     string                                                                         // "blocked", "ran", "asked" or "denied"
 	}
 	rules := func(text string) []agentpolicy.Rule {
 		out, err := agentpolicy.ParseRules(text)
@@ -1825,6 +2182,14 @@ func TestACallOnlyAnEndedGrantAllowedIsRefusedNamingTheSkill(t *testing.T) {
 		return out, nil
 	}
 	bashMatchers := map[string]agentpolicy.ToolMatcher{"bash": {Match: agentpolicy.PrefixMatcher("command"), Subjects: split}}
+	// deferSecondCall asks about the call the model makes after the
+	// grant ended, as a product's own hook asks about a call of its own.
+	deferSecondCall := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+		if info.Call != nil && info.Call.CallID == "call-second" {
+			return &agentturn.ToolDecision{Action: agentturn.Defer, Reason: "the product wants to know"}, nil
+		}
+		return nil, nil
+	}
 	it := `{"what":"it"}`
 	cases := []tc{
 		{name: "the filing: a bare ask rule the grant answered", allowed: "act",
@@ -1855,12 +2220,33 @@ func TestACallOnlyAnEndedGrantAllowedIsRefusedNamingTheSkill(t *testing.T) {
 		{name: "a bare ask a carve-out cancels", allowed: "bash(uptime:*)",
 			policy: agentpolicy.Policy{Ask: rules("bash bash(!uptime:*)"), Default: agentpolicy.Allow()}, matchers: bashMatchers,
 			tool: "bash", first: `{"command":"uptime"}`, second: `{"command":"uptime"}`, want: "ran"},
-		// An agentpolicy option of the product's may change how the engine
-		// reads any of its state, so the kit refuses nothing under one.
-		{name: "an engine option of the product's", allowed: "act",
+		// The kit asks the engine what it would decide, [agentpolicy.Engine.Would],
+		// so an agentpolicy option of the product's, which may change how
+		// the engine reads its own state, is read as the engine reads it.
+		{name: "an engine option that changes nothing the call needs", allowed: "act",
 			policy: agentpolicy.Policy{Ask: rules("act"), Default: agentpolicy.Allow()},
 			opts:   []agentpolicy.Option{agentpolicy.WithConfinement(func(context.Context, agenttool.Tool, json.RawMessage) (bool, string) { return false, "" })},
-			tool:   "act", first: it, second: it, want: "asked"},
+			tool:   "act", first: it, second: it, want: "blocked"},
+		{name: "an engine option that lets the call past the ask", allowed: "act",
+			policy: agentpolicy.Policy{Ask: rules("act"), Default: agentpolicy.Allow()},
+			opts:   []agentpolicy.Option{agentpolicy.WithConfinement(func(context.Context, agenttool.Tool, json.RawMessage) (bool, string) { return true, "sandbox" })},
+			tool:   "act", first: it, second: it, want: "ran"},
+		{name: "a hook of the product's that allows nothing more", allowed: "act",
+			policy: agentpolicy.Policy{Ask: rules("act"), Default: agentpolicy.Allow()},
+			opts: []agentpolicy.Option{agentpolicy.WithHooks(func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+				return nil, nil
+			})},
+			tool: "act", first: it, second: it, want: "blocked"},
+		// A hook of the product's that defers is the engine's to decide
+		// with: the kit does not answer its question with a refusal naming
+		// a skill that would not have helped, and does when an ask rule is
+		// behind the verdict as well.
+		{name: "a product hook that defers a call the policy allows", allowed: "act",
+			policy: agentpolicy.Policy{Allow: rules("act"), Default: agentpolicy.Ask()}, hook: deferSecondCall,
+			tool: "act", first: it, second: it, want: "asked"},
+		{name: "a product hook that defers beside an ask rule", allowed: "act",
+			policy: agentpolicy.Policy{Ask: rules("act"), Default: agentpolicy.Allow()}, hook: deferSecondCall,
+			tool: "act", first: it, second: it, want: "blocked"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1890,7 +2276,11 @@ func TestACallOnlyAnEndedGrantAllowedIsRefusedNamingTheSkill(t *testing.T) {
 				callTurnID("call-reread", agentskill.ToolName, `{"name":"clock"}`),
 				callTurnID("call-third", c.tool, c.second),
 			}}
-			kit, err := agentkit.New(t.Context(),
+			var hooks []agentkit.Option
+			if c.hook != nil {
+				hooks = append(hooks, agentkit.WithBeforeToolCall(c.hook))
+			}
+			kit, err := agentkit.New(t.Context(), append(hooks,
 				agentkit.WithModel(model, "m"),
 				agentkit.WithSkills(skills),
 				agentkit.WithTools(tool("act"), tool("other"), tool("bash")),
@@ -1900,7 +2290,7 @@ func TestACallOnlyAnEndedGrantAllowedIsRefusedNamingTheSkill(t *testing.T) {
 				}),
 				agentkit.WithSkillGrantScope(),
 				agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
-			)
+			)...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1948,6 +2338,96 @@ func TestACallOnlyAnEndedGrantAllowedIsRefusedNamingTheSkill(t *testing.T) {
 				if len(ours) != 0 || len(denied) == 0 || runs[c.tool] != 0 {
 					t.Fatalf("refusals %q, denials %q, %s ran %d times; want the deny's reason alone", ours, denied, c.tool, runs[c.tool])
 				}
+			}
+		})
+	}
+}
+
+// The kit asks the engine what it would decide, Engine.Would, which
+// folds the product's hooks in as the decision does, and its contract is
+// that the question is no decision: a hook's answer reached that way is
+// not observed as a verdict and nothing is remembered as held for it. The
+// hook is called once more for the question, the call's own verdict is
+// recorded once, and the one deferral the engine holds is the call's own.
+func TestTheKitsQuestionToTheEngineIsNoDecision(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		// ask is whether an ask rule names the tool, so the kit's refusal
+		// answers the call before the hook the engine folds in after it.
+		ask       bool
+		wantHook  int  // calls of the hook for the second call
+		wantHeld  bool // the engine holds the call as deferred
+		wantEnded agentturn.Reason
+	}{
+		{name: "an ask rule is behind the verdict", ask: true, wantHook: 1, wantHeld: false, wantEnded: agentturn.ReasonDone},
+		{name: "a hook's question is the only one", ask: false, wantHook: 2, wantHeld: true, wantEnded: agentturn.ReasonInputRequired},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "clock", "act")
+			var (
+				hookCalls int
+				verdicts  = map[string]int{}
+			)
+			asks := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+				if info.Call != nil && info.Call.CallID == "call-second" {
+					hookCalls++
+					return &agentturn.ToolDecision{Action: agentturn.Defer, Reason: "the product wants to know"}, nil
+				}
+				return nil, nil
+			}
+			act := agenttool.New("act", "a tool", func(context.Context, agenttool.NoArgs) (string, error) { return "ran", nil })
+			rules, err := agentpolicy.ParseRules("act " + agentskill.ToolName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := agentpolicy.Policy{Allow: rules, Default: agentpolicy.Allow()}
+			if c.ask {
+				p = agentpolicy.Policy{Ask: rules[:1], Allow: rules[1:], Default: agentpolicy.Allow()}
+			}
+			model := &scriptModel{turns: []func(*openresponses.Emitter) error{
+				callTurn(agentskill.ToolName, `{"name":"clock"}`),
+				callTurnID("call-first", "act", `{}`),
+				textTurn("done it"),
+				callTurnID("call-second", "act", `{}`),
+			}}
+			kit, err := agentkit.New(t.Context(),
+				agentkit.WithModel(model, "m"),
+				agentkit.WithSkills(skills),
+				agentkit.WithTools(act),
+				agentkit.WithPolicy(p, nil),
+				agentkit.WithBeforeToolCall(asks),
+				agentkit.WithVerdictObserver(func(_ context.Context, v agentpolicy.Verdict) { verdicts[v.CallID]++ }),
+				agentkit.WithSkillGrants(trustedSkills),
+				agentkit.WithSkillGrantScope(),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer kit.Close()
+			agent := agentturn.New(kit.Config())
+			if _, err := agent.Prompt(t.Context(), openresponses.UserText("use the skill")); err != nil {
+				t.Fatal(err)
+			}
+			end, err := agent.Prompt(t.Context(), openresponses.UserText("act again"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if end.Reason != c.wantEnded {
+				t.Fatalf("run ended %q, want %q", end.Reason, c.wantEnded)
+			}
+			// Where no ask rule is behind the question, the product's hook
+			// is respected: it defers the call, and the kit refuses nothing.
+			if c.wantHeld && len(outputsSaying(agent.State().Transcript, "ended with the user's last message")) != 0 {
+				t.Fatal("the kit answered a hook's question with a refusal naming a skill")
+			}
+			if hookCalls != c.wantHook {
+				t.Fatalf("the product's hook decided the call %d times, want %d: once for the kit's question when the fold goes on to it", hookCalls, c.wantHook)
+			}
+			if verdicts["call-second"] != 1 {
+				t.Fatalf("the call has %d verdicts, want one, the decision's own; the question records none", verdicts["call-second"])
+			}
+			if _, held := kit.Engine().Deferred(end.RunID, "call-second"); held != c.wantHeld {
+				t.Fatalf("the engine holds the call as deferred = %v, want %v; the question remembers nothing", held, c.wantHeld)
 			}
 		})
 	}

@@ -39,7 +39,7 @@ and no fold is recorded.
 | `ToolProvider` | `WithTools`, `WithSkills`, `WithMemory`, `WithMCP`, `WithChildAgent`, `WithDeferredTools`, `WithToolProvider`, `WithToolFilter`, `WithToolWrap`, `WithPolicy` | `append` the slices, wrap each tool, and wrap the list in `engine.ToolProvider` — see below |
 | `BeforeTurn` | `WithSkillGrantScope`, `WithBeforeTurn` | `agentturn.ChainBeforeTurn(revokeOnUserMessage, yours...)` — see below |
 | `BeforeModelCall` | `WithMemory`, `WithGuards`, `WithVerdictObserver`, `WithBeforeModelCall` | `agentturn.ChainBeforeModelCall(instructions, chain.BeforeModelCall(), yours...)` — see below |
-| `BeforeToolCall` | `WithPolicy`, `WithMemory`, `WithSkillGrants`, `WithSkillGrantScope`, `WithBeforeToolCall` | `agentturn.ChainBeforeToolCall(keepSaveBase, grantGuard, engine.BeforeToolCall())`, the engine built with `agentpolicy.WithHooks(refuseEndedGrant, yours...)`; with `WithEngine` or no policy, `yours...` after the engine and no `refuseEndedGrant` — see below |
+| `BeforeToolCall` | `WithPolicy`, `WithMemory`, `WithSkillGrants`, `WithSkillGrantScope`, `WithBeforeToolCall` | `agentturn.ChainBeforeToolCall(keepSaveBase, decide)`, `decide` being `engine.BeforeToolCall()` under the call's grant scope, the engine built with `agentpolicy.WithHooks(refuseEndedGrant, yours...)`; with `WithEngine` or no policy, `yours...` after the engine and no `refuseEndedGrant` — see below |
 | `AfterToolCall` | `WithAfterToolCall` | assign it; the kit contests nothing here |
 | `OutputGuard` | `WithGuards`, `WithOutputGuard` | `agentturn.ChainOutputGuard(chain.OutputGuard(), yours...)` |
 | `ShouldStopAfterTurn` | `WithGuards`, `WithShouldStopAfterTurn` | `agentturn.ChainShouldStopAfterTurn(chain.ShouldStopAfterTurn(), yours...)` |
@@ -165,15 +165,22 @@ tools = append(tools, childagent.New(childCfg,
 		}
 	}),
 	childagent.WithRunContext(func(ctx context.Context, callID string) context.Context {
-		r := recorderFor(ctx)
-		if r == nil {
-			return ctx
+		parent := scopeOf(ctx) // below
+		child := callID
+		if r := recorderFor(ctx); r != nil {
+			ctx = r.ChildContext(ctx, callID)
+			if id := session.SessionIDFromContext(ctx); id != "" {
+				child = id
+				if withMemory {
+					ctx = agentmemory.WithSession(ctx, id)
+				}
+			}
 		}
-		ctx = r.ChildContext(ctx, callID)
-		if id := session.SessionIDFromContext(ctx); id != "" && withMemory {
-			ctx = agentmemory.WithSession(ctx, id)
-		}
-		return ctx
+		// Under WithSkillGrants only: the child's own grant scope, under its
+		// conversation's, which the child's skill reads grant under, and a
+		// record of whose child it is, so the conversation's next message
+		// ends its grants: they are bound to the parent's user-message mark.
+		return agentpolicy.ContextWithGrantScope(ctx, parent+"/"+child)
 	})))
 // The catalogue's tool as it stands: ReloadSkills puts another
 // catalogue's in its place, and every run sees it from its next call.
@@ -241,9 +248,20 @@ for i, t := range tools {
 	}
 }
 
-cfg.ToolProvider = engine.ToolProvider(func(ctx context.Context) []agenttool.Tool {
-	return append(tools, remote.Tools()...) // the MCP list per turn
+offered := engine.ToolProvider(func(ctx context.Context) []agenttool.Tool {
+	list := append(tools, remote.Tools()...) // the MCP list per turn
+	if run := agentturn.RunIDFromContext(ctx); run != "" {
+		unions[run] = byName(list) // for lookup, below
+	} else {
+		own = byName(list)
+	}
+	return list
 })
+cfg.ToolProvider = func(ctx context.Context) []agenttool.Tool {
+	// Under WithSkillGrants the engine's offer filter reads the grant
+	// scope of the conversation off the context it is consulted with.
+	return offered(agentpolicy.ContextWithGrantScope(ctx, scopeOf(ctx)))
+}
 ```
 
 `grant` is `WithSkillGrants`, under "What the kit does" below. The
@@ -254,7 +272,9 @@ property the tool declares.
 The kit sets `ToolProvider` and never `Tools`, because an MCP server's
 list changes and the loop reads the provider once per turn. With no
 policy there is no `engine.ToolProvider` wrapper and the inner function
-is the field.
+is the field, and without skill grants the wrapper is `offered` itself,
+the scope being put on the context only because the kit makes grants
+under it.
 
 `agentmemory.WithRendered` bases a `memory_save` on the hash the block
 showed the model, so a write another session made after the render is
@@ -380,7 +400,8 @@ added = append(added, r)
 mu.Unlock()
 
 // Removing one: out of the list under the lock, closed after it, since
-// Close may wait for the server's calls in flight.
+// Close takes a few seconds at most (agenttool v0.0.15 ends the calls
+// in flight with mcpclient.ErrClosed rather than waiting for them).
 mu.Lock()
 added = slices.DeleteFunc(added, func(a *mcpclient.Remote) bool { return a == r })
 mu.Unlock()
@@ -515,19 +536,10 @@ record := func(ctx context.Context, r *session.Recorder, m agentmemory.Manifest)
 	}
 	ns, data := m.Record()
 	if folds {
-		ns, data = m.RecordSince(f.Manifest()) // a delta on the one in force
-		switch {
-		case seen && prev.man.Hash() != f.inForce() && f.holds(prev.man.Hash()):
-			if ns2, own := m.RecordSince(prev.man); len(own) < len(data) {
-				ns, data = ns2, own // after a handoff: a delta on this kit's own last one
-			}
-		case !seen: // a restarted kit: its own last one may be among those the fold holds
-			for _, held := range f.held()[1:] {
-				if ns2, own := m.RecordSince(held); len(own) < len(data) {
-					ns, data = ns2, own
-				}
-			}
-		}
+		// The smallest record over the manifests the fold holds, which is
+		// a delta on the one in force, or on this kit's own last one after
+		// a handoff or a restart while the fold still holds it.
+		ns, data = f.Record(m) // agentmemory.ManifestFold.Record (v0.0.10)
 	}
 	entry, err := r.Annotate(ctx, ns, json.RawMessage(data))
 	if err != nil {
@@ -539,12 +551,14 @@ record := func(ctx context.Context, r *session.Recorder, m agentmemory.Manifest)
 ```
 
 `fold` is an `agentmemory.ManifestFold` kept per session with the ID of
-the last record it folded and the distinct manifests it holds in force,
-the last `agentmemory.ManifestFoldDepth`, kept again beside the fold
-with their hashes, since the fold does not expose them: `upTo` folds
-the records after that one on the path, or the whole path again when it
-is no longer there, after a `Rebase`; `holds` says whether a delta on a
-manifest resolves, and `held` is the manifests, most recent first.
+the last record it folded and the hash of the manifest in force: `upTo`
+folds the records after that one on the path, or the whole path again
+when it is no longer there, after a `Rebase`, and `inForce` is that
+hash, empty while the last record would not fold. The fold holds the
+distinct manifests in force, the last `agentmemory.ManifestFoldDepth`,
+and `Record` writes the smallest record over them, so the kit keeps no
+copy of its own (agentmemory v0.0.10; before it, the kit kept them again
+beside the fold with their hashes, since the fold did not expose them).
 `recordsRun` says whether the path records the run: a run entry starts
 it and none has ended it, or the path holds no run entry at all, a
 session something that writes no runs records, read as one run.
@@ -571,16 +585,17 @@ them carries the manifest of the render its run was shown.
 
 A manifest is written whenever the render differs from the manifest in
 force on the path of the session it lands in, and as
-`agentmemory.Manifest.RecordSince` that one or, where it is smaller,
-this kit's own last manifest while the fold still resolves it: whole
-only where nothing is in force, a new session or a child's. In a
-handoff the manifest in force is the other kit's, which shares nothing
-with this one, and a delta on it was the whole manifest at every
-hand-back. A kit restarted into the handoff has no last manifest of its
-own in memory, so it tries every manifest the fold holds and writes the
-smallest record, which is a delta on its own last one while that is
-among them; past `ManifestFoldDepth` other manifests it writes whole, as
-a kit that was never restarted does. Such a delta is refused by `agentmemory.ApplyManifestRecord`,
+`agentmemory.ManifestFold.Record` returns it: the smallest of the whole
+manifest and a delta on each manifest the fold holds, which is a delta
+on the one in force or on this kit's own last manifest while the fold
+still resolves it, and whole only where nothing is in force, a new
+session or a child's. In a handoff the manifest in force is the other
+kit's, which shares nothing with this one, and a delta on it was the
+whole manifest at every hand-back. A kit restarted into the handoff has
+no last manifest of its own in memory, and the fold still holds the one
+it wrote before, so its record is a delta on that one while it is among
+them; past `ManifestFoldDepth` other manifests it writes whole, as a kit
+that was never restarted does. Such a delta is refused by `agentmemory.ApplyManifestRecord`,
 so a reader of the session folds with `agentmemory.ManifestFold`
 (agentmemory v0.0.9), as the kit does. The path is read through the
 recorder's store: `Open` on a session a store holds hands back the live
@@ -619,11 +634,20 @@ it is given (agentpolicy v0.0.6), so a product's own
 ## `BeforeToolCall`, and the engine
 
 ```go
-// lookup resolves a name in the union the provider last returned,
-// which is what Kit.LookupTool does.
-lookup := func(name string) (agenttool.Tool, bool) { t, ok := last[name]; return t, ok }
+// lookup resolves a name in the union the provider last returned to the
+// run whose call is decided, which is what Kit.LookupToolFor does: the
+// run's own list by the run's ID, and for a run it has none for, or none,
+// the kit's own: the list offered outside any run, never another run's.
+lookup := func(ctx context.Context, name string) (agenttool.Tool, bool) {
+	union, ok := unions[agentturn.RunIDFromContext(ctx)] // a bounded map, filled by the provider
+	if !ok {
+		union = own
+	}
+	t, found := union[name]
+	return t, found
+}
 engine, err := agentpolicy.Build(policy, matchers,
-	agentpolicy.WithTools(lookup),
+	agentpolicy.WithToolsFor(lookup),
 	agentpolicy.WithObserver(observe),
 	agentpolicy.WithHooks(refuseEndedGrant, yours...), // WithSkillGrantScope, then WithBeforeToolCall
 )
@@ -641,30 +665,33 @@ keepSaveBase := func(ctx context.Context, info agentturn.ToolCallInfo) (*agenttu
 	return nil, nil
 }
 
-// grantGuard revokes every skill grant the first time a call is decided
-// in a conversation the grants do not belong to, and decides nothing
-// (WithSkillGrants).
-grantGuard := func(ctx context.Context, _ agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
-	if conv := conversation(ctx); owned && !shared && conv != owner { // below
-		shared, tripBy = true, conv
-		octx := agentkit.ContextWithRecorder(context.Background(), ownerRec)
-		observe(octx, agentpolicy.Verdict{Action: agentturn.Block, By: agentpolicy.ByPolicy,
-			Reason: fmt.Sprintf("skill grants ended: the kit decided a call in session %q, ...", conv)})
-		for _, name := range granted {
-			engine.Revoke(octx, name)
-		}
-		report(agentkit.SkillGrant{Err: fmt.Errorf("%w: the kit decided a call in session %q, so it revoked the grants of session %q and grants nothing after", agentkit.ErrSkillGrantConversation, conv, owner)})
+// scope is the grant scope a run on ctx belongs to, Kit.GrantScope: the
+// conversation a skill read there is granted to, and the only one whose
+// calls the grant decides. Below.
+scopeOf := func(ctx context.Context) string {
+	if s := agentpolicy.GrantScopeFromContext(ctx); s != "" {
+		return s // a front's own, or a child agent's, which the child's run context carries
 	}
-	return nil, nil
+	return conversation(ctx) // below
+}
+
+// decide is the engine's hook under the grant scope of the call's
+// conversation (WithSkillGrants): the sets the engine consults are the
+// policy's, the unscoped ones and those of this scope.
+decide := func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+	return engine.BeforeToolCall()(agentpolicy.ContextWithGrantScope(ctx, scopeOf(ctx)), info)
 }
 
 // refuseEndedGrant blocks, inside the engine, a call that only a grant
 // the scope ended allowed and that the engine would only ask about
 // (WithSkillGrantScope). endedBy is what the last revocations under
-// BeforeTurn ended, by the source each was made under, which a read of
-// the skill clears and ReloadSkills prunes of skills no longer listed.
+// BeforeTurn ended in each grant scope, by the source each was made
+// under, which a read of the skill clears and ReloadSkills prunes of
+// skills no longer listed.
+type asking struct{}
 refuseEndedGrant := func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
-	if !scoped || len(endedBy) == 0 || !owned || shared || conversation(ctx) != owner {
+	ended := endedBy[scopeOf(ctx)]
+	if !scoped || len(ended) == 0 || ctx.Value(asking{}) != nil {
 		return nil, nil
 	}
 	// Every subject of the call must be covered by an ended rule of a
@@ -677,14 +704,11 @@ refuseEndedGrant := func(ctx context.Context, info agentturn.ToolCallInfo) (*age
 		}
 		subjects = split
 	}
-	var skills, tools []string
+	var skills []string
 	for _, s := range subjects {
 		tool := cmp.Or(s.Tool, info.Call.Name)
-		if !slices.Contains(tools, tool) {
-			tools = append(tools, tool)
-		}
 		covered := false
-		for _, lg := range endedBy {
+		for _, lg := range ended {
 			if _, listed := catalog.Lookup(lg.skill); !listed {
 				continue
 			}
@@ -708,62 +732,35 @@ refuseEndedGrant := func(ctx context.Context, info agentturn.ToolCallInfo) (*age
 			return nil, nil
 		}
 	}
-	if engineDecides(ctx, info, tools) { // below
+	// What the engine decides for the call without the grants, which are
+	// revoked: Engine.Would, the decision before the batch hold with the
+	// same rules, confinement and hooks, this one among them, and so asked
+	// not to refuse again.
+	v, err := engine.Would(context.WithValue(ctx, asking{}, true), info)
+	if err != nil || v.Action != agentturn.Defer {
 		return nil, nil
+	}
+	if v.Rule == nil && hooksGiven { // yours..., or WithPolicy's options, which may add some
+		return nil, nil // the default's ask or a hook's: a grant would not have changed it
 	}
 	reason := "the tools skill " + skills[0] + " granted ended with the user's last message; " +
 		"read the skill again with the " + agentskill.ToolName + " tool, then make this call again"
 	return &agentturn.ToolDecision{Action: agentturn.Block, By: agentpolicy.ByPolicy, Reason: reason}, nil
 }
-
-// engineDecides: the engine's exported state leaves it a way to decide
-// the call other than by a bare ask, so the call is left to it.
-engineDecides := func(ctx context.Context, info agentturn.ToolCallInfo, tools []string) bool {
-	if len(engineOpts) > 0 { // WithPolicy's agentpolicy.Option values
-		return true
-	}
-	if confined, _ := agenttool.ConfinedBy(ctx, info.Tool, info.Args); confined {
-		return true
-	}
-	p, sets := engine.Policy(), engine.Grants()
-	action, _ := p.Default.Action()
-	for _, tool := range tools {
-		named := false
-		// decides: some rule of list names the tool and is not a bare ask.
-		decides := func(list []agentpolicy.Rule, ask bool) bool {
-			for _, r := range list {
-				if !r.MatchesTool(tool) {
-					continue
-				}
-				named = true
-				if !ask || !r.Bare() {
-					return true
-				}
-			}
-			return false
-		}
-		if decides(p.Allow, false) || decides(p.Deny, false) || decides(p.Ask, true) {
-			return true
-		}
-		for _, set := range sets {
-			if decides(set.Allow, false) || decides(set.Deny, false) || decides(set.Ask, true) {
-				return true
-			}
-		}
-		if !named && action == agentturn.Allow {
-			return true
-		}
-	}
-	return false
-}
-cfg.BeforeToolCall = agentturn.ChainBeforeToolCall(keepSaveBase, grantGuard, engine.BeforeToolCall())
+cfg.BeforeToolCall = agentturn.ChainBeforeToolCall(keepSaveBase, decide)
 ```
 
-Both chained hooks decide nothing, so they go first, ahead of whatever
-may hold or allow the call: `keepSaveBase` keeps the render for any
-holder, and `grantGuard` revokes before the engine decides with the
-grants in force. The conversation test in `grantGuard` is under "What
-the kit does" below.
+Without skill grants `decide` is `engine.BeforeToolCall()` itself: the
+scope is put on the context only because the kit makes grants under it,
+and the kit's `ToolProvider` is wrapped the same way, the context given
+to `engine.ToolProvider` carrying the scope, since the engine's offer
+filter reads a bare deny of a scoped set from it. A product that calls
+the engine on a conversation's behalf puts the scope on the context it
+calls with, `agentpolicy.ContextWithGrantScope(ctx, kit.GrantScope(ctx))`:
+`engine.Answers` for a `Resume`, `engine.GrantsFor` to show the grants in
+force, `engine.RevokeScope` when the conversation ends. `keepSaveBase`
+decides nothing and goes first, ahead of whatever may hold or allow the
+call: it keeps the render for any holder.
 
 `refuseEndedGrant` is the one decision the kit makes, and it makes it
 inside the engine, as the first of the hooks `agentpolicy.WithHooks`
@@ -783,21 +780,24 @@ verdict, so the kit writes none itself; it is not reported to
 `WithSkillGrantReport`. With `WithEngine` the kit cannot fold a hook
 into the engine, so there is no refusal.
 
-The engine has no side-effect-free evaluation to ask whether it would
-allow the call, so `engineDecides` is conservative over its exported
-state and the kit refuses only when that state leaves the engine no way
-to decide other than by a bare ask: for every tool of the call's
-subjects, every rule naming that tool in `Engine.Policy()`'s allow,
-deny and ask lists and in every `Engine.Grants()` set is a bare ask,
-with no specifier and no carve-out; when no rule names the tool, the
-default does not allow; the call's tool does not say it runs confined,
-which lets a call past a bare ask; and `WithPolicy` was given no
-agentpolicy option of the product's, which may change how the engine
-reads any of that. An ask rule with a specifier the call does not match
-leaves the call allowed by default, and so does a bare ask a carve-out
-cancels, so any specifier naming a tool is the engine's to read, as is
-any allow or deny naming one and any option. The predicate collapses to
-agentpolicy's side-effect-free `Engine.Would` once that lands.
+Whether the engine would have allowed the call without the grant is
+`Engine.Would`'s answer (agentpolicy v0.0.11): the verdict `Decide`
+reaches before the batch hold, with the same policy, the grants still in
+force under the call's scope, the call's confinement and the hooks
+folded in, and nothing remembered or observed. The kit refuses when it
+is a `Defer`, which is what the grant answered. A call it allows needs no
+grant, and the engine folds its hooks only after a policy that denies,
+so a denied call never reaches this one, and a deny rule beats a grant
+in any case. Because the hooks are folded into `Would`, this one is
+among them, which is what `asking` is for, and the product's are called
+once more for it, so a hook must decide a call the same way however
+often it is asked. With hooks of the product's, or options that may add
+some, the kit refuses only when an ask rule is behind the verdict
+(`v.Rule`), since a hook's question would be asked whatever a grant did
+and the verdict does not say whose it is. An agentpolicy option of the
+product's, `WithAliases` or `WithConfinement` among them, is read as the
+engine reads it, where the conservative test this replaced, over
+`Engine.Policy()` and `Engine.Grants()`, gave up on any option.
 
 The memory tools the kit offers are wrapped with `agenttool.Wrap`
 around what `agentmemory.Tools` returns. The wrapper reads the kept
@@ -809,20 +809,23 @@ its base across the Resume, and is refused when none is known rather
 than based on another run's render. All three writes are refused when
 the render says the budget dropped the block, whether the model called
 them outright or a person approved a held one: the kept render carries
-the flag, and the manifest recorded at the call carries its shape, no
-entry shown and an entry the block held listed among the omitted with
-no reason. A drop whose bounded render had already omitted every entry
-under the budget, or of an empty store, leaves the shape of a block that
-fit its floor and no entry, and is not told apart from it after a
-restart.
+the flag, and the manifest recorded at the call carries its mark, no
+entry shown and the entries the block held listed among the omitted with
+`agentmemory.OmitBlock` for their reason (agentmemory v0.0.10). The
+render of an empty store omits nothing, so a drop of one is not told
+apart from a block that held nothing after a restart. A session
+recorded before agentkit v0.0.7 wrote the drop with no reason on its
+entries, and is not read as one.
 
 The product's hooks go into the engine rather than after it
 (agentpolicy v0.0.7), so a hook that asks about a call holds its
 siblings in the same batch hold as the policy's own asks; chained after
 the engine, the siblings ran before anyone answered. The lookup is how
 the engine reads a sibling's confinement before the loop hands it that
-sibling's call; `Kit.LookupTool` reads the union the provider last
-returned, before the policy's filter. All three are engine options, not
+sibling's call; `Kit.LookupToolFor` reads the union the provider last
+returned to the decision's own run, before the policy's filter, through
+`agentpolicy.WithToolsFor` (v0.0.11), so two runs off one kit whose
+tool lists differ each read their own. All three are engine options, not
 config fields. With `WithEngine` the kit can give the engine none of
 them, and chains the product's hooks after the engine's with
 `agentturn.ChainBeforeToolCall`.
@@ -920,11 +923,10 @@ revokeOnUserMessage := func(ctx context.Context, info agentturn.TurnStartInfo) (
 	if marked {
 		marks[info.RunID] = mark // what a grant made in this run is bound to; a bounded map
 	}
-	if !owned || shared || conversation(ctx) != owner {
-		return nil, nil
-	}
+	sc := scopeOf(ctx) // the conversation's grant scope; another conversation's grants are not touched
+	sctx := agentpolicy.ContextWithGrantScope(ctx, sc)
 	stale := false // a grant was made under an earlier user message
-	for _, lg := range live {
+	for _, lg := range live[sc] {
 		if lg.bound && (mark.n > lg.under.n || mark.digest != lg.under.digest) {
 			stale = true
 		}
@@ -932,13 +934,29 @@ revokeOnUserMessage := func(ctx context.Context, info agentturn.TurnStartInfo) (
 	if !newUserMessage(info.Transcript) && !(marked && stale) {
 		return nil, nil
 	}
-	ended := live // the grants in force, by skill, with the rules the engine took
-	for _, name := range granted { // the sources the grants were made under
-		engine.Revoke(ctx, name)
+	var ended []liveGrant // the grants in force, by skill, with the rules the engine took
+	inEngine := map[string]bool{}
+	for _, set := range engine.GrantsFor(sctx) {
+		inEngine[set.Source.Name] = true
 	}
-	live = nil
+	for _, name := range granted[sc] { // the sources the grants were made under
+		if lg, ok := live[sc][name]; ok && inEngine[name] {
+			ended = append(ended, lg) // one the product revoked from the engine itself ended nothing here
+		}
+		engine.Revoke(sctx, name)
+	}
+	delete(live, sc)
+	// The child agents run under the conversation end with its message:
+	// their scopes are the conversation's and a slash and the child's.
+	for child := range granted {
+		if strings.HasPrefix(child, sc+"/") {
+			engine.RevokeScope(agentpolicy.ContextWithGrantScope(ctx, child))
+			delete(granted, child)
+			delete(live, child)
+		}
+	}
 	for _, lg := range ended {
-		endedBy[lg.source] = lg // for grantGuard, until the skill is read again
+		endedBy[sc][lg.source] = lg // for refuseEndedGrant, until the skill is read again
 	}
 	if len(ended) == 0 {
 		return nil, nil
@@ -980,9 +998,9 @@ above refuses that call with the same word. It runs on every turn, not only
 the first: a follow-up continues the run it joins and a steer arrives
 between turns, and either is a new message that must end the last
 request's grant. A `Resume`'s first turn ends with the answered calls'
-outputs, so an approval keeps the grant. A message in a conversation
-the grants do not belong to revokes nothing, since nothing was granted
-there.
+outputs, so an approval keeps the grant. A message ends the
+grants of its own conversation, and of the child agents run under it,
+and no other conversation's.
 
 The mark is what binds a grant to a message. The skill tool's wrapper,
 after `engine.GrantSet`, keeps `live[source] = liveGrant{skill, rules,
@@ -1081,12 +1099,21 @@ Nine things, all outside `agentturn.Config`:
   reasoning item came from, `agentturn.WithReasoningModels`; and the
   calls pending there, read through a fork's origin, for
   `agentturn.New`. `Kit.Transcript()` is `session.Transcript(sess)`.
-- `Kit.LookupTool(name)` reads the union the provider last returned,
-  and is what the kit's engine is given through `agentpolicy.WithTools`.
-- `WithSkillGrants`' grants belong to one conversation, since
-  `GrantSet` adds a rule set the engine applies to every decision: the
-  session the kit opened or was given, or, for a kit with none, the
-  conversation of the first grant. A run's conversation is:
+- `Kit.LookupToolFor(ctx, name)` reads the union the provider last
+  returned to the run the context belongs to, and is what the kit's
+  engine is given through `agentpolicy.WithToolsFor`; `Kit.LookupTool(name)`
+  reads the kit's own, the union offered outside any run, the fallback
+  for a context with no run or a run the kit has no union for: never
+  another run's, which under concurrent conversations can be another
+  conversation's tools.
+- `WithSkillGrants`' grants belong to the conversation that read the
+  skill. `GrantSet` and `Revoke` take the grant scope off the context
+  they are called with, and the engine consults the unscoped sets and
+  those of the call's own scope, so the kit makes each grant under the
+  scope its read's context names and puts the call's scope on the
+  context it decides under, `decide` above. A run's scope, which is
+  `Kit.GrantScope(ctx)`, is the scope its context carries, else its
+  conversation:
 
   ```go
   conversation := func(ctx context.Context) string {
@@ -1094,9 +1121,6 @@ Nine things, all outside `agentturn.Config`:
   		return r.SessionID()
   	}
   	if sid := session.SessionIDFromContext(ctx); sid != "" {
-  		if c, ok := childOf[sid]; ok { // a child of a run the kit served: childContext
-  			return c
-  		}
   		if rec == nil || opened && sid != rec.SessionID() { // not under WithRecorder
   			return sid
   		}
@@ -1104,18 +1128,35 @@ Nine things, all outside `agentturn.Config`:
   	if rec != nil {
   		return rec.SessionID()
   	}
-  	return ""
+  	return "agentkit:no-session" // not "", which is the unscoped set that decides every call
   }
   ```
 
   so a front that names its conversations with
-  `session.ContextWithSessionID` alone is several conversations, not
-  one. A read in any other conversation is not granted and is reported
-  with `agentkit.ErrSkillGrantConversation`, and `grantGuard` above
-  revokes every grant, in the owner's session, the first time a call is
-  decided elsewhere, records why and reports it, after which the kit
-  grants nothing. A front that grants skills to many conversations
-  gives each its own kit.
+  `session.ContextWithSessionID` alone is several conversations, and a
+  read in one grants nothing in another. Under `WithSkillGrants` a
+  child agent `WithChildAgent` offers runs under a scope of its own, its
+  conversation's and a slash and its session ID (the call's ID and a
+  number without a recording), `parent+"/"+child` in the `ToolProvider`
+  block above, so its parent's skills grant it nothing. The slash makes
+  a name that reads well and nothing more: the kit records which scopes
+  are a conversation's children when one of them grants, and the
+  conversation's next message, or `Kit.RevokeSkillGrants`, ends exactly
+  those, `engine.RevokeScope` for each, never a scope whose name merely
+  begins with the conversation's. A child's grants are bound to the
+  user-message mark of its parent's turn, so a message the transcript's
+  tail test misses ends them as it ends the parent's. Without skill
+  grants the kit puts no scope on a child, and a scope the product
+  put on the host's context, with its own grants under it, is the
+  child's. The kit forgets what it kept of a conversation's grants at
+  `Kit.RevokeSkillGrants(ctx)`, which a front calls when the
+  conversation ends, as it calls `engine.RevokeScope` for grants of its
+  own under the scope. `WithSkillGrantReport` hears every conversation's
+  reads and `SkillGrant.Scope` says whose. The revocation under the
+  scope records a verdict per source, `revoked the rules granted by
+  <source>`, as before, and a replay also ends everything on a
+  verdict `revoked the rules granted under <scope>`, which is what
+  `Engine.RevokeScope` records.
 - With `WithSkillGrants` and a session `New` opened, `New` grants
   again what the session's journal left in force, and
   `Kit.RegrantSkills(ctx, sess)` does the same for a session a front

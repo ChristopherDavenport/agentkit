@@ -71,17 +71,20 @@ conversation's session when the last task running in it ends, and the
 next message resumes it; a front that never releases holds every
 session it has served, and no other process can open one.
 
-Two things stay the kit's however the front records: a skill grant,
-which is a rule set on the kit's one engine and belongs to one
-conversation, so the kit revokes its grants the first time it serves a
-second (`agentkit.ErrSkillGrantConversation`), and says so in the owner's
-session and to `WithSkillGrantReport`; and an MCP server's
-connection, dialed once at `New`, whose identity, an OAuth token among
-it, every conversation shares. A front that needs either per
-conversation or per user builds a kit for each. For an OAuth-protected
-server, `mcpclient.StoreTokens` keeps each user's grant in a
-`TokenStore` keyed by the endpoint and that user, so the kit built for
-them after a restart connects without asking again.
+A skill grant follows the conversation. It is a rule set on the kit's
+one engine, kept under the grant scope of the conversation that read the
+skill, the session of the run's recorder or the session ID the run's
+context names, `kit.GrantScope(ctx)`, and it decides no other
+conversation's calls. A front that ends a conversation calls
+`kit.RevokeSkillGrants(ctx)` with its context, so nothing the
+conversation opened outlives it, and `WithSkillGrantReport` hears every
+conversation's reads with `SkillGrant.Scope` saying whose. An MCP
+server's connection stays the kit's: it is dialed once at `New`, and its
+identity, an OAuth token among it, every conversation shares. A front
+that needs that per conversation or per user builds a kit for each. For
+an OAuth-protected server, `mcpclient.StoreTokens` keeps each user's
+grant in a `TokenStore` keyed by the endpoint and that user, so the kit
+built for them after a restart connects without asking again.
 
 `examples/a2a` wraps both as `Peer` and `Serve`, `RecordEach` is the
 per-conversation recording, and `Both` is the round trip: an agent that
@@ -124,8 +127,8 @@ kit, err := agentkit.New(ctx,
 )
 ```
 
-The option earns its place on two bindings: when a session is
-configured, the kit passes `childagent.WithObserver(rec.Observe)` to
+The option earns its place on bindings the option list cannot make:
+when a session is configured, the kit passes `childagent.WithObserver(rec.Observe)` to
 the child, so the child's own run is recorded live into a session
 linked to the parent's, and `childagent.WithRunContext` with the
 recorder's `ChildContext`, so the child's tools see that session's ID.
@@ -135,10 +138,27 @@ memory the child saves names the child's session and not the parent's:
 
 ```go
 childagent.WithRunContext(func(ctx context.Context, callID string) context.Context {
+	parent := kit.GrantScope(ctx)
 	ctx = rec.ChildContext(ctx, callID)
-	return agentmemory.WithSession(ctx, session.SessionIDFromContext(ctx))
+	ctx = agentmemory.WithSession(ctx, session.SessionIDFromContext(ctx))
+	// Under WithSkillGrants only: the child's own grant scope, under its
+	// conversation's. The kit also records whose child it is and which user
+	// message its grants are bound to, for the conversation's next message.
+	return agentpolicy.ContextWithGrantScope(ctx, parent+"/"+session.SessionIDFromContext(ctx))
 })
 ```
+
+The grant scope is the third binding. A skill a conversation read grants
+its tools to that conversation's calls, and a child run from a tool call
+inherits its parent's context, so without a scope of its own it would
+run under what its parent was granted. Under `WithSkillGrants` the kit
+gives the child's context one, the child's session ID under its
+conversation's, or the call's ID and a number when there is no
+recording; a skill the child reads is the child's alone, and the
+conversation's next message, or `kit.RevokeSkillGrants`, ends it with
+the conversation's own. Without skill grants the kit puts no scope on
+the child's context, and a scope the product put on the host's, with
+grants of its own under it, is the child's.
 
 The recorder does not exist until `New` has opened the session, so
 those bindings are not something a product can do in the option list
@@ -146,8 +166,8 @@ those bindings are not something a product can do in the option list
 caller's own `childagent.Option`s are applied after the kit's, so
 passing an observer or a run context still wins.
 
-Without a session, or without the recording, a child is an ordinary
-tool and needs no option:
+Without a session, or without the recording, and without skill grants,
+a child is an ordinary tool and needs no option:
 
 ```go
 kit, err := agentkit.New(ctx,

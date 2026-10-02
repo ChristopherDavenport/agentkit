@@ -129,7 +129,7 @@ contest was silent, and the kit is where they get called, in one order:
 | field | order |
 |---|---|
 | `BeforeModelCall` | memory re-render, then the guards over each part and over the whole request, then the product's |
-| `BeforeToolCall` | the skill grants' guard, which decides nothing, then the policy engine, with the scope's refusal of a call only an ended grant allowed and then the product's hooks folded into it (`agentpolicy.WithHooks`) |
+| `BeforeToolCall` | the policy engine, under the grant scope of the call's conversation, with the scope's refusal of a call only an ended grant allowed and then the product's hooks folded into it (`agentpolicy.WithHooks`) |
 | `OutputGuard` | the guards, then the product's |
 | `ShouldStopAfterTurn` | the policy's, then the product's |
 | `BeforeTurn` | the skill grants' revoke at each new user message under `WithSkillGrantScope`, then the product's |
@@ -217,20 +217,22 @@ policy: reading a skill grants its rules to the engine through
 attributes the grant to an **untrusted** source unless the caller's own
 source function says otherwise, so a skill widens what the agent may do
 only when the product has said it trusts the tree the skill came from.
-`WithSkillGrantScope` ends each grant when the user's next message arrives,
-whichever agent's run received it, as Claude Code clears
-`allowed-tools` at the next message, and `kit.RevokeSkillGrants(ctx)`
-ends them when a front says; a skill read again is granted again, and
-under the scope the model is told which grants a message ended and
-that a read restores them, and a call only an ended grant allowed is
-refused, inside the engine, naming the skill to read again. The kit
-refuses only when every rule naming the call's tools, in the policy and
-in every grant in force, is a bare ask, the default does not allow a
-tool no rule names, the tool does not say it runs confined, and
-`WithPolicy` was given no agentpolicy option; any specifier, allow,
-deny or option leaves the call to the engine, which asks, allows or
-denies it as before. The test collapses to agentpolicy's
-side-effect-free `Engine.Would` once that lands.
+A grant belongs to the conversation that read the skill: the engine
+keeps it under that conversation's grant scope, its session ID
+(`agentpolicy.ContextWithGrantScope`, `kit.GrantScope(ctx)`), and
+decides only that conversation's calls, so one kit serves any number of
+conversations and a child agent runs under a scope of its own.
+`WithSkillGrantScope` ends each grant when the user's next message in
+its conversation arrives, whichever agent's run received it, as Claude
+Code clears `allowed-tools` at the next message, and
+`kit.RevokeSkillGrants(ctx)` ends a conversation's when a front says; a
+skill read again is granted again, and under the scope the model is told
+which grants a message ended and that a read restores them, and a call
+only an ended grant allowed is refused, inside the engine, naming the
+skill to read again. The kit refuses when `Engine.Would`, the engine's
+own side-effect-free decision, says it would ask, so the policy, the
+grants in force, the tool's confinement and every agentpolicy option
+and hook are read as the engine reads them.
 `kit.ReloadSkills(ctx)` discovers the skills again, for an agent that
 writes a skill and uses it in the same conversation.
 
@@ -252,18 +254,21 @@ conversation's session and not in the kit's. `RecordEach` in
 [`examples/a2a`](examples/a2a/a2a.go) is that function, releasing each
 session when its conversation's last task ends; copy it. An engine a
 product built for `WithEngine` records its verdicts there only if its
-own observer reads `agentkit.RecorderFromContext`. A skill grant and an
-MCP server's connection stay the kit's, not the conversation's: the
-kit revokes its grants the first time it serves a second conversation,
-and every conversation calls an MCP server as whoever authorized the
-connection. A conversation is the session of the recorder on the run's
-context, or the session `session.ContextWithSessionID` names there, so
-a front that names its conversations only that way is still several
-conversations to the kit; one that names them neither way, as
-`fronta2a.New(kit.Config())` alone does, is one. A front that needs either per conversation or per user
-builds a kit for each, and keeps each user's OAuth grant across
-restarts with `mcpclient.StoreTokens`, keyed by the server and that
-user (`WithMCPTransport` shows the wiring).
+own observer reads `agentkit.RecorderFromContext`. A skill grant follows
+the conversation, since the engine keeps it under that conversation's
+grant scope and decides no other's calls; an MCP server's connection
+stays the kit's, and every conversation calls it as whoever authorized
+the connection. A conversation is the session of the recorder on the
+run's context, or the session `session.ContextWithSessionID` names
+there, or a scope the front names with `agentpolicy.ContextWithGrantScope`,
+so a front that names its conversations by any of them is several
+conversations to the kit; one that names them none, as
+`fronta2a.New(kit.Config())` alone does, is one. A front ends a
+conversation with `kit.RevokeSkillGrants(ctx)`. A front that needs an
+MCP connection per conversation or per user builds a kit for each, and
+keeps each user's OAuth grant across restarts with
+`mcpclient.StoreTokens`, keyed by the server and that user
+(`WithMCPTransport` shows the wiring).
 
 `WithChildAgent` is the in-process one, and it exists for a different
 reason than a seam: it binds the child's observer and run context to
@@ -295,14 +300,14 @@ a2a.
 
 | library | version |
 |---|---|
-| `openresponses` | v0.0.12 |
-| `agenttool`, `agenttool/mcpclient` | v0.0.14 |
-| `agentturn`, `agentturn/session` | v0.0.15 |
-| `agentsession` | v0.0.19 |
+| `openresponses` | v0.0.14 |
+| `agenttool`, `agenttool/mcpclient` | v0.0.15 |
+| `agentturn`, `agentturn/session` | v0.0.16 |
+| `agentsession` | v0.0.20 |
 | `agentsmd` | v0.0.2 |
-| `agentskill` | v0.0.10 |
-| `agentmemory` | v0.0.9 |
-| `agentpolicy` | v0.0.10 |
+| `agentskill` | v0.0.11 |
+| `agentmemory` | v0.0.10 |
+| `agentpolicy` | v0.0.11 |
 
 Every sibling is required at a released version with no `replace`, and
 `make no-replace` enforces it: the kit is the module that proves the

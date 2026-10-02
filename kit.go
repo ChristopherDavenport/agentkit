@@ -113,8 +113,8 @@ type Kit struct {
 	// AddMCP connected and RemoveMCP has not removed, mcpNext, the
 	// number the next one is labelled with, and origins, which Kit.Tools
 	// reads and AddMCP and RemoveMCP change. It is never held across a
-	// dial or a close, which may wait on a sign-in or a server, so none
-	// of those waits holds Kit.Tools, RemoveMCP or Close.
+	// dial or a close, which may wait on a sign-in or take a few seconds,
+	// so neither holds Kit.Tools, RemoveMCP or Close.
 	mcpMu   sync.Mutex
 	remotes []*mcpclient.Remote
 	added   []addedMCP
@@ -137,11 +137,19 @@ type Kit struct {
 	// handed out before Close may still be called through.
 	closed atomic.Bool
 
-	// union is the tools the provider last returned, by name, before the
-	// policy's filter: what [Kit.LookupTool] reads, and through it the
-	// engine the kit builds, which reads a call's siblings' tools for
-	// the batch hold before the loop hands it their calls.
-	union atomic.Pointer[map[string]agenttool.Tool]
+	// union is the tools the provider last returned outside any run, by
+	// name, before the policy's filter: the kit's own configuration,
+	// what [Kit.LookupTool] reads. runUnions is the
+	// union each run's provider call last returned, keyed by the run's
+	// ID and guarded by umu, which [Kit.LookupToolFor] reads, and
+	// through it the engine the kit builds, which reads a call's
+	// siblings' tools for the batch hold before the loop hands it their
+	// calls.
+	union     atomic.Pointer[map[string]agenttool.Tool]
+	umu       sync.Mutex
+	runUnions bounded[map[string]agenttool.Tool]
+	// childSeq numbers the scopes of child agents run with no recording.
+	childSeq atomic.Uint64
 
 	// mu guards the skill catalogue and its tool, which ReloadSkills
 	// replaces, and the parts, the memory manifest and the memory
@@ -353,7 +361,7 @@ func New(ctx context.Context, opts ...Option) (*Kit, error) {
 	}
 	if k.grants != nil && k.sess != nil {
 		k.grants.gmu.Lock()
-		k.grants.regrant(ctx, k.sess, k.grants.scoped)
+		k.grants.regrant(agentpolicy.ContextWithGrantScope(ctx, k.conversationOf(k.rec, "")), k.sess, k.grants.scoped)
 		k.grants.gmu.Unlock()
 	}
 	return k, nil
@@ -396,8 +404,9 @@ func offersSkillTool(s *settings) bool {
 // buildEngine builds the engine WithPolicy asked for, with the kit's
 // options ahead of the caller's: the tool lookup, the observer, and the
 // product's BeforeToolCall hooks. The lookup is one field, so the
-// caller's agentpolicy.WithTools replaces it; the engine keeps every
-// observer and every hook, so the caller's run after the kit's.
+// caller's agentpolicy.WithTools or WithToolsFor replaces it; the engine
+// keeps every observer and every hook, so the caller's run after the
+// kit's.
 func (k *Kit) buildEngine(s *settings) (*agentpolicy.Engine, error) {
 	if s.engine != nil {
 		return s.engine, nil
@@ -406,12 +415,12 @@ func (k *Kit) buildEngine(s *settings) (*agentpolicy.Engine, error) {
 		return nil, nil
 	}
 	// The union does not exist yet, so the engine is handed the kit's
-	// lookup, which reads it as of the current turn.
+	// lookup, which reads the union the decision's own run was offered.
 	// The observer is bound whether or not the kit has a session: a run
 	// served under a recorder on its context, ContextWithRecorder, is
 	// recorded there.
 	opts := []agentpolicy.Option{
-		agentpolicy.WithTools(k.LookupTool),
+		agentpolicy.WithToolsFor(k.LookupToolFor),
 		agentpolicy.WithObserver(k.observeVerdicts(s, false)),
 	}
 	// The product's hooks are folded into the engine's decision, before
@@ -834,21 +843,18 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 		src := source{name: "WithSkills", tools: []agenttool.Tool{tool}}
 		if s.skillGrants && k.engine != nil {
 			k.grants = &skillGrants{
-				cat:       k.Catalog,
-				engine:    k.engine,
-				source:    s.skillSource,
-				report:    s.skillGrant,
-				conv:      k.conversation,
-				mark:      k.markFor,
-				matchers:  s.matchers,
-				extraOpts: len(s.engineOpts) > 0,
-				scoped:    s.skillGrantScope,
+				cat:      k.Catalog,
+				engine:   k.engine,
+				source:   s.skillSource,
+				report:   s.skillGrant,
+				scope:    k.GrantScope,
+				mark:     k.markFor,
+				matchers: s.matchers,
+				scoped:   s.skillGrantScope,
+				hooks:    len(s.beforeToolCall) > 0 || len(s.engineOpts) > 0,
 			}
 			if s.engine == nil {
 				k.grants.observe = k.observeVerdicts(s, false)
-			}
-			if k.rec != nil {
-				k.grants.owner, k.grants.ownerRec, k.grants.bound = k.rec.SessionID(), k.rec, true
 			}
 			src.own = k.grants.wrap
 		}
@@ -894,16 +900,22 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 		return errors.Join(errs...)
 	}
 	k.origins = origins
-	k.remember(tools)
+	k.remember(ctx, tools)
 
 	union := ts.provider()
 	provider := func(ctx context.Context) []agenttool.Tool {
 		tools := union(ctx)
-		k.remember(tools)
+		k.remember(ctx, tools)
 		return tools
 	}
 	if k.engine != nil {
-		provider = k.engine.ToolProvider(provider)
+		offered := k.engine.ToolProvider(provider)
+		provider = offered
+		if k.grants != nil {
+			// The engine's filter reads the grant scope of the context it
+			// is consulted with, as its decisions do.
+			provider = func(ctx context.Context) []agenttool.Tool { return offered(k.grants.scopedCtx(ctx)) }
+		}
 	}
 	k.cfg.ToolProvider = provider
 	return nil
@@ -958,7 +970,7 @@ func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
 // been outright; the render of the call's run; and, after a restart or
 // once the bounded maps have dropped the run, the manifest in force at
 // the call on the run's session's path, [Kit.manifestAtCall], refused
-// when its shape is a dropped render's, [droppedRender]. A manifest the
+// when it is a dropped render's, [droppedRender]. A manifest the
 // path cannot attribute to the call's run, or whose shape does not say,
 // is let through to the base saveAsRendered finds, or refuses for.
 //
@@ -997,16 +1009,17 @@ func (k *Kit) refuseWhenDropped(t agenttool.Tool) agenttool.Tool {
 
 // droppedRender reports whether m is the manifest [memoryPart] makes
 // for a render the budget dropped: no entry shown, and among the omitted
-// one with no reason, an entry the block held before the drop moved it
-// there. A block that fit its floor and no entry shows a block and omits
-// every entry with [agentmemory.OmitBudget], so it is not one. A drop
-// whose bounded render had already omitted every entry that way, and a
-// drop of an empty store, leave the same shape as those, and are not
-// told apart from them: a write composed from such a render is refused
-// in the process that rendered it, which kept the flag, and after a
-// restart is based on the manifest at the call, which shows no entry.
+// one with [agentmemory.OmitBlock] for its reason, which every entry the
+// store held carries when the block is dropped whole. A block that fit
+// its floor and no entry shows a block and omits every entry with
+// [agentmemory.OmitBudget], so it is not one, and the reason tells it
+// from one. The render of an empty store omits nothing, so a drop of
+// one is not told apart from a block that held nothing, and a write
+// composed from it is refused in the process that rendered it, which
+// kept the flag. A session a kit before agentkit v0.0.7 recorded wrote
+// the drop's entries with no reason, and is not read as one.
 func droppedRender(m agentmemory.Manifest) bool {
-	return len(m.Entries) == 0 && slices.ContainsFunc(m.Omitted, func(e agentmemory.ManifestEntry) bool { return e.Reason == "" })
+	return len(m.Entries) == 0 && slices.ContainsFunc(m.Omitted, func(e agentmemory.ManifestEntry) bool { return e.Reason == agentmemory.OmitBlock })
 }
 
 // saveAsRendered runs a memory_save call against a memory_save based on
@@ -1128,7 +1141,9 @@ func foldAtCall(path []agentsession.Entry, callID string) (agentmemory.Manifest,
 // manifestFold is the memory manifest records of a session's path folded
 // with [agentmemory.ManifestFold], which resolves a delta on any of the
 // last [agentmemory.ManifestFoldDepth] manifests in force, as far as the
-// record at.
+// record at. The fold holds those manifests and
+// [agentmemory.ManifestFold.Record] writes the smallest record over them,
+// so the kit keeps none of its own.
 type manifestFold struct {
 	fold agentmemory.ManifestFold
 	// at is the ID of the last record folded, "" before any.
@@ -1136,16 +1151,8 @@ type manifestFold struct {
 	// valid is false while the last record would not fold, so what is in
 	// force is not known.
 	valid bool
-	// recent are the distinct manifests in force, most recent first, as
-	// the fold holds them, and hashes their hashes: the bases a delta
-	// may name. The fold does not expose the manifests it holds, so they
-	// are kept again here, for the kit that has no last manifest of its
-	// own in memory, after a restart, to write a delta on one of them.
-	// That is at most ManifestFoldDepth manifests per session the kit
-	// records into, recordedSessions sessions at most, each manifest a
-	// line per entry.
-	recent []agentmemory.Manifest
-	hashes []string
+	// hash is the hash of the manifest in force, set while valid.
+	hash string
 }
 
 // apply folds the manifest record e.
@@ -1156,27 +1163,16 @@ func (f *manifestFold) apply(e *agentsession.CustomEntry) {
 		return
 	}
 	f.valid = true
-	m := f.fold.Manifest()
-	h := m.Hash()
-	if i := slices.Index(f.hashes, h); i >= 0 {
-		f.recent = slices.Delete(f.recent, i, i+1)
-		f.hashes = slices.Delete(f.hashes, i, i+1)
-	}
-	f.recent = slices.Insert(f.recent, 0, m)
-	f.hashes = slices.Insert(f.hashes, 0, h)
-	if len(f.recent) > agentmemory.ManifestFoldDepth {
-		f.recent = f.recent[:agentmemory.ManifestFoldDepth]
-		f.hashes = f.hashes[:agentmemory.ManifestFoldDepth]
-	}
+	f.hash = f.fold.Manifest().Hash()
 }
 
 // inForce is the hash of the manifest in force, and false when nothing
 // is known to be.
 func (f *manifestFold) inForce() (string, bool) {
-	if f.at == "" || !f.valid || len(f.hashes) == 0 {
+	if f.at == "" || !f.valid {
 		return "", false
 	}
-	return f.hashes[0], true
+	return f.hash, true
 }
 
 // foldPath brings the fold kept for session sid up to path's end and
@@ -1237,20 +1233,25 @@ func (k *Kit) buildHooks(s *settings) {
 	before = append(before, s.beforeModelCall...)
 	k.cfg.BeforeModelCall = chain1(before, agentturn.ChainBeforeModelCall)
 
-	// BeforeToolCall: the memory_save base and the skill grants' guard,
-	// which decide nothing and so go first, ahead of whatever may hold or
-	// allow the call; then the engine, with the scope's refusal and the
-	// product's own hooks folded into it when the kit built it, and the
-	// product's chained after it otherwise.
+	// BeforeToolCall: the memory_save base, which decides nothing and so
+	// goes first, ahead of whatever may hold or allow the call; then the
+	// engine, with the scope's refusal and the product's own hooks folded
+	// into it when the kit built it, and the product's chained after it
+	// otherwise. Under skill grants the engine decides under the grant
+	// scope of the call's conversation, so a grant is its conversation's.
 	var tool []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
 	if s.memStore != nil {
 		tool = append(tool, k.keepSaveBase)
 	}
-	if k.grants != nil {
-		tool = append(tool, k.grants.guard)
-	}
 	if k.engine != nil {
-		tool = append(tool, k.engine.BeforeToolCall())
+		decide := k.engine.BeforeToolCall()
+		if k.grants != nil {
+			inner := decide
+			decide = func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+				return inner(k.grants.scopedCtx(ctx), info)
+			}
+		}
+		tool = append(tool, decide)
 	}
 	if !s.policySet {
 		tool = append(tool, s.beforeToolCall...)
@@ -1510,18 +1511,16 @@ func guardParts(ctx context.Context, c guard.Chain, parts []Part) ([]Part, error
 // path's records with [agentmemory.ManifestFold], kept per session and
 // brought up to date each turn from the record it reached, so a turn
 // reads only the records written since the last. A render that hashes as
-// what is in force is not written; any other is written as a delta,
-// [agentmemory.Manifest.RecordSince], on what is in force or, when that
-// is smaller, on this kit's own last manifest while the fold still
-// resolves it: after a handoff the manifest in force is the other kit's,
-// and a delta on it would be the whole manifest. A kit with no last
-// manifest in memory for the session, one restarted into the handoff,
-// takes whichever manifest the fold holds gives the smallest record,
-// which is its own last one while that is still among them. Whole only
-// when nothing folds there. When the store cannot open the session the write is
-// whole, and is skipped only while the render has not moved and the last
-// manifest any kit in the process wrote to that session through that
-// recorder is this kit's.
+// what is in force is not written; any other is written as
+// [agentmemory.ManifestFold.Record] returns it, the smallest of the whole
+// manifest and a delta on each manifest the fold holds, which is this
+// kit's own last one while it is among the last few in force, after a
+// handoff, where the manifest in force is the other kit's and a delta on
+// it would be the whole manifest, and after a restart, where the kit has
+// no last manifest in memory. Whole only when nothing folds there. When
+// the store cannot open the session the write is whole, and is skipped
+// only while the render has not moved and the last manifest any kit in
+// the process wrote to that session through that recorder is this kit's.
 //
 // The comparison, the write and the remembering are one critical
 // section. Two turns that rendered different manifests must not write
@@ -1568,27 +1567,12 @@ func (k *Kit) record(ctx context.Context, man agentmemory.Manifest) error {
 	}
 	ns, data := man.Record()
 	if folds {
-		ns, data = man.RecordSince(f.fold.Manifest())
-		// In a handoff the manifest in force is the other kit's, which
-		// shares nothing with this one, so a delta on it is the whole
-		// manifest. This kit's own last one is a base the fold still
-		// resolves while it is among the last few in force.
-		switch ph := prev.man.Hash(); {
-		case seen && ph != f.hashes[0] && slices.Contains(f.hashes, ph):
-			if ns2, own := man.RecordSince(prev.man); len(own) < len(data) {
-				ns, data = ns2, own
-			}
-		case !seen:
-			// A restarted kit has no last manifest in memory, but the
-			// fold may still hold the one it wrote before: whichever
-			// of the manifests in force gives the smallest record, the
-			// most recent on a tie.
-			for _, m := range f.recent[1:] {
-				if ns2, own := man.RecordSince(m); len(own) < len(data) {
-					ns, data = ns2, own
-				}
-			}
-		}
+		// The smallest record over the manifests the fold holds: the one
+		// in force, or, in a handoff where that is the other kit's and
+		// shares nothing with this one, this kit's own last, which the
+		// fold still resolves while it is among the last few in force,
+		// after a restart as well as in the process that wrote it.
+		ns, data = f.fold.Record(man)
 	}
 	entry, err := rec.Annotate(ctx, ns, json.RawMessage(data))
 	if err != nil {
@@ -1740,13 +1724,12 @@ type recorderKey struct{}
 // agentpolicy.WithObserver reads it with [RecorderFromContext]. A nil
 // rec returns ctx as it is.
 //
-// Two things a kit serves stay the kit's and do not follow the
-// conversation: a skill grant, which is a rule set on the kit's one
-// engine and belongs to one conversation, [ErrSkillGrantConversation],
-// which is named by this recorder, or by session.ContextWithSessionID
-// where there is none;
-// and an MCP server's connection, dialed once at New, whose identity
-// every conversation shares, [WithMCP]. A front that needs either per
+// A skill grant follows the conversation: it is a rule set the kit's
+// one engine keeps under the grant scope this recorder's session names,
+// [Kit.GrantScope], or session.ContextWithSessionID's where there is no
+// recorder, and decides only that conversation's calls. An MCP server's
+// connection, dialed once at New, whose identity every conversation
+// shares, [WithMCP], stays the kit's: a front that needs one per
 // conversation or per user gives each its own kit.
 func ContextWithRecorder(ctx context.Context, rec *session.Recorder) context.Context {
 	if rec == nil {
@@ -1762,41 +1745,59 @@ func RecorderFromContext(ctx context.Context) *session.Recorder {
 	return rec
 }
 
-// conversation names the conversation a run on ctx belongs to, for the
-// skill grants: the session of the recorder on the context; else the
-// session the context names, session.ContextWithSessionID, unless it is
-// a child's of a run the kit served, which is that run's conversation,
-// or the kit's own session, or the kit records into a recorder another
-// owns, [WithRecorder], every session of which is one conversation;
-// else the kit's own session, or "" for a run recorded nowhere. A front
-// that records each conversation itself and names it on the context,
-// as agentturn/front/a2a's WithRecorderFor example does, is several
-// conversations to the kit, not one.
-func (k *Kit) conversation(ctx context.Context) string {
-	if rec := RecorderFromContext(ctx); rec != nil {
+// GrantScope names the grant scope the kit decides a run on ctx under:
+// the conversation the run belongs to, which is where a skill read in it
+// is granted, [WithSkillGrants], and the only conversation whose calls
+// the grant decides. It is the key [agentpolicy.ContextWithGrantScope]
+// puts on the context of every call the kit's engine decides, and a
+// product that calls the engine itself on a conversation's behalf,
+// [agentpolicy.Engine.Answers] on a Resume, [agentpolicy.Engine.GrantsFor]
+// to show the grants in force, or [agentpolicy.Engine.RevokeScope] when
+// the conversation ends, puts it on the context it calls with:
+//
+//	ctx = agentpolicy.ContextWithGrantScope(ctx, kit.GrantScope(ctx))
+//
+// A scope on ctx already, which a front puts there with
+// agentpolicy.ContextWithGrantScope to name a conversation or a child
+// agent of its own, is the scope. Otherwise it is the session of the
+// recorder on the context, [ContextWithRecorder]; else the session the
+// context names, session.ContextWithSessionID, as a front that records
+// each conversation itself puts there, unless the kit records into a
+// recorder another owns, [WithRecorder], every session of which is one
+// conversation, or the session is the kit's own; else the kit's own
+// session. A run recorded nowhere that names no session belongs to one
+// conversation, the kit's, whose scope is not empty so that its grants
+// are not unscoped ones, which decide every conversation's calls.
+//
+// The run of a child agent [WithChildAgent] offers has a scope of its
+// own, under its conversation's, so it is not decided by what its parent
+// read.
+func (k *Kit) GrantScope(ctx context.Context) string {
+	if scope := agentpolicy.GrantScopeFromContext(ctx); scope != "" {
+		return scope
+	}
+	return k.conversationOf(RecorderFromContext(ctx), session.SessionIDFromContext(ctx))
+}
+
+// noConversation is the grant scope of runs the kit records nowhere and
+// that name no session.
+const noConversation = "agentkit:no-session"
+
+// conversationOf is the conversation of a run recorded by rec, or by no
+// recorder when it is nil, that names the session sid, or none when it
+// is empty; see [Kit.GrantScope].
+func (k *Kit) conversationOf(rec *session.Recorder, sid string) string {
+	if rec != nil {
 		return rec.SessionID()
 	}
-	if sid := session.SessionIDFromContext(ctx); sid != "" {
-		if c, ok := ctx.Value(childConvKey{}).(childConv); ok && c.sid == sid {
-			return c.conv
-		}
-		if k.rec == nil || k.ownRec && sid != k.rec.SessionID() {
-			return sid
-		}
+	if sid != "" && (k.rec == nil || k.ownRec && sid != k.rec.SessionID()) {
+		return sid
 	}
 	if k.rec != nil {
 		return k.rec.SessionID()
 	}
-	return ""
+	return noConversation
 }
-
-// childConvKey is the context key of a childConv.
-type childConvKey struct{}
-
-// childConv is what Kit.childContext puts on a child run's context: the
-// child's session, sid, belongs to the conversation conv of the run
-// that called it.
-type childConv struct{ sid, conv string }
 
 // recorderFor is the recorder a run on ctx records into: the one on the
 // context, or the kit's own, or nil.
@@ -1871,11 +1872,11 @@ func saveKey(ctx context.Context, callID string) string {
 // revokeOnUserMessage is the BeforeTurn hook WithSkillGrantScope
 // installs: on any turn that opens under a user message later than the
 // one a grant was made under, or whose new input holds a message from
-// the user, in the conversation the grants belong to, it revokes every
-// grant a skill's read made, so a grant lasts until the next message,
-// however that message arrived and whichever agent's run delivered it.
-// A message in another conversation the kit serves ends nothing, since
-// nothing was granted there.
+// the user, it revokes every grant a skill's read made in the turn's
+// conversation, [Kit.GrantScope], and those of the child agents run
+// under it, so a grant lasts until the next message, however that
+// message arrived and whichever agent's run delivered it. A message in
+// another conversation the kit serves ends nothing of this one's.
 //
 // Each turn it keeps the transcript's user-message mark for the run,
 // [userMark], which is what a grant made during the turn is bound to,
@@ -1920,14 +1921,14 @@ func (k *Kit) revokeOnUserMessage(ctx context.Context, info agentturn.TurnStartI
 		k.turnMarks.put(run, mark)
 		k.mu.Unlock()
 	}
-	if !k.grants.owns(ctx) {
+	if !newUserMessage(info.Transcript) && !(marked && k.grants.stale(ctx, mark)) {
 		return nil, nil
 	}
-	if !newUserMessage(info.Transcript) && !(marked && k.grants.stale(mark)) {
-		return nil, nil
-	}
-	if _, ended := k.grants.revokeLive(ctx); len(ended) > 0 {
-		k.grants.keepEnded(ended)
+	_, ended := k.grants.revokeLive(ctx, false)
+	// The child agents of the conversation are over with its message.
+	k.grants.endChildren(ctx)
+	if len(ended) > 0 {
+		k.grants.keepEnded(k.grants.scope(ctx), ended)
 		return openresponses.Items{openresponses.DeveloperText(grantsEndedNote(ended))}, nil
 	}
 	return nil, nil
@@ -2000,11 +2001,21 @@ func (k *Kit) refuseEndedGrant(ctx context.Context, info agentturn.ToolCallInfo)
 // path the grant is replayed from.
 type markKey struct{}
 
+// parentMarkKey carries, on the context of a child agent's run, the mark
+// of its parent's turn, for the kit that made the child's context: a
+// child that is itself another kit has marks of its own.
+type parentMarkKey struct{ k *Kit }
+
 // markFor is the user-message mark a grant made under ctx is bound to:
 // the one a replay put on the context, else the mark of the last turn of
 // the run on the context, else none.
 func (k *Kit) markFor(ctx context.Context) (userMark, bool) {
 	if m, ok := ctx.Value(markKey{}).(userMark); ok {
+		return m, true
+	}
+	// A child agent's grants are bound to the message its parent's turn
+	// was under, this kit's, which the child's own run knows nothing of.
+	if m, ok := ctx.Value(parentMarkKey{k}).(userMark); ok {
 		return m, true
 	}
 	run := agentturn.RunIDFromContext(ctx)
@@ -2239,35 +2250,73 @@ func (k *Kit) OmittedParts() []agentsession.OmittedPart {
 	return out
 }
 
-// remember keeps the union the provider returned for [Kit.LookupTool].
-func (k *Kit) remember(tools []agenttool.Tool) {
+// remember keeps the union the provider returned. A call made in a run
+// is kept for [Kit.LookupToolFor] under the run's ID alone: another
+// conversation's run must not become what a run the kit has no union for
+// reads. A call outside any run, New's among them, is the kit's own
+// configuration, which [Kit.LookupTool] reads and LookupToolFor falls
+// back to.
+func (k *Kit) remember(ctx context.Context, tools []agenttool.Tool) {
 	byName := make(map[string]agenttool.Tool, len(tools))
 	for _, t := range tools {
 		byName[t.Name()] = t
 	}
+	if run := agentturn.RunIDFromContext(ctx); run != "" {
+		k.umu.Lock()
+		k.runUnions.put(run, byName)
+		k.umu.Unlock()
+		return
+	}
 	k.union.Store(&byName)
 }
 
-// LookupTool returns the tool of the given name in the union the kit
-// offered last, before the policy's filter: the tool the loop runs for
-// a call of that name. It has the signature [agentpolicy.WithTools]
-// takes, and the engine [WithPolicy] builds is given it, so the batch
-// hold reads a sibling's confinement before the loop hands the engine
-// that sibling's call, and [agentpolicy.Engine.Answers] finds the tool
-// of a call cut off in a seeded transcript. A product that builds its
-// own engine for [WithEngine] passes it the same way:
+// LookupToolFor returns the tool of the given name in the union the
+// provider last offered the run whose context this is, before the
+// policy's filter: the tool the loop runs for a call of that name in
+// that run. It has the signature [agentpolicy.WithToolsFor] takes, and
+// the engine [WithPolicy] builds is given it, so the batch hold reads a
+// sibling's confinement, before the loop hands the engine that
+// sibling's call, from the list its own run was offered, and
+// [agentpolicy.Engine.Answers] finds the tool of a call cut off in a
+// seeded transcript. A product that builds its own engine for
+// [WithEngine] passes it the same way:
 //
 //	var kit *agentkit.Kit
-//	engine, err := agentpolicy.Build(p, m, agentpolicy.WithTools(func(name string) (agenttool.Tool, bool) {
-//		return kit.LookupTool(name)
+//	engine, err := agentpolicy.Build(p, m, agentpolicy.WithToolsFor(func(ctx context.Context, name string) (agenttool.Tool, bool) {
+//		return kit.LookupToolFor(ctx, name)
 //	}))
 //	kit, err = agentkit.New(ctx, agentkit.WithEngine(engine), ...)
 //
-// The union is the kit's, not a run's: concurrent runs off one kit whose
-// tool lists differ, through a provider that answers per context or a
-// server whose list changes between them, read whichever list was
-// offered last. A product whose runs see different tools of one name
-// gives each run its own kit.
+// A context outside any run, or of a run the kit has no union for, the
+// kit keeps the last 1024 runs', reads what [Kit.LookupTool] answers,
+// the kit's own configuration, and never another run's list. It is safe
+// on a nil kit, which has no tools.
+func (k *Kit) LookupToolFor(ctx context.Context, name string) (agenttool.Tool, bool) {
+	if k == nil {
+		return nil, false
+	}
+	if run := agentturn.RunIDFromContext(ctx); run != "" {
+		k.umu.Lock()
+		m, ok := k.runUnions.get(run)
+		k.umu.Unlock()
+		if ok {
+			t, found := m[name]
+			return t, found
+		}
+	}
+	return k.LookupTool(name)
+}
+
+// LookupTool returns the tool of the given name in the union the kit
+// offers outside any run, before the policy's filter: its own
+// configuration, as of New and of the last [Kit.Config] tools resolved
+// with a context that names no run, which is where a server
+// [Kit.AddMCP] connected shows. A run's own list is [Kit.LookupToolFor]'s,
+// which is what the engine the kit builds reads, and what a product
+// passes [agentpolicy.WithToolsFor] when it builds its own; LookupTool
+// has the signature of [agentpolicy.WithTools], for a product whose runs
+// all see one list, and it is the fallback for a context with no run or
+// one the kit has no union for.
 //
 // It is safe on a nil kit, which has no tools.
 func (k *Kit) LookupTool(name string) (agenttool.Tool, bool) {
@@ -2309,27 +2358,26 @@ func (k *Kit) Tools() []ToolOrigin {
 
 // RegrantSkills grants again, under [WithSkillGrants], what the skill
 // reads on sess's path granted and nothing revoked, as [New] does for a
-// session it resumes, and binds the kit's grants to sess. It is for a
-// front that resumes a conversation itself, with session.Resume under
-// [ContextWithRecorder], so a call held before a restart is approved
-// with the tools its task had. ctx carries that conversation's
-// recorder, ContextWithRecorder, which is where a later revocation of
-// the grants is written, and where the verdicts the regrant records
-// go; the kit's own recorder serves when it writes sess. When the kit
-// records its engine's verdicts, that is under [WithPolicy], and
-// neither writes sess, it returns [ErrSkillGrantRecorder] before it
-// binds or grants anything: the grants' verdicts and a later revocation
-// would be recorded nowhere, and the next restart would find a session
-// that says nothing about them. Under [WithEngine] the kit records no
-// verdict, and a ctx without a recorder binds the grants with no
-// recorder for the revocation. The grants are made silently and
+// session it resumes, under the grant scope of sess's conversation,
+// [Kit.GrantScope]. It is for a front that resumes a conversation
+// itself, with session.Resume under [ContextWithRecorder], so a call
+// held before a restart is approved with the tools its task had. ctx
+// carries that conversation's recorder, ContextWithRecorder, which is
+// where the verdicts the regrant records go and where a later
+// revocation of the grants is written; the kit's own recorder serves
+// when it writes sess. When the kit records its engine's verdicts, that
+// is under [WithPolicy], and neither writes sess, it returns
+// [ErrSkillGrantRecorder] before it grants anything: the grants'
+// verdicts and a later revocation would be recorded nowhere, and the
+// next restart would find a session that says nothing about them. Under
+// [WithEngine] the kit records no verdict, and a ctx without a recorder
+// grants with none for the revocation. The grants are made silently and
 // reported with [SkillGrant.Replayed] set; a read it will not grant
 // again is reported too, with [ErrSkillGrantChanged] when the skill
 // changed since the read and [ErrSkillGrantUnrecorded] when sess holds
 // the read and no verdict of its grant, as a session a front recorded
-// without ContextWithRecorder does. It refuses, with
-// [ErrSkillGrantConversation], a kit whose grants already belong to
-// another session, and does nothing without skill grants.
+// without ContextWithRecorder does. It does nothing without skill
+// grants.
 func (k *Kit) RegrantSkills(ctx context.Context, sess *agentsession.Session) error {
 	if k.grants == nil || sess == nil {
 		return nil
@@ -2339,6 +2387,7 @@ func (k *Kit) RegrantSkills(ctx context.Context, sess *agentsession.Session) err
 	// later revocation go: the one on ctx, else the kit's own.
 	rec := RecorderFromContext(ctx)
 	if rec == nil || rec.SessionID() != sess.ID() {
+		rec = nil
 		switch {
 		case k.rec != nil && k.rec.SessionID() == sess.ID():
 			rec = k.rec
@@ -2347,27 +2396,23 @@ func (k *Kit) RegrantSkills(ctx context.Context, sess *agentsession.Session) err
 			return fmt.Errorf("%w: session %q: neither ctx nor the kit carries a recorder writing it, so the grants' verdicts and a later revocation would be recorded nowhere; put the conversation's recorder on ctx with ContextWithRecorder", ErrSkillGrantRecorder, sess.ID())
 		}
 	}
+	// The conversation sess is, as a run recorded by rec or naming it is.
+	ctx = agentpolicy.ContextWithGrantScope(ctx, k.conversationOf(rec, sess.ID()))
 	g.gmu.Lock()
 	defer g.gmu.Unlock()
-	g.mu.Lock()
-	if !g.bound {
-		g.owner, g.ownerRec, g.bound = sess.ID(), rec, true
-	}
-	ok := !g.shared && g.owner == sess.ID()
-	g.mu.Unlock()
-	if !ok {
-		return fmt.Errorf("%w: session %q", ErrSkillGrantConversation, sess.ID())
-	}
 	g.regrant(ctx, sess, g.scoped)
 	return nil
 }
 
 // RevokeSkillGrants revokes every grant a skill's read made through
-// [WithSkillGrants] and returns the number of rules the engine removed.
-// A front calls it when a grant should end, the end of a run or of a
-// conversation; [WithSkillGrantScope] calls it when each run starts. A
-// skill read again is granted again. It is zero and does nothing
-// without skill grants.
+// [WithSkillGrants] in the conversation of ctx, [Kit.GrantScope], and
+// those of the child agents run under it, and returns the number of
+// rules the engine removed. A front calls it when a grant should end,
+// the end of a run or of a conversation, and the end of a conversation
+// is also when the kit may forget what it kept of its grants;
+// [WithSkillGrantScope] revokes when each message arrives. Another
+// conversation's grants stay. A skill read again is granted again. It is
+// zero and does nothing without skill grants.
 func (k *Kit) RevokeSkillGrants(ctx context.Context) int {
 	if k.grants == nil {
 		return 0
@@ -2590,8 +2635,10 @@ func (k *Kit) MemoryManifest() agentmemory.Manifest {
 
 // Close releases what [New] opened, joining the errors: every MCP
 // client, those [Kit.AddMCP] connected and those New dialed, closed
-// together, so closing costs one server's wait and not one per server,
-// and the errors joined in reverse order of connection. A dial
+// together and each ending the calls in flight to its server with
+// [mcpclient.ErrClosed], as agenttool v0.0.15's close does, so Close
+// returns within a few seconds and not when the calls finish. The
+// errors are joined in reverse order of connection. A dial
 // [Kit.AddMCP] has in flight is cancelled, and that AddMCP returns an
 // error. The stores a caller passed in — the memory store, the session
 // store — stay the caller's to sync, release and close, since the kit
@@ -2600,7 +2647,7 @@ func (k *Kit) MemoryManifest() agentmemory.Manifest {
 // A config handed out before Close keeps working and stops offering
 // the closed servers' tools, so a run that outlives the kit is offered
 // what it can still reach. Close is safe to call twice, and
-// [Kit.Tools] answers while it waits.
+// [Kit.Tools] answers while it closes.
 func (k *Kit) Close() error {
 	k.closed.Store(true)
 	if k.cancelClose != nil {
@@ -2611,9 +2658,9 @@ func (k *Kit) Close() error {
 	k.added, k.remotes = nil, nil
 	k.mcpMu.Unlock()
 
-	// All at once, off the lock: a close may wait for the server's calls
-	// in flight. The errors keep a stable order, the added servers' then
-	// New's, each latest first.
+	// All at once, off the lock, so closing costs one server's few
+	// seconds and not one per server. The errors keep a stable order, the
+	// added servers' then New's, each latest first.
 	errs := make([]error, len(added)+len(remotes))
 	var wg sync.WaitGroup
 	closeAt := func(i int, r *mcpclient.Remote) {
