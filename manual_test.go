@@ -133,7 +133,7 @@ func TestEveryFieldTheKitSetsIsDocumented(t *testing.T) {
 	skills := skillDir(t, filepath.Join(root, "skills"), "digging", "how to dig", "dig")
 
 	kit, err := agentkit.New(t.Context(),
-		agentkit.WithName("dex", "a coding agent"),
+		agentkit.WithName("dax", "a coding agent"),
 		agentkit.WithModel(stubModel{}, "gpt-5"),
 		agentkit.WithInstructions("Be brief."),
 		agentkit.WithAgentsMD(root, agentsmd.Options{Root: root}),

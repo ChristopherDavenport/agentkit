@@ -19,7 +19,7 @@
 //		agentkit.WithModel(model, "gpt-5"),
 //		agentkit.WithInstructions("Be brief."),
 //		agentkit.WithAgentsMD(cwd, agentsmd.Options{Root: repoRoot}),
-//		agentkit.WithSkills(".dex/skills"),
+//		agentkit.WithSkills(".dax/skills"),
 //		agentkit.WithMemory(store, "user", "project"),
 //		agentkit.WithPolicy(policy, matchers),
 //		agentkit.WithTools(read, write, edit, bash),

@@ -1008,7 +1008,7 @@ func TestASkillDirectoryThatIsNotThereIsAnError(t *testing.T) {
 }
 
 // An optional skills directory the user never made is passed over, as
-// the README's example needs for ~/.dex/skills; one that is there but is
+// the README's example needs for ~/.dax/skills; one that is there but is
 // not a directory is still refused.
 func TestAnOptionalSkillDirectoryThatIsNotThereIsPassedOver(t *testing.T) {
 	root := t.TempDir()
@@ -1017,7 +1017,7 @@ func TestAnOptionalSkillDirectoryThatIsNotThereIsPassedOver(t *testing.T) {
 	kit, err := agentkit.New(t.Context(),
 		agentkit.WithModel(stubModel{}, "m"),
 		agentkit.WithSkills(project),
-		agentkit.WithOptionalSkills(filepath.Join(root, "home", ".dex", "skills")),
+		agentkit.WithOptionalSkills(filepath.Join(root, "home", ".dax", "skills")),
 	)
 	if err != nil {
 		t.Fatalf("New refused an absent optional skills directory: %v", err)
@@ -1031,7 +1031,7 @@ func TestAnOptionalSkillDirectoryThatIsNotThereIsPassedOver(t *testing.T) {
 	// no tool that serves nothing.
 	none, err := agentkit.New(t.Context(),
 		agentkit.WithModel(stubModel{}, "m"),
-		agentkit.WithOptionalSkills(filepath.Join(root, "home", ".dex", "skills")),
+		agentkit.WithOptionalSkills(filepath.Join(root, "home", ".dax", "skills")),
 	)
 	if err != nil {
 		t.Fatal(err)

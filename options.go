@@ -271,7 +271,7 @@ func WithSkills(dirs ...string) Option {
 }
 
 // WithOptionalSkills is [WithSkills] for a directory the user may not
-// have made, such as ~/.dex/skills: one that does not exist is passed
+// have made, such as ~/.dax/skills: one that does not exist is passed
 // over, and one that exists and cannot be read is still an error from
 // [New]. The directories take their place among WithSkills' in the
 // order the options were given, since that order decides which of two

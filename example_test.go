@@ -37,7 +37,7 @@ func ExampleNew() {
 		agentkit.WithModel(model, "gpt-5"),
 		agentkit.WithInstructions("Be brief."),
 		agentkit.WithAgentsMD(cwd, agentsmd.Options{Root: cwd}),
-		agentkit.WithOptionalSkills(filepath.Join(home, ".dex", "skills")),
+		agentkit.WithOptionalSkills(filepath.Join(home, ".dax", "skills")),
 		agentkit.WithMemory(memory, "user", "project"),
 		agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{
 			Read:    []string{"read"},

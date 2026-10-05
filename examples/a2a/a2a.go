@@ -161,7 +161,7 @@ func Both(ctx context.Context, model agentturn.Model, peerCard *a2a.AgentCard) (
 		return nil, nil, nil, err
 	}
 	kit, err := agentkit.New(ctx,
-		agentkit.WithName("dex", "A coding agent that can delegate to a researcher."),
+		agentkit.WithName("dax", "A coding agent that can delegate to a researcher."),
 		agentkit.WithModel(model, "gpt-5"),
 		agentkit.WithInstructions("Be brief."),
 		agentkit.WithTools(peer),
