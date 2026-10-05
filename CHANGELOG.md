@@ -482,8 +482,8 @@ taken up.
   two paths' guard verdicts. Written from the manual, a product
   recorded them with no subject. (#39)
 - The README's first example takes its skills from
-  `WithOptionalSkills(repoRoot/.dex/skills, home/.dex/skills)`, since
-  `WithSkills(".dex/skills")` failed `New` in every repository without
+  `WithOptionalSkills(repoRoot/.dax/skills, home/.dax/skills)`, since
+  `WithSkills(".dax/skills")` failed `New` in every repository without
   one, relative to the process's directory. The serving paragraph no
   longer says a peer needs no option, and names
   `fronta2a.WithRecorderFor` and `RecordEach`. (#40)
@@ -603,7 +603,7 @@ taken up.
 
 - `WithOptionalSkills(dirs...)`: a skills directory that does not exist
   is passed over, and one that exists and cannot be read is still an
-  error. The README's example uses it for `~/.dex/skills`, which failed
+  error. The README's example uses it for `~/.dax/skills`, which failed
   `New` for every user who had not written a skill. When none of the
   directories exists and no other source is given, there is no skills
   part and no skill tool. `WithSkills` stays strict. (#29)

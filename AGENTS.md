@@ -72,10 +72,10 @@ transport. Skills, AGENTS.md files and memory stores are built in
 
 ## Done
 
-`dex` is the test, measured on the only quantity the kit moves: the
+`dax` is the test, measured on the only quantity the kit moves: the
 library wiring, not the module. An earlier version of this file asked
-for dex to get dramatically smaller overall, and that bar was
-unmeetable — wiring is 231 of dex's 1,655 lines, so perfecting all of
+for dax to get dramatically smaller overall, and that bar was
+unmeetable — wiring is 231 of dax's 1,655 lines, so perfecting all of
 it could not dominate the total. The rewrite in
 `../agentstudies/pi-coding-agent` took those 231 lines to 166.
 
