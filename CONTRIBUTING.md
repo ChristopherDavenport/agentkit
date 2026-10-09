@@ -67,7 +67,10 @@ make check        # fmt, tidy, vet, deps, direct, no-replace,
                   # staticcheck, govulncheck, race tests
 ```
 
-It covers the root and every nested module.
+It covers the root and every nested module. `examples/a2a` needs Go
+1.26, because its golang.org/x/net does; on 1.25 with
+`GOTOOLCHAIN=local`, as in CI's floor leg, `build`, `vet` and `test`
+skip it and say so.
 
 Tests are offline: no test calls a model, reaches a network, or shells
 out. The MCP tests run a server from the SDK over an in-memory

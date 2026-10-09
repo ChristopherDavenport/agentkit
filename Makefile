@@ -6,6 +6,23 @@ GO ?= go
 # docs describe, so it cannot rot.
 SUBMODULES = examples/a2a
 
+# Runs $(1) in every nested module, skipping one whose go line the
+# running toolchain is too old for. examples/a2a needs go 1.26 (its
+# golang.org/x/net does) while the root's floor is 1.25, and the CI leg
+# that proves that floor runs with GOTOOLCHAIN=local, so it builds,
+# vets and tests the root and says what it left out. tidy-check, lint
+# and vuln do not skip: they run on a current Go, where a skip would
+# hide a failure.
+define in_submodules
+@for m in $(SUBMODULES); do \
+  if ! out=$$(cd $$m && $(GO) list -m 2>&1); then \
+    case "$$out" in *"requires go >="*) echo "skipping $$m: $$out"; continue;; esac; \
+    echo "$$out"; exit 1; \
+  fi; \
+  (cd $$m && $(1)) || exit 1; \
+done
+endef
+
 STATICCHECK ?= $(GO) run honnef.co/go/tools/cmd/staticcheck@latest
 GOVULNCHECK ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@latest
 
@@ -13,7 +30,7 @@ GOVULNCHECK ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@latest
 
 build:
 	$(GO) build ./...
-	@for m in $(SUBMODULES); do (cd $$m && $(GO) build ./...) || exit 1; done
+	$(call in_submodules,$(GO) build ./...)
 
 # Every other module in the workspace has a deps target that refuses a
 # dependency it did not name. This one is the inverse: agentkit is the
@@ -63,11 +80,11 @@ no-replace:
 
 test:
 	$(GO) test -race ./...
-	@for m in $(SUBMODULES); do (cd $$m && $(GO) test -race ./...) || exit 1; done
+	$(call in_submodules,$(GO) test -race ./...)
 
 vet:
 	$(GO) vet ./...
-	@for m in $(SUBMODULES); do (cd $$m && $(GO) vet ./...) || exit 1; done
+	$(call in_submodules,$(GO) vet ./...)
 
 tidy:
 	$(GO) mod tidy
