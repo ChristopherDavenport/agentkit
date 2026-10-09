@@ -374,7 +374,7 @@ func (g *skillGrants) blockEnded(ctx context.Context, info agentturn.ToolCallInf
 	}
 	subjects := []agentpolicy.Subject{{Args: args}}
 	if m, ok := g.matchers[info.Call.Name]; ok && m.Subjects != nil {
-		split, err := m.Subjects(args)
+		split, err := m.Subjects(ctx, args)
 		if err != nil || len(split) == 0 {
 			return nil, nil // the engine fails it closed
 		}

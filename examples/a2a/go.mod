@@ -22,7 +22,7 @@ require (
 
 require (
 	github.com/ChristopherDavenport/agentmemory v0.0.10 // indirect
-	github.com/ChristopherDavenport/agentpolicy v0.0.11 // indirect
+	github.com/ChristopherDavenport/agentpolicy v0.0.12 // indirect
 	github.com/ChristopherDavenport/agentskill v0.0.11 // indirect
 	github.com/ChristopherDavenport/agentsmd v0.0.3 // indirect
 	github.com/ChristopherDavenport/agenttool/mcpclient v0.0.15 // indirect

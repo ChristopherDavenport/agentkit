@@ -3,6 +3,22 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- Requires agentpolicy v0.0.12. No API of this module changes, but
+  agentpolicy's `Subjects` now takes the decision's context,
+  `func(ctx context.Context, args json.RawMessage) ([]Subject, error)`,
+  so a product's splitter in the `agentpolicy.ToolMatcher`s it passes to
+  `WithPolicy` changes from `func(args)` to `func(_ context.Context, args)`.
+  The kit's refusal of a call only an ended grant allowed
+  (`WithSkillGrantScope`) passes the context of the call's decision to
+  the splitter too, so a splitter that asks a remote executor is
+  cancelled with the decision. The release also makes a sibling whose
+  subjects could not be evaluated hold the batch call beside it rather
+  than read as blocked, and not keep the failed reading for the batch.
+
 ## v0.0.8 - 2026-10-09
 
 ### Added
