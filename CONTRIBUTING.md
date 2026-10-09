@@ -68,9 +68,8 @@ make check        # fmt, tidy, vet, deps, direct, no-replace,
 ```
 
 It covers the root and every nested module. `examples/a2a` needs Go
-1.26, because its golang.org/x/net does; on 1.25 with
-`GOTOOLCHAIN=local`, as in CI's floor leg, `build`, `vet` and `test`
-skip it and say so.
+1.26, because its golang.org/x/net does; the Makefile fetches it when
+the Go running is older.
 
 Tests are offline: no test calls a model, reaches a network, or shells
 out. The MCP tests run a server from the SDK over an in-memory
