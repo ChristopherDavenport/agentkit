@@ -1,7 +1,7 @@
 github.com/ChristopherDavenport/agentmemory v0.0.10 h1:LH/PN+ujmawwhUesRVPugpZLz9iav2ARYNJ68pWQo5E=
 github.com/ChristopherDavenport/agentmemory v0.0.10/go.mod h1:Eh0ed0u/Xg/olppz+8yiz2LEiFFn0eVP8pc/VmGWp7w=
-github.com/ChristopherDavenport/agentpolicy v0.0.11 h1:8iv9QkVDE+pCkpB4Ulot1LbygWcBYoQcecbVqEvWa9E=
-github.com/ChristopherDavenport/agentpolicy v0.0.11/go.mod h1:1dKpcoz3wVjn5WwC+vDw6rL1vKvHuyTk4m2003rD4tQ=
+github.com/ChristopherDavenport/agentpolicy v0.0.12 h1:K37BuaItMiSPPJ+KijczjCehB/ZsRAQUkoOhtT6rBT4=
+github.com/ChristopherDavenport/agentpolicy v0.0.12/go.mod h1:1dKpcoz3wVjn5WwC+vDw6rL1vKvHuyTk4m2003rD4tQ=
 github.com/ChristopherDavenport/agentsession v0.0.20 h1:XYEE3EEX0wXskj2AxaxNbJEmk/T8bK6H3DO/tK19Px4=
 github.com/ChristopherDavenport/agentsession v0.0.20/go.mod h1:lZf8gypPbx95D867i491HRT0OXyX6B8S5wM8zS4YzOA=
 github.com/ChristopherDavenport/agentskill v0.0.11 h1:bUwoE2in3wo7j5x6czne3coO0hsucjkRnSPE+gHVp/Y=

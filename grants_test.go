@@ -2167,7 +2167,7 @@ func TestACallOnlyAnEndedGrantAllowedIsRefusedNamingTheSkill(t *testing.T) {
 		}
 		return out
 	}
-	split := func(args json.RawMessage) ([]agentpolicy.Subject, error) {
+	split := func(_ context.Context, args json.RawMessage) ([]agentpolicy.Subject, error) {
 		var in struct {
 			Command string `json:"command"`
 		}

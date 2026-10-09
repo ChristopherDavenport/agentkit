@@ -307,7 +307,7 @@ a2a.
 | `agentsmd` | v0.0.3 |
 | `agentskill` | v0.0.11 |
 | `agentmemory` | v0.0.10 |
-| `agentpolicy` | v0.0.11 |
+| `agentpolicy` | v0.0.12 |
 
 Every sibling is required at a released version with no `replace`, and
 `make no-replace` enforces it: the kit is the module that proves the

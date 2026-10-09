@@ -712,7 +712,7 @@ refuseEndedGrant := func(ctx context.Context, info agentturn.ToolCallInfo) (*age
 	// skill the catalogue still lists, or the engine decides it.
 	subjects := []agentpolicy.Subject{{Args: info.Args}}
 	if m := matchers[info.Call.Name]; m.Subjects != nil {
-		split, err := m.Subjects(info.Args)
+		split, err := m.Subjects(ctx, info.Args)
 		if err != nil || len(split) == 0 {
 			return nil, nil // the engine fails it closed
 		}
