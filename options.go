@@ -238,9 +238,11 @@ func WithInstructions(text string) Option {
 
 // WithAgentsMD reads the AGENTS.md chain that applies at path and
 // renders it as the [agentsmd.PartID] part. opts are
-// [agentsmd.Options] verbatim: the names to look for, the root the walk
-// stops after, the explicit Extra files, and the per-file and total
-// byte bounds.
+// [agentsmd.Options] verbatim: the file system the walk reads, the
+// names to look for, the root the walk stops after, the explicit Extra
+// files, and the per-file and total byte bounds. With
+// [agentsmd.Options.FS] set, such as to a container's or a remote
+// workspace's file system, path and Root are names in it, "." its root.
 //
 // A budget set here is the layer's own and applies whatever
 // [WithInstructionBudget] says. When both are set the smaller of the

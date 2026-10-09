@@ -304,7 +304,7 @@ a2a.
 | `agenttool`, `agenttool/mcpclient` | v0.0.15 |
 | `agentturn`, `agentturn/session` | v0.0.16 |
 | `agentsession` | v0.0.20 |
-| `agentsmd` | v0.0.2 |
+| `agentsmd` | v0.0.3 |
 | `agentskill` | v0.0.11 |
 | `agentmemory` | v0.0.10 |
 | `agentpolicy` | v0.0.11 |
