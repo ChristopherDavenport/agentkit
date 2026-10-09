@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/fstest"
 
 	"github.com/ChristopherDavenport/agentkit"
 	"github.com/ChristopherDavenport/agentmemory"
@@ -134,6 +135,50 @@ func TestJoinedPartsAreTheInstructions(t *testing.T) {
 		kit.Parts()...,
 	); err != nil {
 		t.Fatalf("the session format refused the parts: %v", err)
+	}
+}
+
+// A project that is not on the host's file system, such as a container
+// or a remote workspace, is read through agentsmd.Options.FS, which the
+// kit passes on verbatim. The chain is that file system's files, not the
+// host's: walked on the OS, "sub" up to "." from the test's directory
+// would find this repository's own AGENTS.md.
+func TestWithAgentsMDReadsThroughAnFS(t *testing.T) {
+	fsys := fstest.MapFS{
+		"AGENTS.md":     {Data: []byte("the workspace has the last word")},
+		"sub/AGENTS.md": {Data: []byte("and the nearest file wins")},
+	}
+	opts := agentsmd.Options{FS: fsys, Root: "."}
+
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithInstructions("be brief"),
+		agentkit.WithAgentsMD("sub", opts),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	text := kit.Config().Instructions
+	for _, want := range []string{"the workspace has the last word", "and the nearest file wins"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("instructions do not hold %q:\n%s", want, text)
+		}
+	}
+
+	chain, err := agentsmd.Chain("sub", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var part string
+	for _, p := range kit.Parts() {
+		if p.ID == agentsmd.PartID {
+			part = p.Text
+		}
+	}
+	if want := agentsmd.Render(chain.Files); part != want {
+		t.Fatalf("the %s part:\n%q\nagentsmd.Chain by hand:\n%q", agentsmd.PartID, part, want)
 	}
 }
 

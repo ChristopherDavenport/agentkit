@@ -7,7 +7,7 @@ require (
 	github.com/ChristopherDavenport/agentpolicy v0.0.11
 	github.com/ChristopherDavenport/agentsession v0.0.20
 	github.com/ChristopherDavenport/agentskill v0.0.11
-	github.com/ChristopherDavenport/agentsmd v0.0.2
+	github.com/ChristopherDavenport/agentsmd v0.0.3
 	github.com/ChristopherDavenport/agenttool v0.0.15
 	github.com/ChristopherDavenport/agenttool/mcpclient v0.0.15
 	github.com/ChristopherDavenport/agentturn v0.0.16

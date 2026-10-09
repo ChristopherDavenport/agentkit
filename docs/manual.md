@@ -133,6 +133,20 @@ recorder see, so a write to one entry is recorded as that entry's part
 and the summary. The scopes rendered are `WithMemory`'s and then any
 `WithMemoryReadScopes` it does not name.
 
+`cwd` and `opts` are `WithAgentsMD`'s, and `opts` is passed to
+`agentsmd.Chain` verbatim. A product whose project is not on the host's
+file system, such as a container or a remote workspace, sets
+`opts.FS` to that workspace's `fs.FS`; the path and `opts.Root` are
+then names in it, `"."` its root, each file's `Path` is its name there,
+and `opts.Extra` stays OS paths:
+
+```go
+opts := agentsmd.Options{FS: ws.FS(), Root: "."}
+chain, _ := agentsmd.Chain(".", opts) // or a sub-directory's name
+```
+
+which is the chain `agentkit.WithAgentsMD(".", opts)` reads.
+
 `dirs` are `WithSkills`' and `WithOptionalSkills`' in the order given;
 an optional one is passed over when `agentskill.Dir` fails with
 `fs.ErrNotExist`, and refused otherwise, as a `WithSkills` one always

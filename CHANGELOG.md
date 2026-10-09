@@ -3,6 +3,22 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- `WithAgentsMD` can read the AGENTS.md chain through an `fs.FS`, such
+  as a container's or a remote workspace's, by setting
+  `agentsmd.Options.FS`: `path` and `Root` are then names in that file
+  system, `"."` its root, and `Extra` stays OS paths. The option already
+  passed `agentsmd.Options` verbatim, so there is no new option; the
+  manual path is `agentsmd.Chain` with the same options. (#84)
+
+### Changed
+
+- Requires agentsmd v0.0.3, for `agentsmd.Options.FS`. No API of this
+  module changes. (#84)
+
 ## v0.0.7 - 2026-10-02
 
 The round 8 findings (#66 to #76).
