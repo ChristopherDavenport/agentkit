@@ -6,6 +6,14 @@ GO ?= go
 # docs describe, so it cannot rot.
 SUBMODULES = examples/a2a
 
+# examples/a2a requires Go 1.26, which golang.org/x/net v0.60.0 needs,
+# and the root 1.25. auto has the go command fetch the toolchain a
+# module's go.mod names when the one running is older, so a 1.25 job
+# builds the root at 1.25 and examples/a2a at 1.26 rather than refusing
+# it. It overrides the environment because actions/setup-go sets
+# GOTOOLCHAIN=local for every later step.
+export GOTOOLCHAIN := auto
+
 STATICCHECK ?= $(GO) run honnef.co/go/tools/cmd/staticcheck@latest
 GOVULNCHECK ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@latest
 
