@@ -3,7 +3,7 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## v0.0.11 - 2026-10-10
 
 - Changed: `Control.Permissions` reads the question, the part it asks
   about (`Subject`) and the held mark from the decision that deferred
