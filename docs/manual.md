@@ -1042,7 +1042,7 @@ message after either changes the digest.
 
 ## What the kit does that no line here covers
 
-Nine things, all outside `agentturn.Config`:
+Ten things, all outside `agentturn.Config`:
 
 - `Kit.Attach(agent)` is `rec.Attach(agent)`, and returns the same
   unsubscribe. It cannot be a config field because the recorder
@@ -1243,6 +1243,39 @@ Nine things, all outside `agentturn.Config`:
   agent takes the new one with `SetConfig` between runs, unless the
   instructions hook re-renders each request, under `WithMemory` or
   `WithGuards`.
+
+- `Kit.Control(agent)` is the agent as `agentturn.Control`, with
+  what a kit's agent needs around each run, from these exported calls:
+  every run, queued input and head move under `ContextWithRecorder`,
+  `session.ContextWithSessionID` and `agentmemory.WithSession` (its
+  `RunContext`); `Resume` after `engine.Release` with the last run's
+  end; `Queue` as `rec.Queue`; and, when the kit has no elicitor of its
+  own, `agent.SetConfig` with `ToolElicitor` set to
+  `rec.Elicitor(agentsession.ByHuman, agent.QuestionElicitor())` for the
+  run's recorder, so questions are events the front answers with
+  `agent.Reply`. It hands the agent what a resumed session owes,
+  `rec.Requeue(ctx, agent)`. `ContinueFrom` is `kit.RevokeSkillGrants`,
+  `rec.Rebase`, `session.TranscriptModels`, `session.Pending`,
+  `agent.SetTranscript`, `agent.SetPending`, `kit.RegrantSkills` and a
+  leaf label from `s.MarkLeaf`, undone on failure. By hand:
+
+  ```go
+  agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
+  defer kit.Attach(agent)()
+  rec := kit.Recorder()
+  run := func(ctx context.Context) context.Context {
+  	ctx = agentkit.ContextWithRecorder(ctx, rec)
+  	ctx = session.ContextWithSessionID(ctx, rec.SessionID())
+  	return agentmemory.WithSession(ctx, rec.SessionID())
+  }
+  cfg := agent.Config()
+  cfg.ToolElicitor = rec.Elicitor(agentsession.ByHuman, agent.QuestionElicitor())
+  _ = agent.SetConfig(cfg)
+  rec.Requeue(ctx, agent)
+  end, _ := agent.Prompt(run(ctx), prompt)
+  answers, _ = kit.Engine().Release(run(ctx), end, answers...)
+  end, _ = agent.Resume(run(ctx), answers...)
+  ```
 
 None of them changes a field of the config, so none can make the manual
 path a different path.
