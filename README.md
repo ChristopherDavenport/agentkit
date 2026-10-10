@@ -302,12 +302,12 @@ a2a.
 |---|---|
 | `openresponses` | v0.0.14 |
 | `agenttool`, `agenttool/mcpclient` | v0.0.22 |
-| `agentturn`, `agentturn/session` | v0.0.19 |
+| `agentturn`, `agentturn/session` | v0.0.22 |
 | `agentsession` | v0.0.20 |
 | `agentsmd` | v0.0.3 |
 | `agentskill` | v0.0.11 |
 | `agentmemory` | v0.0.10 |
-| `agentpolicy` | v0.0.12 |
+| `agentpolicy` | v0.0.15 |
 
 Every sibling is required at a released version with no `replace`, and
 `make no-replace` enforces it: the kit is the module that proves the
