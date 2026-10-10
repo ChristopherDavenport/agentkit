@@ -295,10 +295,12 @@ type Permission struct {
 // Permissions are the calls a run that ended for input left for
 // someone, each with the policy's question, and not the calls the
 // kit's engine only holds beside them, which Resume releases with the
-// answers. The question is the engine's verdict when it remembers the
-// call, and the decision that deferred it ([agentturn.PendingCall]'s
-// Decision) otherwise. It is nil for an end that is not
-// [agentturn.ReasonInputRequired].
+// answers. The question, the part it is about and the held mark are
+// the decision's that deferred the call ([agentturn.PendingCall]'s
+// Decision, which agentpolicy fills from its verdict), so an end read
+// back from the record or over a wire gives the same list; the
+// engine's verdict stands in for a call with no decision. It is nil
+// for an end that is not [agentturn.ReasonInputRequired].
 func (c *Control) Permissions(end *agentturn.RunEnd) []Permission {
 	if end == nil || end.Reason != agentturn.ReasonInputRequired {
 		return nil
@@ -310,10 +312,13 @@ func (c *Control) Permissions(end *agentturn.RunEnd) []Permission {
 			continue
 		}
 		perm := Permission{Call: p.Call}
-		if p.Decision != nil {
-			perm.Reason = p.Decision.Reason
-		}
-		if eng != nil {
+		switch d := p.Decision; {
+		case d != nil:
+			if d.Held {
+				continue
+			}
+			perm.Reason, perm.Subject = d.Reason, d.Subject
+		case eng != nil:
 			if v, ok := eng.Deferred(end.RunID, p.Call.CallID); ok {
 				if v.Held {
 					continue

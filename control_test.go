@@ -90,6 +90,28 @@ func TestControlReleasesTheCallTheEngineHeld(t *testing.T) {
 	}
 }
 
+// Permissions reads the question, its part and the held mark from the
+// decision that deferred each call, so an end the engine never saw (one
+// read back, or from a wire) lists the same calls as one it decided.
+func TestPermissionsReadTheDeferringDecision(t *testing.T) {
+	model := &scriptModel{}
+	_, ctl, _ := controlled(t,
+		agentkit.WithModel(model, "test-model"),
+		agentkit.WithPolicy(agentpolicy.Policy{Default: agentpolicy.Allow()}, nil),
+	)
+	call := func(id string) *openresponses.FunctionCall {
+		return &openresponses.FunctionCall{CallID: id, Name: "bash", Arguments: `{}`}
+	}
+	end := &agentturn.RunEnd{RunID: "run-elsewhere", Reason: agentturn.ReasonInputRequired, Pending: []agentturn.PendingCall{
+		{Call: call("asked"), Reason: agentturn.PendingDeferred, Decision: &agentturn.ToolDecision{Action: agentturn.Defer, Reason: "approval required by bash(rm:*)", Subject: "rm -rf build"}},
+		{Call: call("held"), Reason: agentturn.PendingDeferred, Decision: &agentturn.ToolDecision{Action: agentturn.Defer, Reason: "held beside another call", Held: true}},
+	}}
+	perms := ctl.Permissions(end)
+	if len(perms) != 1 || perms[0].Call.CallID != "asked" || perms[0].Reason != "approval required by bash(rm:*)" || perms[0].Subject != "rm -rf build" {
+		t.Fatalf("permissions = %+v, want the asked call alone, with its question and subject", perms)
+	}
+}
+
 // An answer Resume would refuse is refused before the engine releases
 // anything, so the held calls stay held and can still be answered.
 func TestControlRefusesABadAnswerBeforeTheRelease(t *testing.T) {

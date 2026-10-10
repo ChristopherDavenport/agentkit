@@ -3,6 +3,17 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- Changed: `Control.Permissions` reads the question, the part it asks
+  about (`Subject`) and the held mark from the decision that deferred
+  each call (`PendingCall.Decision`, which agentpolicy v0.0.15 fills
+  from its verdict), and asks the engine only for a call with no
+  decision. An end read back or received over a wire lists the same
+  calls as one the engine decided (#89).
+- Changed: requires agentpolicy v0.0.15, up from v0.0.12, and agentturn
+  and agentturn/session v0.0.22, up from v0.0.19.
+
 ## v0.0.10 - 2026-10-10
 
 ### Added
