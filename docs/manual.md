@@ -45,7 +45,7 @@ and no fold is recorded.
 | `ShouldStopAfterTurn` | `WithGuards`, `WithShouldStopAfterTurn` | `agentturn.ChainShouldStopAfterTurn(chain.ShouldStopAfterTurn(), yours...)` |
 | `Transform` | `WithCompaction`, `WithCompactionModel`, `WithCompactor`, `WithTransform`, `WithFoldObserver` | `agentturn.ChainTransform(yours, compact.NewLocal(model, compact.WithModel(name), compact.WithOnFold(fold), compact.WithBudget(n), theirs...).Transform)`, or `compact.New(compactor, ...)` with the same options for `WithCompactor`, where `fold` is `rec.Fold` and then the observer — see below |
 | `ToolRecorder` | `WithSession`, `WithResumedSession`, `WithRecorder` | `rec.RecordFunc()`; without a session the kit leaves it nil, and the loop honours a recorder the product installs with `agenttool.ContextWithRecorder` on the prompt's context |
-| `ToolElicitor` | `WithToolElicitor` | a function that calls `rec.Elicitor(by, fn)` for the run's recorder, `recorderFor(ctx)` below, and `fn` without one; without the option the kit leaves it nil, and an elicitor on the prompt's context applies |
+| `ToolElicitor` | `WithToolElicitor`, `Kit.Control` | a function that calls `rec.Elicitor(by, fn)` for the run's recorder, `recorderFor(ctx)` below, and `fn` without one; without the option the kit leaves it nil, and an elicitor on the prompt's context applies, until `Kit.Control(agent)` sets it to `Control.Elicitor()`: the same function over `agent.QuestionElicitor()` by `agentsession.ByHuman`, so questions are events the front answers with `agent.Reply`. `WithQuestionEvents` changes no field: it dials the MCP servers as `WithToolElicitor` does, with `mcpclient.WithElicitation()` |
 
 `chain` in the rows above is one `guard.Chain{Guards: gs, Observer:
 observe}`, where `observe` is the verdict observer described under
@@ -1042,7 +1042,7 @@ message after either changes the digest.
 
 ## What the kit does that no line here covers
 
-Nine things, all outside `agentturn.Config`:
+Ten things, all outside `agentturn.Config`:
 
 - `Kit.Attach(agent)` is `rec.Attach(agent)`, and returns the same
   unsubscribe. It cannot be a config field because the recorder
@@ -1243,6 +1243,40 @@ Nine things, all outside `agentturn.Config`:
   agent takes the new one with `SetConfig` between runs, unless the
   instructions hook re-renders each request, under `WithMemory` or
   `WithGuards`.
+
+- `Kit.Control(agent)` is the agent as `agentturn.Control`, with
+  what a kit's agent needs around each run, from these exported calls:
+  every run, queued input and head move under `ContextWithRecorder`,
+  `session.ContextWithSessionID` and `agentmemory.WithSession` (its
+  `RunContext`); `Resume` after `engine.Release` with the last run's
+  end; `Queue` as `rec.Queue`; and, when the kit has no elicitor of its
+  own, `agent.SetConfig` with `ToolElicitor` set to
+  `rec.Elicitor(agentsession.ByHuman, agent.QuestionElicitor())` for the
+  run's recorder, so questions are events the front answers with
+  `agent.Reply`; the kit's `Config()` carries it from then on (the
+  `ToolElicitor` row above), so a config applied again keeps it. It hands the agent what a resumed session owes,
+  `rec.Requeue(ctx, agent)`. `ContinueFrom` is `kit.RevokeSkillGrants`,
+  `rec.Rebase`, `session.TranscriptModels`, `session.Pending`,
+  `agent.SetTranscript`, `agent.SetPending`, `kit.RegrantSkills` and a
+  leaf label from `s.MarkLeaf`, undone on failure. By hand:
+
+  ```go
+  agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
+  defer kit.Attach(agent)()
+  rec := kit.Recorder()
+  run := func(ctx context.Context) context.Context {
+  	ctx = agentkit.ContextWithRecorder(ctx, rec)
+  	ctx = session.ContextWithSessionID(ctx, rec.SessionID())
+  	return agentmemory.WithSession(ctx, rec.SessionID())
+  }
+  cfg := agent.Config()
+  cfg.ToolElicitor = rec.Elicitor(agentsession.ByHuman, agent.QuestionElicitor())
+  _ = agent.SetConfig(cfg)
+  rec.Requeue(ctx, agent)
+  end, _ := agent.Prompt(run(ctx), prompt)
+  answers, _ = kit.Engine().Release(run(ctx), end, answers...)
+  end, _ = agent.Resume(run(ctx), answers...)
+  ```
 
 None of them changes a field of the config, so none can make the manual
 path a different path.

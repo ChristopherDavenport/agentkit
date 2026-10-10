@@ -122,6 +122,7 @@ type settings struct {
 	afterToolCall   func(context.Context, agentturn.ToolResultInfo) (*agentturn.ToolOverride, error)
 	elicitor        agenttool.Elicitor
 	elicitBy        string
+	questionEvents  bool
 	outputGuard     []func(context.Context, agentturn.OutputInfo) (*openresponses.Message, error)
 	shouldStop      []func(context.Context, agentturn.TurnInfo) (bool, error)
 	transform       func(context.Context, agentturn.Transcript) (agentturn.Transcript, error)
@@ -1182,6 +1183,24 @@ func WithAfterToolCall(fn func(context.Context, agentturn.ToolResultInfo) (*agen
 // their own options.
 func WithToolElicitor(by string, fn agenttool.Elicitor) Option {
 	return func(s *settings) { s.elicitBy, s.elicitor = by, fn }
+}
+
+// WithQuestionEvents says the questions a tool asks the user mid-call,
+// an MCP server's elicitation among them, are put as agentturn events
+// and answered through [Kit.Control]: [Kit.Control] installs the
+// agent's [agentturn.Agent.QuestionElicitor] as ToolElicitor, and the
+// kit dials every server [WithMCP], [WithMCPTransport] and
+// [Kit.AddMCP] name with [mcpclient.WithElicitation], as it does under
+// [WithToolElicitor], so a server is offered elicitation and its
+// question reaches the agent's subscribers. MCP carries no note with
+// an answer, so what the user said with one is recorded and never sent
+// to the server. Until Kit.Control is called nobody is asked, and a
+// server's question is answered as cancelled.
+//
+// It is refused beside [WithToolElicitor], which answers in process:
+// the questions go to one or the other.
+func WithQuestionEvents() Option {
+	return func(s *settings) { s.questionEvents = true }
 }
 
 // WithOutputGuard adds a guard on each assistant message, after the

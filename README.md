@@ -301,8 +301,8 @@ a2a.
 | library | version |
 |---|---|
 | `openresponses` | v0.0.14 |
-| `agenttool`, `agenttool/mcpclient` | v0.0.15 |
-| `agentturn`, `agentturn/session` | v0.0.16 |
+| `agenttool`, `agenttool/mcpclient` | v0.0.22 |
+| `agentturn`, `agentturn/session` | v0.0.19 |
 | `agentsession` | v0.0.20 |
 | `agentsmd` | v0.0.3 |
 | `agentskill` | v0.0.11 |

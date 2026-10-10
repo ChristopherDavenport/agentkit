@@ -3,6 +3,41 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- `Kit.Control(agent)`, a kit's agent as `agentturn.Control` (#87). It
+  does around each run what a kit's agent needs and a bare agent does
+  not: every run, queued input and head move carries the kit's recorder
+  and session (`Control.RunContext`); `Resume` puts the answers through
+  the engine's `Release` first, so a call the engine only held beside
+  an asked one is released with the batch, and refuses an answer
+  `Resume` would refuse before releasing anything; `Queue` writes the
+  queued entry before it returns; and, when the kit has no elicitor of
+  its own, a question asked while a call runs is an
+  `agentturn.Question` event, recorded, answered with `Reply`, whose
+  note reaches the model. Outside the contract: `Permissions(end)`, the
+  calls a run left for someone with the policy's question, not the
+  ones the engine only holds; and `ContinueFrom(ctx, entryID)`, the
+  head move with the skill grants moved along, undone on failure. It
+  is the composition agentconsole's kitbackend and dax each wrote; the
+  manual lists its calls. Once it has installed the question elicitor,
+  `Kit.Config()` carries it as `ToolElicitor`, so a config applied again
+  (after `ReloadSkills`, say) keeps questions as events; a second agent
+  cannot take the kit's questions over.
+- `WithQuestionEvents()`: a tool's questions, an MCP server's among
+  them, are agentturn events answered through `Kit.Control`. The kit
+  dials MCP servers with `mcpclient.WithElicitation()` as under
+  `WithToolElicitor`, so a server's question reaches the agent's
+  subscribers; what the user says with an answer is recorded, and MCP
+  does not carry it to the server. Refused beside `WithToolElicitor`.
+
+### Changed
+
+- Requires agentturn and agentturn/session v0.0.19 (up from v0.0.16),
+  and agenttool and agenttool/mcpclient v0.0.22 (up from v0.0.15).
+
 ## v0.0.9 - 2026-10-09
 
 ### Changed

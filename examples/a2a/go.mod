@@ -7,8 +7,8 @@ go 1.26.0
 // without a gRPC stack; see the package doc.
 require (
 	github.com/ChristopherDavenport/agentkit v0.0.0
-	github.com/ChristopherDavenport/agenttool v0.0.15
-	github.com/ChristopherDavenport/agentturn v0.0.16
+	github.com/ChristopherDavenport/agenttool v0.0.22
+	github.com/ChristopherDavenport/agentturn v0.0.19
 	github.com/ChristopherDavenport/agentturn/front/a2a v0.0.16
 	github.com/ChristopherDavenport/agentturn/tools/a2a v0.0.16
 	github.com/a2aproject/a2a-go v0.3.15
@@ -16,7 +16,7 @@ require (
 
 require (
 	github.com/ChristopherDavenport/agentsession v0.0.20
-	github.com/ChristopherDavenport/agentturn/session v0.0.16
+	github.com/ChristopherDavenport/agentturn/session v0.0.19
 	github.com/ChristopherDavenport/openresponses v0.0.14
 )
 
@@ -25,7 +25,7 @@ require (
 	github.com/ChristopherDavenport/agentpolicy v0.0.12 // indirect
 	github.com/ChristopherDavenport/agentskill v0.0.11 // indirect
 	github.com/ChristopherDavenport/agentsmd v0.0.3 // indirect
-	github.com/ChristopherDavenport/agenttool/mcpclient v0.0.15 // indirect
+	github.com/ChristopherDavenport/agenttool/mcpclient v0.0.22 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/modelcontextprotocol/go-sdk v1.8.0 // indirect
