@@ -22,7 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   ones the engine only holds; and `ContinueFrom(ctx, entryID)`, the
   head move with the skill grants moved along, undone on failure. It
   is the composition agentconsole's kitbackend and dax each wrote; the
-  manual lists its calls.
+  manual lists its calls. Once it has installed the question elicitor,
+  `Kit.Config()` carries it as `ToolElicitor`, so a config applied again
+  (after `ReloadSkills`, say) keeps questions as events; a second agent
+  cannot take the kit's questions over.
+- `WithQuestionEvents()`: a tool's questions, an MCP server's among
+  them, are agentturn events answered through `Kit.Control`. The kit
+  dials MCP servers with `mcpclient.WithElicitation()` as under
+  `WithToolElicitor`, so a server's question reaches the agent's
+  subscribers; what the user says with an answer is recorded, and MCP
+  does not carry it to the server. Refused beside `WithToolElicitor`.
 
 ### Changed
 

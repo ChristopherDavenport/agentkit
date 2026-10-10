@@ -17,6 +17,7 @@ import (
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type noArgs struct{}
@@ -341,5 +342,145 @@ func TestControlContinueFromRefusesWhereTheHeadCannotRest(t *testing.T) {
 	}
 	if n := len(ctl.State().Transcript); n != before {
 		t.Fatalf("transcript has %d items after the refusals, want %d", n, before)
+	}
+}
+
+// Under WithQuestionEvents an MCP server's elicitation is a Question
+// through Control, answered with Reply: the server reads the answer,
+// and the record keeps it with what the user said, which MCP does not
+// carry to the server.
+func TestControlPutsAnMCPServersQuestionAsAnEvent(t *testing.T) {
+	cases := []struct {
+		name   string
+		answer agenttool.Answer
+	}{
+		{name: "accepted", answer: agenttool.Answer{Action: agenttool.ActionAccept, Content: json.RawMessage(`{"ok":true}`)}},
+		{name: "declined, with a note", answer: agenttool.Answer{Action: agenttool.ActionDecline, Note: "not on a Friday"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := sdk.NewServer(&sdk.Implementation{Name: "test", Version: "0"}, nil)
+			sdk.AddTool(srv, &sdk.Tool{Name: "deploy", Description: "deploy after asking"},
+				func(_ context.Context, req *sdk.CallToolRequest, _ struct{}) (*sdk.CallToolResult, any, error) {
+					answer, ok := req.Params.InputResponses["confirm"].(*sdk.ElicitResult)
+					if !ok {
+						return &sdk.CallToolResult{InputRequests: sdk.InputRequestMap{"confirm": &sdk.ElicitParams{
+							Message:         "Deploy to production?",
+							RequestedSchema: json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}}}`),
+						}}}, nil, nil
+					}
+					return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "server read " + answer.Action}}}, nil, nil
+				})
+			client, server := sdk.NewInMemoryTransports()
+			ss, err := srv.Connect(t.Context(), server, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = ss.Close() })
+
+			model := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("deploy", `{}`)}}
+			kit, ctl, store := controlled(t,
+				agentkit.WithModel(model, "test-model"),
+				agentkit.WithMCPTransport(client),
+				agentkit.WithQuestionEvents(),
+			)
+			var asked []string
+			defer ctl.Subscribe(func(_ context.Context, ev agentturn.Event) error {
+				if q, ok := ev.(*agentturn.Question); ok {
+					asked = append(asked, q.Elicitation.Message)
+					return ctl.Reply(q.ID, tc.answer)
+				}
+				return nil
+			})()
+			if _, err := ctl.Prompt(t.Context(), openresponses.UserText("ship it")); err != nil {
+				t.Fatal(err)
+			}
+			if len(asked) != 1 || asked[0] != "Deploy to production?" {
+				t.Fatalf("questions = %q, want the server's one", asked)
+			}
+			if out := lastToolOutput(model); !strings.Contains(out, "server read "+string(tc.answer.Action)) {
+				t.Fatalf("the tool's output = %q, want the server to have read %s", out, tc.answer.Action)
+			}
+			var answer *session.Elicitation
+			for _, c := range customEntries(openSession(t, store, kit.SessionID()), session.ElicitationNS) {
+				var e session.Elicitation
+				if err := json.Unmarshal(c.Data, &e); err != nil {
+					t.Fatal(err)
+				}
+				if e.Phase == session.ElicitationAnswer {
+					answer = &e
+				}
+			}
+			if answer == nil || answer.Action != string(tc.answer.Action) || answer.Note != tc.answer.Note {
+				t.Fatalf("answer entry = %+v, want %s with note %q", answer, tc.answer.Action, tc.answer.Note)
+			}
+		})
+	}
+}
+
+// WithQuestionEvents and WithToolElicitor name two answerers for one
+// question.
+func TestQuestionEventsBesideAToolElicitorIsRefused(t *testing.T) {
+	_, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithQuestionEvents(),
+		agentkit.WithToolElicitor(agentpolicy.ByHuman, func(context.Context, agenttool.Elicitation) (agenttool.Answer, error) {
+			return agenttool.Answer{Action: agenttool.ActionCancel}, nil
+		}),
+	)
+	if err == nil {
+		t.Fatal("New took both")
+	}
+}
+
+// Once Control has installed the elicitor, the kit's config carries it,
+// so a config applied again after a skill reload still puts a nested
+// call's question as an event. A second agent cannot take the kit's
+// questions over.
+func TestControlsElicitorSurvivesAReappliedConfig(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "digging", "bash")
+	var ranBash atomic.Int32
+	eval := agenttool.New("eval", "runs code", func(ctx context.Context, _ noArgs) (string, error) {
+		if _, err := agentturn.Invoke(ctx, "bash", json.RawMessage(`{}`)); err != nil {
+			return "the nested call failed: " + err.Error(), nil
+		}
+		return "ran", nil
+	})
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("eval", `{}`)}}
+	kit, ctl, _ := controlled(t,
+		agentkit.WithModel(model, "test-model"),
+		agentkit.WithTools(eval, counting("bash", &ranBash)),
+		agentkit.WithSkills(skills),
+		agentkit.WithPolicy(agentpolicy.Policy{Ask: policyRules(t, "bash"), Default: agentpolicy.Allow()}, nil),
+	)
+	if kit.Config().ToolElicitor == nil {
+		t.Fatal("the kit's config carries no elicitor after Control")
+	}
+	if err := kit.ReloadSkills(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctl.Agent().SetConfig(kit.Config()); err != nil {
+		t.Fatal(err)
+	}
+	var questions int
+	defer ctl.Subscribe(func(_ context.Context, ev agentturn.Event) error {
+		if q, ok := ev.(*agentturn.Question); ok {
+			questions++
+			return ctl.Reply(q.ID, agenttool.Answer{Action: agenttool.ActionAccept})
+		}
+		return nil
+	})()
+	if _, err := ctl.Prompt(t.Context(), openresponses.UserText("go")); err != nil {
+		t.Fatal(err)
+	}
+	if questions != 1 || ranBash.Load() != 1 {
+		t.Fatalf("%d questions, bash ran %d times; want the nested call asked and run once", questions, ranBash.Load())
+	}
+
+	if _, err := kit.Control(agentturn.New(kit.Config())); err == nil {
+		t.Fatal("a second agent took the kit's questions")
+	}
+	if _, err := kit.Control(ctl.Agent()); err != nil {
+		t.Fatalf("Control again for the same agent: %v", err)
 	}
 }

@@ -86,7 +86,10 @@ import (
 // instructions as one string, since that recorder's parts function is
 // the sender's.
 type Kit struct {
-	cfg     agentturn.Config
+	cfg agentturn.Config
+	// asker is the agent [Kit.Control] put cfg's ToolElicitor through,
+	// nil until it has. Guarded by mu, as cfg is.
+	asker   *agentturn.Agent
 	order   []string
 	omitted []Omission
 	origins []ToolOrigin
@@ -328,6 +331,9 @@ func New(ctx context.Context, opts ...Option) (*Kit, error) {
 	// skills at all leaves both of these inert instead, because a
 	// product that adds WithSkills behind a flag and the rest
 	// unconditionally is writing ordinary code, not a mistake.
+	if s.questionEvents && s.elicitor != nil {
+		return nil, errors.New("agentkit: WithQuestionEvents and WithToolElicitor both set; a tool's question is put as an event or answered in process")
+	}
 	if s.skillToolWith && s.skillToolWithout {
 		return nil, errors.New("agentkit: WithSkillTool and WithoutSkillTool both set; the catalogue's tool is offered or it is not")
 	}
@@ -561,7 +567,7 @@ func (k *Kit) dial(ctx context.Context, s *settings) error {
 	if s.mcpStderr != nil {
 		k.mcpStderr = &lockedWriter{w: s.mcpStderr}
 	}
-	k.mcpElicit, k.mcpNext = s.elicitor != nil, len(s.mcp)
+	k.mcpElicit, k.mcpNext = s.elicitor != nil || s.questionEvents, len(s.mcp)
 	for i, d := range s.mcp {
 		remote, err := k.connect(ctx, d, i)
 		if err != nil {

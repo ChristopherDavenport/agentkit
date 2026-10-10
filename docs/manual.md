@@ -45,7 +45,7 @@ and no fold is recorded.
 | `ShouldStopAfterTurn` | `WithGuards`, `WithShouldStopAfterTurn` | `agentturn.ChainShouldStopAfterTurn(chain.ShouldStopAfterTurn(), yours...)` |
 | `Transform` | `WithCompaction`, `WithCompactionModel`, `WithCompactor`, `WithTransform`, `WithFoldObserver` | `agentturn.ChainTransform(yours, compact.NewLocal(model, compact.WithModel(name), compact.WithOnFold(fold), compact.WithBudget(n), theirs...).Transform)`, or `compact.New(compactor, ...)` with the same options for `WithCompactor`, where `fold` is `rec.Fold` and then the observer — see below |
 | `ToolRecorder` | `WithSession`, `WithResumedSession`, `WithRecorder` | `rec.RecordFunc()`; without a session the kit leaves it nil, and the loop honours a recorder the product installs with `agenttool.ContextWithRecorder` on the prompt's context |
-| `ToolElicitor` | `WithToolElicitor` | a function that calls `rec.Elicitor(by, fn)` for the run's recorder, `recorderFor(ctx)` below, and `fn` without one; without the option the kit leaves it nil, and an elicitor on the prompt's context applies |
+| `ToolElicitor` | `WithToolElicitor`, `Kit.Control` | a function that calls `rec.Elicitor(by, fn)` for the run's recorder, `recorderFor(ctx)` below, and `fn` without one; without the option the kit leaves it nil, and an elicitor on the prompt's context applies, until `Kit.Control(agent)` sets it to `Control.Elicitor()`: the same function over `agent.QuestionElicitor()` by `agentsession.ByHuman`, so questions are events the front answers with `agent.Reply`. `WithQuestionEvents` changes no field: it dials the MCP servers as `WithToolElicitor` does, with `mcpclient.WithElicitation()` |
 
 `chain` in the rows above is one `guard.Chain{Guards: gs, Observer:
 observe}`, where `observe` is the verdict observer described under
@@ -1253,7 +1253,8 @@ Ten things, all outside `agentturn.Config`:
   own, `agent.SetConfig` with `ToolElicitor` set to
   `rec.Elicitor(agentsession.ByHuman, agent.QuestionElicitor())` for the
   run's recorder, so questions are events the front answers with
-  `agent.Reply`. It hands the agent what a resumed session owes,
+  `agent.Reply`; the kit's `Config()` carries it from then on (the
+  `ToolElicitor` row above), so a config applied again keeps it. It hands the agent what a resumed session owes,
   `rec.Requeue(ctx, agent)`. `ContinueFrom` is `kit.RevokeSkillGrants`,
   `rec.Rebase`, `session.TranscriptModels`, `session.Pending`,
   `agent.SetTranscript`, `agent.SetPending`, `kit.RegrantSkills` and a

@@ -34,7 +34,7 @@ import (
 //     quiet tool's next event would write it;
 //   - a question asked while a call runs is an [agentturn.Question]
 //     event, answered with Reply, when the kit has no elicitor of its
-//     own.
+//     own; an MCP server's too under [WithQuestionEvents].
 //
 // It is the composition agentconsole's kitbackend and dax each wrote
 // for themselves, written once, from exported calls alone; docs/manual.md
@@ -53,21 +53,26 @@ var _ agentturn.Control = (*Control)(nil)
 // Control returns the agent a as the human plane drives it, a built
 // over k: agentturn.New(k.Config(), k.AgentOptions()...) and attached
 // with [Kit.Attach]. Call it before the agent's first run. It does two
-// things to a at once:
+// things at once:
 //
-//   - When k has no elicitor of its own ([WithToolElicitor]), it
-//     installs the agent's [agentturn.Agent.QuestionElicitor] as a's
-//     [agentturn.Config.ToolElicitor], with the run's recorder's
+//   - When k has no elicitor of its own ([WithToolElicitor]), the
+//     questions a tool asks mid-call become events: it sets
+//     [Control.Elicitor], the agent's
+//     [agentturn.Agent.QuestionElicitor] with the run's recorder's
 //     [session.Recorder.Elicitor] around it, by
-//     [agentsession.ByHuman], so a tool's question and a nested call
-//     the policy asks about are recorded under the call and delivered
-//     to the subscribers as [agentturn.Question]. A subscriber that
-//     cannot answer one replies [agenttool.ActionCancel], since the
-//     call waits for the reply or for its context to end. A kit with
-//     its own elicitor answers in process, and its config is left as
-//     it is. A later [agentturn.Agent.SetConfig] with [Kit.Config]
-//     drops the installed elicitor; set it on the config again with
-//     [Control.Elicitor].
+//     [agentsession.ByHuman], as the ToolElicitor of a's config and of
+//     every [Kit.Config] after, so a config the product applies again
+//     with [agentturn.Agent.SetConfig] (after [Kit.ReloadSkills], say)
+//     keeps it. A tool's question and a nested call the policy asks
+//     about are then recorded under the call and delivered to the
+//     subscribers as [agentturn.Question]; an MCP server's too under
+//     [WithQuestionEvents], which offers the servers elicitation. A
+//     subscriber that cannot answer one replies
+//     [agenttool.ActionCancel], since the call waits for the reply or
+//     for its context to end. The kit's questions go to one agent, so
+//     Control refuses a second agent once it has installed the first's.
+//     A kit with its own elicitor answers in process, and the configs
+//     are left as they are.
 //   - It hands a the inputs a resumed session owes
 //     ([session.Recorder.Requeue]), which the next run takes.
 //
@@ -77,9 +82,30 @@ func (k *Kit) Control(a *agentturn.Agent) (*Control, error) {
 		return nil, errors.New("agentkit: control: no agent")
 	}
 	c := &Control{kit: k, agent: a}
-	if cfg := a.Config(); cfg.ToolElicitor == nil {
-		cfg.ToolElicitor = c.Elicitor()
+	k.mu.Lock()
+	install := k.asker == a || (k.asker == nil && k.cfg.ToolElicitor == nil)
+	if k.asker != nil && k.asker != a {
+		k.mu.Unlock()
+		return nil, errors.New("agentkit: control: the kit's questions already go to another agent's Control")
+	}
+	var prev agenttool.Elicitor
+	if install {
+		prev = k.cfg.ToolElicitor
+		if k.asker == nil {
+			k.cfg.ToolElicitor, k.asker = c.Elicitor(), a
+		}
+	}
+	elicitor := k.cfg.ToolElicitor
+	k.mu.Unlock()
+	if install {
+		cfg := a.Config()
+		cfg.ToolElicitor = elicitor
 		if err := a.SetConfig(cfg); err != nil {
+			k.mu.Lock()
+			if prev == nil {
+				k.cfg.ToolElicitor, k.asker = nil, nil
+			}
+			k.mu.Unlock()
 			return nil, fmt.Errorf("agentkit: control: %w", err)
 		}
 	}
