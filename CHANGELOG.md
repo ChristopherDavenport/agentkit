@@ -3,6 +3,22 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- A product that drives an agent by hand hears its questions under
+  `WithQuestionEvents` (#99). `ContextWithQuestions(ctx, ask)` names the
+  elicitor a run's questions go to, `QuestionsFromContext` reads it, and
+  `Kit.QuestionsFor(agent)` is that agent's: its `QuestionElicitor`,
+  recorded by the run's recorder as a person's answer, which
+  `Control.Elicitor` now returns. The kit's elicitor asks the one the
+  run names, then a Control on the run's context, and answers
+  cancelled, by the policy, with neither. `Control.RunContext` puts
+  both, and docs/manual.md's by-hand block names
+  `kit.QuestionsFor(agent)` in place of the `Control` it could not
+  name, so it behaves as `Kit.Control` does, not only records alike.
+
 ## v0.0.12 - 2026-10-11
 
 ### Changed (breaking)

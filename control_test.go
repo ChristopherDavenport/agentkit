@@ -976,6 +976,56 @@ func TestEachConversationsQuestionsReachItsOwnControl(t *testing.T) {
 	}
 }
 
+// A product that drives an agent by hand, as docs/manual.md's block
+// does, names the agent's question elicitor on each run's context and
+// hears its questions as a Control's subscribers do, recorded as a
+// person's answer; with nothing named, the question is answered
+// cancelled by the policy and nobody is asked.
+func TestAByHandProductHearsItsQuestions(t *testing.T) {
+	var ranBash atomic.Int32
+	eval := agenttool.New("eval", "runs code", func(ctx context.Context, _ noArgs) (string, error) {
+		if _, err := agentturn.Invoke(ctx, "bash", json.RawMessage(`{}`)); err != nil {
+			return "the nested call failed: " + err.Error(), nil
+		}
+		return "ran", nil
+	})
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("eval", `{}`), textTurn("done"), callTurn("eval", `{}`), textTurn("done")}}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(model, "test-model"),
+		agentkit.WithTools(eval, counting("bash", &ranBash)),
+		agentkit.WithPolicy(agentpolicy.Policy{Ask: policyRules(t, "bash"), Default: agentpolicy.Allow()}, nil),
+		agentkit.WithQuestionEvents(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
+	var asked atomic.Int32
+	defer agent.Subscribe(func(ctx context.Context, ev agentturn.Event) error {
+		if q, ok := ev.(*agentturn.Question); ok {
+			asked.Add(1)
+			return agent.Reply(ctx, q.ID, agenttool.Answer{Action: agenttool.ActionAccept})
+		}
+		return nil
+	})()
+
+	ctx := agentkit.ContextWithQuestions(t.Context(), kit.QuestionsFor(agent))
+	if _, err := agent.Prompt(ctx, openresponses.UserText("clean up the pods")); err != nil {
+		t.Fatal(err)
+	}
+	if asked.Load() != 1 || ranBash.Load() != 1 {
+		t.Fatalf("by hand: asked %d, bash ran %d; want asked once and bash run", asked.Load(), ranBash.Load())
+	}
+
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("clean up the pods")); err != nil {
+		t.Fatal(err)
+	}
+	if asked.Load() != 1 || ranBash.Load() != 1 {
+		t.Fatalf("a run naming no elicitor asked: asked %d, bash ran %d", asked.Load(), ranBash.Load())
+	}
+}
+
 // Without WithQuestionEvents a kit driven through Control asks nobody:
 // a nested call the policy asks about is not put as a question, and the
 // run ends without waiting for a reply that would never come
