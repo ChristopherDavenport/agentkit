@@ -45,7 +45,7 @@ and no fold is recorded.
 | `ShouldStopAfterTurn` | `WithGuards`, `WithShouldStopAfterTurn` | `agentturn.ChainShouldStopAfterTurn(chain.ShouldStopAfterTurn(), yours...)` |
 | `Transform` | `WithCompaction`, `WithCompactionModel`, `WithCompactor`, `WithTransform`, `WithFoldObserver` | `agentturn.ChainTransform(yours, compact.NewLocal(model, compact.WithModel(name), compact.WithOnFold(fold), compact.WithBudget(n), theirs...).Transform)`, or `compact.New(compactor, ...)` with the same options for `WithCompactor`, where `fold` is `rec.Fold` and then the observer — see below |
 | `ToolRecorder` | `WithSession`, `WithResumedSession`, `WithRecorder` | `rec.RecordFunc()`; without a session the kit leaves it nil, and the loop honours a recorder the product installs with `agenttool.ContextWithRecorder` on the prompt's context |
-| `ToolElicitor` | `WithToolElicitor`, `WithQuestionEvents` | under `WithToolElicitor`, a function that calls `rec.Elicitor(by, fn)` for the run's recorder, `recorderFor(ctx)` below, and `fn` without one; under `WithQuestionEvents`, a function that asks the Control on the run's context, `c, ok := agentkit.ControlFromContext(ctx)` then `c.Elicitor()(ctx, q)` (the same function over `agent.QuestionElicitor()` by `agentsession.ByHuman`, so questions are events the front answers with `agent.Reply`), and with no Control answers `agenttool.ActionCancel` through `rec.Elicitor(agentsession.ByPolicy, …)`; it also dials the MCP servers as `WithToolElicitor` does, with `mcpclient.WithElicitation()`. Without either the kit leaves it nil: an elicitor on the prompt's context applies, and with none a tool's question goes unasked. `Kit.Control(agent)` gives an agent whose config has none the kit's |
+| `ToolElicitor` | `WithToolElicitor`, `WithQuestionEvents` | under `WithToolElicitor`, a function that calls `rec.Elicitor(by, fn)` for the run's recorder, `recorderFor(ctx)` below, and `fn` without one; under `WithQuestionEvents`, a function that asks the elicitor the run's context names, `ask, ok := agentkit.QuestionsFromContext(ctx)` then `ask(ctx, q)`, else the Control on it, `c, ok := agentkit.ControlFromContext(ctx)` then `c.Elicitor()(ctx, q)` (both `kit.QuestionsFor(agent)`: a function over `agent.QuestionElicitor()` by `agentsession.ByHuman`, so questions are events the front answers with `agent.Reply`), and with neither answers `agenttool.ActionCancel` through `rec.Elicitor(agentsession.ByPolicy, …)`; it also dials the MCP servers as `WithToolElicitor` does, with `mcpclient.WithElicitation()`. Without either the kit leaves it nil: an elicitor on the prompt's context applies, and with none a tool's question goes unasked. `Kit.Control(agent)` gives an agent whose config has none the kit's |
 
 `chain` in the rows above is one `guard.Chain{Guards: gs, Observer:
 observe}`, where `observe` is the verdict observer described under
@@ -1248,9 +1248,11 @@ Ten things, all outside `agentturn.Config`:
   what a kit's agent needs around each run, from these exported calls:
   every run, queued input and head move under `ContextWithRecorder`,
   `session.ContextWithSessionID` and `agentmemory.WithSession`, and
-  under `agentkit.ContextWithControl`, so under `WithQuestionEvents` the
-  run's questions reach its own subscribers (the `ToolElicitor` row
-  above); that is its `RunContext`. `Resume` is `engine.Release` with
+  under `agentkit.ContextWithControl` and
+  `agentkit.ContextWithQuestions` of `kit.QuestionsFor(agent)`, so under
+  `WithQuestionEvents` the run's questions reach its own subscribers
+  (the `ToolElicitor` row above); that is its `RunContext`. By hand,
+  `ContextWithQuestions` alone routes them, with no `Control` to name. `Resume` is `engine.Release` with
   an end of the agent's pending calls, under the run that left them
   pending (the session's last run end for an agent seeded with them),
   then `agent.Resume`, then `engine.Resumed` with the end the run
@@ -1273,9 +1275,8 @@ Ten things, all outside `agentturn.Config`:
   agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
   defer kit.Attach(agent)()
   rec := kit.Recorder()
-  var ctl *agentkit.Control // the one ContextWithControl names, if any
   run := func(ctx context.Context) context.Context {
-  	ctx = agentkit.ContextWithControl(ctx, ctl)
+  	ctx = agentkit.ContextWithQuestions(ctx, kit.QuestionsFor(agent))
   	ctx = agentkit.ContextWithRecorder(ctx, rec)
   	ctx = session.ContextWithSessionID(ctx, rec.SessionID())
   	return agentmemory.WithSession(ctx, rec.SessionID())

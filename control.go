@@ -74,7 +74,8 @@ var _ agentturn.Control = (*Control)(nil)
 //   - Under [WithQuestionEvents] the questions a tool asks mid-call
 //     are events: the kit's config carries an elicitor that asks the
 //     Control of the run the question comes from (the one on its
-//     context, [ControlFromContext]), through that agent's
+//     context, [QuestionsFromContext], which RunContext puts there),
+//     through that agent's
 //     [agentturn.Agent.QuestionElicitor] with the run's recorder's
 //     [session.Recorder.Elicitor] around it, by
 //     [agentsession.ByHuman] ([Control.Elicitor]). Each conversation's
@@ -148,10 +149,15 @@ func ControlFromContext(ctx context.Context) (*Control, bool) {
 }
 
 // questions is the ToolElicitor [WithQuestionEvents] puts on the kit's
-// config: the question goes to the Control of the run that asks, as an
-// event to its subscribers, and is answered cancelled, by the policy,
-// for a run that carries none. It asks no other conversation.
+// config: the question goes to the elicitor the run that asks names
+// ([ContextWithQuestions]), else to its Control ([ContextWithControl]),
+// as an event to that agent's subscribers, and is answered cancelled,
+// by the policy, for a run that carries neither. It asks no other
+// conversation.
 func (k *Kit) questions(ctx context.Context, q agenttool.Elicitation) (agenttool.Answer, error) {
+	if ask, ok := QuestionsFromContext(ctx); ok {
+		return ask(ctx, q)
+	}
 	if c, ok := ControlFromContext(ctx); ok {
 		return c.Elicitor()(ctx, q)
 	}
@@ -173,11 +179,23 @@ func (c *Control) Agent() *agentturn.Agent { return c.agent }
 // recorded by the run's recorder, the one on the call's context or the
 // kit's, as answered by a person.
 func (c *Control) Elicitor() agenttool.Elicitor {
-	ask := c.agent.QuestionElicitor()
+	return c.kit.QuestionsFor(c.agent)
+}
+
+// QuestionsFor returns the elicitor a run of a puts its questions to
+// under [WithQuestionEvents]: a's [agentturn.Agent.QuestionElicitor],
+// so each question is an [agentturn.Question] event to a's subscribers
+// answered with Reply, recorded by the run's recorder, the one on the
+// call's context or the kit's, as answered by a person
+// ([agentsession.ByHuman]). It is what [Control.Elicitor] returns, for
+// a product that drives a by hand: it names it on each run's context
+// with [ContextWithQuestions], as [Control.RunContext] does.
+func (k *Kit) QuestionsFor(a *agentturn.Agent) agenttool.Elicitor {
+	ask := a.QuestionElicitor()
 	return func(ctx context.Context, q agenttool.Elicitation) (agenttool.Answer, error) {
 		rec := RecorderFromContext(ctx)
 		if rec == nil {
-			rec = c.kit.Recorder()
+			rec = k.Recorder()
 		}
 		if rec == nil {
 			return ask(ctx, q)
@@ -186,9 +204,33 @@ func (c *Control) Elicitor() agenttool.Elicitor {
 	}
 }
 
+type questionsKey struct{}
+
+// ContextWithQuestions returns ctx carrying ask, the elicitor the
+// questions of a run started under ctx go to under
+// [WithQuestionEvents]: the kit's elicitor asks it, and a run with none
+// on its context ([QuestionsFromContext]), nor a Control
+// ([ControlFromContext]), has its questions answered cancelled.
+// [Control.RunContext] puts its Control's ([Kit.QuestionsFor]); a
+// product driving an agent by hand puts [Kit.QuestionsFor] of that
+// agent. The values of a run's context reach its tools, its hooks and
+// the sub-agents its tools run, so a question asked anywhere in the
+// run goes to the conversation the run belongs to.
+func ContextWithQuestions(ctx context.Context, ask agenttool.Elicitor) context.Context {
+	return context.WithValue(ctx, questionsKey{}, ask)
+}
+
+// QuestionsFromContext returns the elicitor [ContextWithQuestions] put
+// on ctx.
+func QuestionsFromContext(ctx context.Context) (agenttool.Elicitor, bool) {
+	ask, ok := ctx.Value(questionsKey{}).(agenttool.Elicitor)
+	return ask, ok && ask != nil
+}
+
 // RunContext puts on ctx what the kit expects of a run it drives: the
-// Control itself ([ContextWithControl]), so the run's questions reach
-// this conversation's subscribers; the kit's recorder, the session's
+// Control itself ([ContextWithControl]) and its elicitor
+// ([ContextWithQuestions]), so the run's questions reach this
+// conversation's subscribers; the kit's recorder, the session's
 // ID for the model calls and for memory a run writes; and the reasoning
 // attribution of the branch the head was last moved to. Prompt, Resume,
 // Queue and ContinueFrom use it; a front that starts a run of its own
@@ -199,6 +241,7 @@ func (c *Control) Elicitor() agenttool.Elicitor {
 // serves several conversations, each recorded in its own.
 func (c *Control) RunContext(ctx context.Context) context.Context {
 	ctx = ContextWithControl(ctx, c)
+	ctx = ContextWithQuestions(ctx, c.Elicitor())
 	c.mu.Lock()
 	models := c.models
 	c.mu.Unlock()
