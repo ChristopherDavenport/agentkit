@@ -499,6 +499,86 @@ func TestControlContinueFromMovesTheSkillGrants(t *testing.T) {
 	}
 }
 
+// A head move gives the agent the notes the branch it moves to owes:
+// a person's note that a failed run could not append after its output
+// is said by the next run on that branch, whatever branch the head was
+// on before.
+func TestControlContinueFromRestoresTheOwedNotes(t *testing.T) {
+	var ran atomic.Int32
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("danger", `{}`)}}
+	kit, ctl, store := controlled(t,
+		agentkit.WithModel(model, "test-model"),
+		agentkit.WithTools(counting("danger", &ran)),
+		agentkit.WithPolicy(agentpolicy.Policy{Ask: policyRules(t, "danger"), Default: agentpolicy.Allow()}, nil),
+	)
+	if _, err := ctl.Prompt(t.Context(), openresponses.UserText("go")); err != nil {
+		t.Fatal(err)
+	}
+	const note = "put the workflow under ci/"
+	var failed atomic.Bool
+	defer ctl.Subscribe(func(_ context.Context, ev agentturn.Event) error {
+		if e, ok := ev.(*agentturn.ItemStart); ok {
+			if m, ok := e.Item.(*openresponses.Message); ok && strings.Contains(messageText(m), note) && !failed.Swap(true) {
+				return errors.New("the store is down")
+			}
+		}
+		return nil
+	})()
+	refusal := agentturn.Output(openresponses.NewFunctionCallOutput("call-danger", "declined")).WithNote(note).WithBy(agentpolicy.ByHuman)
+	if _, err := ctl.Resume(t.Context(), refusal); err == nil {
+		t.Fatal("the note was appended past a failing subscriber")
+	}
+	if !owes(ctl.State().Notes, note) {
+		t.Fatalf("notes owed after the failed append = %+v, want the person's", ctl.State().Notes)
+	}
+
+	s := openSession(t, store, kit.SessionID())
+	var prompt, output string
+	for _, e := range s.Entries() {
+		it, ok := e.(*agentsession.ItemEntry)
+		if !ok {
+			continue
+		}
+		switch item := it.Item.(type) {
+		case *openresponses.Message:
+			if item.Role == openresponses.RoleUser && prompt == "" {
+				prompt = e.Base().ID
+			}
+		case *openresponses.FunctionCallOutput:
+			output = e.Base().ID
+		}
+	}
+	if prompt == "" || output == "" {
+		t.Fatalf("no prompt (%q) or output (%q) on the record", prompt, output)
+	}
+	if err := ctl.ContinueFrom(t.Context(), prompt); err != nil {
+		t.Fatalf("continue from the prompt: %v", err)
+	}
+	if owes(ctl.State().Notes, note) {
+		t.Fatal("the note is owed on a branch without its output")
+	}
+	if err := ctl.ContinueFrom(t.Context(), output); err != nil {
+		t.Fatalf("continue from the output: %v", err)
+	}
+	if !owes(ctl.State().Notes, note) {
+		t.Fatalf("notes owed back on the output's branch = %+v, want the person's", ctl.State().Notes)
+	}
+}
+
+func owes(notes []agentturn.Note, text string) bool {
+	for _, n := range notes {
+		if m, ok := n.Item.(*openresponses.Message); ok && strings.Contains(messageText(m), text) {
+			return true
+		}
+	}
+	return false
+}
+
+func messageText(m *openresponses.Message) string {
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+
 // A head move to a leaf label, or to nothing, is refused before
 // anything moves.
 func TestControlContinueFromRefusesWhereTheHeadCannotRest(t *testing.T) {

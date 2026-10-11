@@ -43,9 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   end means `Resume()` with no answers releases it (#91, #92).
 - A `Prompt` through `Control` that answers the pending calls with
   their outputs, and a `ContinueFrom` that leaves pending calls behind,
-  have the engine forget their run. `ContinueFrom` puts back the notes
-  the agent owed when it undoes a failed move.
-- Requires agentturn and agentturn/session v0.0.25, up from v0.0.22,
+  have the engine forget their run. `ContinueFrom` gives the agent the
+  notes the branch it moves to owes (`session.OwedNotes`), a person's
+  words a failed run could not append after their output, and puts
+  back the ones the agent owed when it undoes a failed move. A resumed
+  session's owed notes arrive with `Kit.AgentOptions`
+  (`session.AgentOptions`).
+- Requires agentturn and agentturn/session v0.0.26, up from v0.0.22,
   and agentpolicy v0.0.16, up from v0.0.15.
 
 ## v0.0.11 - 2026-10-10

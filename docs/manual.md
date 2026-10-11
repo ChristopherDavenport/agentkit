@@ -1260,7 +1260,8 @@ Ten things, all outside `agentturn.Config`:
   for an agent whose config has none. It hands the agent what a resumed session owes,
   `rec.Requeue(ctx, agent)`. `ContinueFrom` is `kit.RevokeSkillGrants`,
   `rec.Rebase`, `session.TranscriptModels`, `session.Pending`,
-  `agent.SetTranscript`, `agent.SetPending`, `kit.RegrantSkills` and a
+  `agent.SetTranscript`, `agent.SetPending`, `session.OwedNotes` with
+  `agent.SetNotes`, `kit.RegrantSkills` and a
   leaf label from `s.MarkLeaf`, undone on failure. By hand:
 
   ```go

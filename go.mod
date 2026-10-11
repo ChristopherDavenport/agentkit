@@ -10,8 +10,8 @@ require (
 	github.com/ChristopherDavenport/agentsmd v0.0.3
 	github.com/ChristopherDavenport/agenttool v0.0.22
 	github.com/ChristopherDavenport/agenttool/mcpclient v0.0.22
-	github.com/ChristopherDavenport/agentturn v0.0.25
-	github.com/ChristopherDavenport/agentturn/session v0.0.25
+	github.com/ChristopherDavenport/agentturn v0.0.26
+	github.com/ChristopherDavenport/agentturn/session v0.0.26
 	github.com/ChristopherDavenport/openresponses v0.0.14
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 )

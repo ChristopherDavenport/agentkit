@@ -344,8 +344,8 @@ func (c *Control) Permissions(end *agentturn.RunEnd) []Permission {
 
 // ContinueFrom moves the head to the entry entryID of the kit's
 // session: the recorder is rebased there ([session.Recorder.Rebase]),
-// the agent is given that branch's transcript, pending calls and
-// reasoning attribution, and a leaf label is appended so the move is on
+// the agent is given that branch's transcript, pending calls, the
+// notes it owes ([session.OwedNotes]) and reasoning attribution, and a leaf label is appended so the move is on
 // the record, for a follower and for a session reopened later. The
 // conversation's skill grants are ended before the head leaves
 // ([Kit.RevokeSkillGrants]) and granted again from the new branch's
@@ -450,6 +450,16 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 		return fail(err)
 	}
 	if err := c.agent.SetPending(pending); err != nil {
+		return fail(err)
+	}
+	// The notes the branch owes after outputs already on it, which a
+	// failed run there could not append; with calls pending, Pending
+	// put them on the last call instead.
+	owed, err := session.OwedNotes(s)
+	if err != nil {
+		return fail(err)
+	}
+	if err := c.agent.SetNotes(owed); err != nil {
 		return fail(err)
 	}
 	if err := c.kit.RegrantSkills(ctx, s); err != nil {
