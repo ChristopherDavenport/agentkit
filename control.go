@@ -275,10 +275,15 @@ func (c *Control) Subscribe(fn func(context.Context, agentturn.Event) error) fun
 }
 
 // Reply implements [agentturn.Control]: the agent's Reply. A note
-// given with the answer reaches the model when the question was about
-// a call (agentturn.Ask), and the record.
-func (c *Control) Reply(id string, answer agenttool.Answer) error {
-	return c.agent.Reply(id, answer)
+// given with the answer reaches the model, as what the person said,
+// after the outputs of the batch the question was asked under, and the
+// record. Who answered is the answerer the replier put on ctx with
+// [agentturn.ContextWithAnswerer], which the record writes beside the
+// answer; the run's trigger, which a Question's own event context
+// carries, does not name the answerer, so a reply that names nobody is
+// unattributed.
+func (c *Control) Reply(ctx context.Context, id string, answer agenttool.Answer) error {
+	return c.agent.Reply(ctx, id, answer)
 }
 
 // Permission is a call a run left for someone to answer, with the

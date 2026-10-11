@@ -219,7 +219,7 @@ func TestControlAsksANestedCallAsAQuestion(t *testing.T) {
 				switch e := ev.(type) {
 				case *agentturn.Question:
 					questions = append(questions, e)
-					return ctl.Reply(e.ID, tc.answer)
+					return ctl.Reply(t.Context(), e.ID, tc.answer)
 				case *agentturn.QuestionClosed:
 					closed++
 				}
@@ -410,7 +410,7 @@ func TestControlPutsAnMCPServersQuestionAsAnEvent(t *testing.T) {
 			defer ctl.Subscribe(func(_ context.Context, ev agentturn.Event) error {
 				if q, ok := ev.(*agentturn.Question); ok {
 					asked = append(asked, q.Elicitation.Message)
-					return ctl.Reply(q.ID, tc.answer)
+					return ctl.Reply(t.Context(), q.ID, tc.answer)
 				}
 				return nil
 			})()
@@ -488,7 +488,7 @@ func TestControlsElicitorSurvivesAReappliedConfig(t *testing.T) {
 	defer ctl.Subscribe(func(_ context.Context, ev agentturn.Event) error {
 		if q, ok := ev.(*agentturn.Question); ok {
 			questions++
-			return ctl.Reply(q.ID, agenttool.Answer{Action: agenttool.ActionAccept})
+			return ctl.Reply(t.Context(), q.ID, agenttool.Answer{Action: agenttool.ActionAccept})
 		}
 		return nil
 	})()
