@@ -3,6 +3,7 @@ package agentkit_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -109,6 +110,153 @@ func TestPermissionsReadTheDeferringDecision(t *testing.T) {
 	perms := ctl.Permissions(end)
 	if len(perms) != 1 || perms[0].Call.CallID != "asked" || perms[0].Reason != "approval required by bash(rm:*)" || perms[0].Subject != "rm -rf build" {
 		t.Fatalf("permissions = %+v, want the asked call alone, with its question and subject", perms)
+	}
+}
+
+// A session resumed after a restart reads each pending call's hold back
+// from the record: Permissions lists the asked call alone, and one
+// Resume answering it releases the call the engine held beside it,
+// though this process's engine never saw either (agentkit#91).
+func TestControlReleasesAfterARestart(t *testing.T) {
+	sessions := agentsession.NewMemoryStore()
+	var ranDanger, ranSafe atomic.Int32
+	build := func(model agentturn.Model, sess agentkit.Option) (*agentkit.Kit, *agentkit.Control) {
+		kit, err := agentkit.New(t.Context(),
+			agentkit.WithModel(model, "test-model"),
+			agentkit.WithTools(counting("danger", &ranDanger), counting("safe", &ranSafe)),
+			agentkit.WithPolicy(agentpolicy.Policy{Ask: policyRules(t, "danger"), Default: agentpolicy.Allow()}, nil),
+			sess,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = kit.Close() })
+		agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
+		t.Cleanup(kit.Attach(agent))
+		ctl, err := kit.Control(agent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return kit, ctl
+	}
+	first, ctl := build(&scriptModel{turns: []func(*openresponses.Emitter) error{twoCalls("danger", `{}`, "safe", `{}`)}},
+		agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))
+	if end, err := ctl.Prompt(t.Context(), openresponses.UserText("go")); err != nil || end.Reason != agentturn.ReasonInputRequired {
+		t.Fatalf("prompt: %v, %+v; want input_required", err, end)
+	}
+
+	_, ctl = build(&scriptModel{}, agentkit.WithResumedSession(sessions, first.SessionID()))
+	end := &agentturn.RunEnd{Reason: agentturn.ReasonInputRequired, Pending: ctl.State().Pending}
+	perms := ctl.Permissions(end)
+	if len(perms) != 1 || perms[0].Call.Name != "danger" || perms[0].Reason == "" {
+		t.Fatalf("permissions after the restart = %+v, want danger alone, with the policy's question", perms)
+	}
+	if end, err := ctl.Resume(t.Context(), agentturn.Approve(perms[0].Call.CallID).WithBy(agentpolicy.ByHuman)); err != nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("resume after the restart: %v, %+v; want done", err, end)
+	}
+	if ranDanger.Load() != 1 || ranSafe.Load() != 1 {
+		t.Fatalf("danger ran %d, safe ran %d; want both once", ranDanger.Load(), ranSafe.Load())
+	}
+}
+
+// A run that waits on held calls alone, which Permissions lists nothing
+// for, is released by a Resume with no answers (agentkit#92).
+func TestControlReleasesHeldCallsWithNoAnswers(t *testing.T) {
+	var ran atomic.Int32
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(&scriptModel{}, "test-model"),
+		agentkit.WithTools(counting("safe", &ran)),
+		agentkit.WithPolicy(agentpolicy.Policy{Default: agentpolicy.Allow()}, nil),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	call := &openresponses.FunctionCall{CallID: "call-safe", Name: "safe", Arguments: `{}`}
+	pending := []agentturn.PendingCall{{Call: call, Reason: agentturn.PendingDeferred,
+		Decision: &agentturn.ToolDecision{Action: agentturn.Defer, Reason: "held beside a call that could not be evaluated", Held: true}}}
+	agent := agentturn.New(kit.Config(),
+		agentturn.WithTranscript(agentturn.Transcript{openresponses.UserText("go"), call}),
+		agentturn.WithPending(pending))
+	ctl, err := kit.Control(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perms := ctl.Permissions(&agentturn.RunEnd{Reason: agentturn.ReasonInputRequired, Pending: ctl.State().Pending}); len(perms) != 0 {
+		t.Fatalf("permissions = %+v, want none for a held call", perms)
+	}
+	end, err := ctl.Resume(t.Context())
+	if err != nil || end.Reason != agentturn.ReasonDone || ran.Load() != 1 {
+		t.Fatalf("resume with no answers: %v, %+v, safe ran %d; want done with the held call run once", err, end, ran.Load())
+	}
+}
+
+// A Resume whose run does not start leaves the engine holding what it
+// held, so answering again releases the held call and runs each call
+// once; the engine then remembers neither run.
+func TestControlRetriesAResumeThatDidNotStart(t *testing.T) {
+	var ranDanger, ranSafe atomic.Int32
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{twoCalls("danger", `{}`, "safe", `{}`)}}
+	kit, ctl, _ := controlled(t,
+		agentkit.WithModel(model, "test-model"),
+		agentkit.WithTools(counting("danger", &ranDanger), counting("safe", &ranSafe)),
+		agentkit.WithPolicy(agentpolicy.Policy{Ask: policyRules(t, "danger"), Default: agentpolicy.Allow()}, nil),
+	)
+	if _, err := ctl.Prompt(t.Context(), openresponses.UserText("go")); err != nil {
+		t.Fatal(err)
+	}
+	var fail atomic.Bool
+	fail.Store(true)
+	defer ctl.Subscribe(func(_ context.Context, ev agentturn.Event) error {
+		if _, ok := ev.(*agentturn.RunStart); ok && fail.Swap(false) {
+			return errors.New("the store is down")
+		}
+		return nil
+	})()
+	approve := agentturn.Approve("call-danger").WithBy(agentpolicy.ByHuman)
+	if _, err := ctl.Resume(t.Context(), approve); err == nil {
+		t.Fatal("the resume started past a failing run_start")
+	}
+	if ranDanger.Load() != 0 || ranSafe.Load() != 0 || len(ctl.State().Pending) != 2 {
+		t.Fatalf("after the failed start: danger ran %d, safe %d, %d pending; want nothing run, both pending", ranDanger.Load(), ranSafe.Load(), len(ctl.State().Pending))
+	}
+	end, err := ctl.Resume(t.Context(), approve)
+	if err != nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("answering again: %v, %+v; want done", err, end)
+	}
+	if ranDanger.Load() != 1 || ranSafe.Load() != 1 {
+		t.Fatalf("danger ran %d, safe %d; want both once", ranDanger.Load(), ranSafe.Load())
+	}
+	if runs := kit.Engine().Runs(); len(runs) != 0 {
+		t.Fatalf("the engine still holds runs %v", runs)
+	}
+}
+
+// A prompt that answers the pending calls with their outputs leaves no
+// Resume to release them, so the engine forgets the run that held them.
+func TestControlPromptAnsweringThePendingCallsForgetsTheirRun(t *testing.T) {
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{twoCalls("danger", `{}`, "safe", `{}`)}}
+	var ranDanger, ranSafe atomic.Int32
+	kit, ctl, _ := controlled(t,
+		agentkit.WithModel(model, "test-model"),
+		agentkit.WithTools(counting("danger", &ranDanger), counting("safe", &ranSafe)),
+		agentkit.WithPolicy(agentpolicy.Policy{Ask: policyRules(t, "danger"), Default: agentpolicy.Allow()}, nil),
+	)
+	if _, err := ctl.Prompt(t.Context(), openresponses.UserText("go")); err != nil {
+		t.Fatal(err)
+	}
+	if len(kit.Engine().Runs()) == 0 {
+		t.Fatal("the engine holds no run after the deferral")
+	}
+	var outputs []openresponses.Item
+	for _, p := range ctl.State().Pending {
+		outputs = append(outputs, openresponses.NewFunctionCallOutput(p.Call.CallID, "not now"))
+	}
+	if _, err := ctl.Prompt(t.Context(), append(outputs, openresponses.UserText("never mind"))...); err != nil {
+		t.Fatal(err)
+	}
+	if runs := kit.Engine().Runs(); len(runs) != 0 {
+		t.Fatalf("the engine still holds runs %v", runs)
 	}
 }
 

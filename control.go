@@ -28,7 +28,9 @@ import (
 //     decided for, the kit's session;
 //   - Resume puts the answers through the kit's engine
 //     ([agentpolicy.Engine.Release]) first, so a call the engine only
-//     held beside another call's ask is released with the batch;
+//     held beside another call's ask is released with the batch, and
+//     tells the engine how the resumed run went
+//     ([agentpolicy.Engine.Resumed]);
 //   - Queue writes the queued entry before it returns
 //     ([session.Recorder.Queue]), so a steer is on the record before a
 //     quiet tool's next event would write it;
@@ -43,9 +45,8 @@ type Control struct {
 	kit   *Kit
 	agent *agentturn.Agent
 
-	mu      sync.Mutex
-	lastEnd *agentturn.RunEnd         // how the last run ended, for the release
-	models  agentturn.ReasoningModels // of the branch the head was moved to
+	mu     sync.Mutex
+	models agentturn.ReasoningModels // of the branch the head was moved to
 }
 
 var _ agentturn.Control = (*Control)(nil)
@@ -165,69 +166,56 @@ func (c *Control) RunContext(ctx context.Context) context.Context {
 	return agentmemory.WithSession(ctx, rec.SessionID())
 }
 
-// ended keeps how a run ended. A run that returned no end (it failed
-// before it began) leaves the one before it, whose calls still wait.
-func (c *Control) ended(end *agentturn.RunEnd) {
-	if end == nil {
-		return
-	}
-	c.mu.Lock()
-	c.lastEnd = end
-	c.mu.Unlock()
-}
-
 // Prompt implements [agentturn.Control]: the agent's Prompt under
-// RunContext.
+// RunContext. A prompt that opens with the outputs of the calls a run
+// left pending answers them without a Resume, so once its run has
+// started the kit's engine forgets that run ([agentpolicy.Engine.Forget]):
+// nothing it held there will be released.
 func (c *Control) Prompt(ctx context.Context, items ...openresponses.Item) (*agentturn.RunEnd, error) {
+	before := c.agent.State()
 	end, err := c.agent.Prompt(c.RunContext(ctx), items...)
-	c.ended(end)
+	if eng := c.kit.Engine(); eng != nil && end != nil && len(before.Pending) > 0 && end.RunID != before.RunID {
+		eng.Forget(before.RunID)
+	}
 	return end, err
 }
 
 // Resume implements [agentturn.Control]: the agent's Resume under
-// RunContext, with the answers put through the kit's engine first. The
-// engine is given the end the last run left its calls pending with,
-// unless none of the answers is about it (a restart restored the
-// calls, or another run ended since): it answers the calls it only
-// held beside the ones asked about, and fails, changing nothing, when
-// one is left unanswered.
+// RunContext, with the answers put through the kit's engine. The
+// engine is given the calls the agent has pending, as an end of the
+// agent's last run ([agentturn.State]), so a call it held is released
+// from the decision that deferred it ([agentturn.PendingCall]'s
+// Decision, Held set), which a session read back after a restart, or an
+// end from a wire, carries as the run's own did. A run that ended
+// waiting on held calls alone, which [Control.Permissions] lists
+// nothing for, is released by Resume with no answers.
 //
-// Answers Resume would refuse are refused before the release, which
-// forgets the calls it answers and records them released: one for a
-// call that is not pending, and two for one call. When the release
-// went through and the run then did not start, the end is dropped and
-// the error says to answer every pending call again, since the engine
-// holds none of them now.
+// The release is in two phases ([agentpolicy.Engine.Release], then
+// [agentpolicy.Engine.Resumed] with the end the resumed run returned):
+// a Resume that did not start, or stopped with calls still pending,
+// leaves the engine holding what it held, and the next Resume, under
+// the run ID the agent then reports, releases them again. Answers
+// Resume would refuse, one for a call that is not pending and two for
+// one call, are refused first, and a pending call nobody answers is
+// [agentpolicy.ErrUnanswered]; neither changes anything.
 func (c *Control) Resume(ctx context.Context, answers ...agentturn.Answer) (*agentturn.RunEnd, error) {
 	ctx = c.RunContext(ctx)
 	eng := c.kit.Engine()
 	if eng == nil {
-		end, err := c.agent.Resume(ctx, answers...)
-		c.ended(end)
-		return end, err
+		return c.agent.Resume(ctx, answers...)
 	}
-	if err := checkAnswers(c.agent.State().Pending, answers); err != nil {
+	st := c.agent.State()
+	if err := checkAnswers(st.Pending, answers); err != nil {
 		return nil, err
 	}
-	c.mu.Lock()
-	end := c.lastEnd
-	c.mu.Unlock()
-	if end != nil && !slices.ContainsFunc(answers, func(a agentturn.Answer) bool { return pendingIn(end, a.CallID) }) {
-		end = nil
-	}
+	end := &agentturn.RunEnd{RunID: st.RunID, Reason: agentturn.ReasonInputRequired, Pending: st.Pending}
 	answers, err := eng.Release(ctx, end, answers...)
 	if err != nil {
 		return nil, err
 	}
-	ran, err := c.agent.Resume(ctx, answers...)
-	if ran == nil && err != nil && end != nil {
-		c.mu.Lock()
-		c.lastEnd = nil
-		c.mu.Unlock()
-		return nil, fmt.Errorf("agentkit: the run did not start after the calls were released (answer every pending call again): %w", err)
-	}
-	c.ended(ran)
-	return ran, err
+	next, err := c.agent.Resume(ctx, answers...)
+	eng.Resumed(ctx, end, answers, next)
+	return next, err
 }
 
 // checkAnswers refuses answers Resume would refuse, before anything is
@@ -244,10 +232,6 @@ func checkAnswers(pending []agentturn.PendingCall, answers []agentturn.Answer) e
 		}
 	}
 	return nil
-}
-
-func pendingIn(end *agentturn.RunEnd, callID string) bool {
-	return slices.ContainsFunc(end.Pending, func(p agentturn.PendingCall) bool { return p.Call != nil && p.Call.CallID == callID })
 }
 
 // Queue implements [agentturn.Control]: with a recorder, each item is
@@ -302,34 +286,28 @@ type Permission struct {
 // kit's engine only holds beside them, which Resume releases with the
 // answers. The question, the part it is about and the held mark are
 // the decision's that deferred the call ([agentturn.PendingCall]'s
-// Decision, which agentpolicy fills from its verdict), so an end read
-// back from the record or over a wire gives the same list; the
-// engine's verdict stands in for a call with no decision. It is nil
-// for an end that is not [agentturn.ReasonInputRequired].
+// Decision, which agentpolicy fills from its verdict and
+// agentturn/session reads back from the record), so an end read back
+// after a restart or received over a wire gives the same list as one
+// the engine decided. A call with no decision, one an abort cut off,
+// is listed with no question. It is nil for an end that is not
+// [agentturn.ReasonInputRequired], and empty for one that waits on held
+// calls alone: Resume with no answers releases those.
 func (c *Control) Permissions(end *agentturn.RunEnd) []Permission {
 	if end == nil || end.Reason != agentturn.ReasonInputRequired {
 		return nil
 	}
-	eng := c.kit.Engine()
 	var out []Permission
 	for _, p := range end.Pending {
 		if p.Call == nil {
 			continue
 		}
 		perm := Permission{Call: p.Call}
-		switch d := p.Decision; {
-		case d != nil:
+		if d := p.Decision; d != nil {
 			if d.Held {
 				continue
 			}
 			perm.Reason, perm.Subject = d.Reason, d.Subject
-		case eng != nil:
-			if v, ok := eng.Deferred(end.RunID, p.Call.CallID); ok {
-				if v.Held {
-					continue
-				}
-				perm.Reason, perm.Subject = v.Reason, v.Subject
-			}
 		}
 		out = append(out, perm)
 	}
@@ -383,7 +361,7 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 
 	prevLeaf, prev := s.Leaf(), c.agent.State()
 	c.mu.Lock()
-	prevModels, prevEnd := c.models, c.lastEnd
+	prevModels := c.models
 	c.mu.Unlock()
 	ctx = c.RunContext(ctx)
 	// The revocation writes its verdicts to the branch being left, which
@@ -414,11 +392,14 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 		if rerr := c.agent.SetPending(prev.Pending); rerr != nil {
 			errs = append(errs, rerr)
 		}
+		if rerr := c.agent.SetNotes(prev.Notes); rerr != nil {
+			errs = append(errs, rerr)
+		}
 		if rerr := c.kit.RegrantSkills(ctx, s); rerr != nil {
 			errs = append(errs, rerr)
 		}
 		c.mu.Lock()
-		c.models, c.lastEnd = prevModels, prevEnd
+		c.models = prevModels
 		c.mu.Unlock()
 		if len(errs) > 0 {
 			err = fmt.Errorf("%w (and putting the head back failed: %w)", err, errors.Join(errs...))
@@ -447,7 +428,7 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 		return fail(err)
 	}
 	c.mu.Lock()
-	c.models, c.lastEnd = models, nil
+	c.models = models
 	c.mu.Unlock()
 	mark, err := s.MarkLeaf()
 	if err != nil {
@@ -455,6 +436,11 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 	}
 	if _, err := rec.Store().Append(ctx, rec.SessionID(), mark); err != nil {
 		return fail(fmt.Errorf("mark the head: %w", err))
+	}
+	if eng := c.kit.Engine(); eng != nil && len(prev.Pending) > 0 {
+		// The calls the head left behind will not be answered: what
+		// the engine held of their run goes with them.
+		eng.Forget(prev.RunID)
 	}
 	return nil
 }
