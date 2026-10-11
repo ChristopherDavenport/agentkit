@@ -1247,37 +1247,51 @@ Ten things, all outside `agentturn.Config`:
 - `Kit.Control(agent)` is the agent as `agentturn.Control`, with
   what a kit's agent needs around each run, from these exported calls:
   every run, queued input and head move under `ContextWithRecorder`,
-  `session.ContextWithSessionID` and `agentmemory.WithSession` (its
-  `RunContext`, which also carries the Control itself,
-  `agentkit.ContextWithControl`, so the run's questions reach its own
-  subscribers under `WithQuestionEvents`, the `ToolElicitor` row
-  above); `Resume` as `engine.Release` with an end of the agent's
-  pending calls, `agent.Resume`, then `engine.Resumed` with the end the
-  run returned; a `Prompt` that answers pending calls with their
-  outputs, and a head move that leaves them, followed by
-  `engine.Forget` of their run; `Queue` as `rec.Queue`; and, under
-  `WithQuestionEvents`, `agent.SetConfig` with the kit's `ToolElicitor`
-  for an agent whose config has none. It hands the agent what a resumed session owes,
-  `rec.Requeue(ctx, agent)`. `ContinueFrom` is `kit.RevokeSkillGrants`,
-  `rec.Rebase`, `session.TranscriptModels`, `session.Pending`,
-  `agent.SetTranscript`, `agent.SetPending`, `session.OwedNotes` with
-  `agent.SetNotes`, `kit.RegrantSkills` and a
-  leaf label from `s.MarkLeaf`, undone on failure. By hand:
+  `session.ContextWithSessionID` and `agentmemory.WithSession`, and
+  under `agentkit.ContextWithControl`, so under `WithQuestionEvents` the
+  run's questions reach its own subscribers (the `ToolElicitor` row
+  above); that is its `RunContext`. `Resume` is `engine.Release` with
+  an end of the agent's pending calls, under the run that left them
+  pending (the session's last run end for an agent seeded with them),
+  then `agent.Resume`, then `engine.Resumed` with the end the run
+  returned. A `Prompt` that answers pending calls with their outputs,
+  and a head move that leaves them, are followed by `engine.Resumed`
+  with no answers, for the calls still pending, and `engine.Forget` of
+  their run. `Queue` is `rec.Queue`. Under `WithQuestionEvents`, an
+  agent whose config has no `ToolElicitor` is given the kit's with
+  `agent.SetConfig`. It hands the agent what a resumed session owes,
+  `rec.Requeue(ctx, agent)`. `ContinueFrom` is
+  `kit.RevokeSkillGrants`, `rec.Rebase`, `session.TranscriptModels`,
+  `session.Pending`, `agent.SetTranscript`, `agent.SetPending`,
+  `session.OwedNotes` with `agent.SetNotes`, `kit.RegrantSkills`, a
+  leaf label from `s.MarkLeaf` and `engine.Forget` of the run it
+  leaves, undone on failure. A pending call whose hold was recorded
+  before agentturn/session v0.0.23 gets its held mark and subject from
+  the kit's `agentpolicy:verdict` entry for it. By hand:
 
   ```go
   agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
   defer kit.Attach(agent)()
   rec := kit.Recorder()
+  var ctl *agentkit.Control // the one ContextWithControl names, if any
   run := func(ctx context.Context) context.Context {
+  	ctx = agentkit.ContextWithControl(ctx, ctl)
   	ctx = agentkit.ContextWithRecorder(ctx, rec)
   	ctx = session.ContextWithSessionID(ctx, rec.SessionID())
   	return agentmemory.WithSession(ctx, rec.SessionID())
   }
-  cfg := agent.Config()
-  cfg.ToolElicitor = rec.Elicitor(agentsession.ByHuman, agent.QuestionElicitor())
-  _ = agent.SetConfig(cfg)
+  if cfg := agent.Config(); questionEvents && cfg.ToolElicitor == nil {
+  	cfg.ToolElicitor = kit.Config().ToolElicitor
+  	_ = agent.SetConfig(cfg)
+  }
   rec.Requeue(ctx, agent)
+  before := agent.State()
   end, _ := agent.Prompt(run(ctx), prompt)
+  if len(before.Pending) > 0 && end != nil {
+  	was := &agentturn.RunEnd{RunID: before.RunID, Reason: agentturn.ReasonInputRequired, Pending: before.Pending}
+  	kit.Engine().Resumed(run(ctx), was, nil, end)
+  	kit.Engine().Forget(before.RunID)
+  }
   st := agent.State()
   end = &agentturn.RunEnd{RunID: st.RunID, Reason: agentturn.ReasonInputRequired, Pending: st.Pending}
   answers, _ = kit.Engine().Release(run(ctx), end, answers...)

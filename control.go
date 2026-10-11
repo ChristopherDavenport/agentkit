@@ -48,6 +48,12 @@ type Control struct {
 	kit   *Kit
 	agent *agentturn.Agent
 
+	// seedRun is the run that left pending the calls an agent seeded
+	// from the kit's session holds, from the session's run end: the
+	// agent reports no run until its first, and the engine keeps what it
+	// held under the run that deferred it.
+	seedRun string
+
 	mu     sync.Mutex
 	models agentturn.ReasoningModels // of the branch the head was moved to
 }
@@ -56,9 +62,14 @@ var _ agentturn.Control = (*Control)(nil)
 
 // Control returns the agent a as the human plane drives it, a built
 // over k: agentturn.New(k.Config(), k.AgentOptions()...) and attached
-// with [Kit.Attach]. Call it before the agent's first run. A kit serves
-// as many conversations as it has agents, each driven through its own
-// Control.
+// with [Kit.Attach]. Call it before the agent's first run; it refuses
+// an agent that is running. A kit with a session of its own
+// ([WithSession], [WithResumedSession], [WithRecorder]) records every
+// run of every Control in that session, since RunContext puts the
+// kit's recorder on each, so it serves one conversation. A kit with
+// none serves several, each an agent of its own driven through its own
+// Control, each run under the [ContextWithRecorder] of its
+// conversation's session, which RunContext leaves in place.
 //
 //   - Under [WithQuestionEvents] the questions a tool asks mid-call
 //     are events: the kit's config carries an elicitor that asks the
@@ -73,7 +84,11 @@ var _ agentturn.Control = (*Control)(nil)
 //     and asks nobody. Control gives a an elicitor when its config has
 //     none. A subscriber that cannot answer a question replies
 //     [agenttool.ActionCancel], since the call waits for the reply or
-//     for its context to end.
+//     for its context to end, and names itself on the reply's context
+//     with [agentturn.ContextWithAnswerer], a trigger of its own kind,
+//     so the record's answer entry says who answered (its source); the
+//     entry's by stays [agentsession.ByHuman], which the elicitor was
+//     built with.
 //   - Without it the questions go where the kit's config says: to the
 //     product's elicitor under [WithToolElicitor], which answers in
 //     process, or unasked, agentturn's default, so a host with nobody
@@ -88,7 +103,13 @@ func (k *Kit) Control(a *agentturn.Agent) (*Control, error) {
 	if a == nil {
 		return nil, errors.New("agentkit: control: no agent")
 	}
+	if a.State().Running {
+		return nil, fmt.Errorf("agentkit: control: %w", agentturn.ErrRunning)
+	}
 	c := &Control{kit: k, agent: a}
+	if st := a.State(); st.RunID == "" && len(st.Pending) > 0 && k.sess != nil {
+		c.seedRun = runOfPending(k.sess, st.Pending)
+	}
 	if k.questionEvents {
 		if cfg := a.Config(); cfg.ToolElicitor == nil {
 			k.mu.Lock()
@@ -171,8 +192,11 @@ func (c *Control) Elicitor() agenttool.Elicitor {
 // ID for the model calls and for memory a run writes; and the reasoning
 // attribution of the branch the head was last moved to. Prompt, Resume,
 // Queue and ContinueFrom use it; a front that starts a run of its own
-// on the agent does too. Without a recorder it adds the Control and the
-// attribution alone.
+// on the agent does too. With a recorder of the kit's own it replaces
+// any recorder the caller put on ctx; without one it adds the Control
+// and the attribution alone, and a recorder the caller put there
+// ([ContextWithRecorder]) stays, which is how one kit with no session
+// serves several conversations, each recorded in its own.
 func (c *Control) RunContext(ctx context.Context) context.Context {
 	ctx = ContextWithControl(ctx, c)
 	c.mu.Lock()
@@ -196,16 +220,33 @@ func (c *Control) RunContext(ctx context.Context) context.Context {
 
 // Prompt implements [agentturn.Control]: the agent's Prompt under
 // RunContext. A prompt that opens with the outputs of the calls a run
-// left pending answers them without a Resume, so once its run has
-// started the kit's engine forgets that run ([agentpolicy.Engine.Forget]):
-// nothing it held there will be released.
+// left pending answers them without a Resume, so what the kit's engine
+// held of that run is settled with the run the prompt started: the
+// calls its end still lists, those of a run that failed before the
+// outputs went in, wait under the new run ([agentpolicy.Engine.Resumed]
+// with no answers), and the rest of the old run is forgotten
+// ([agentpolicy.Engine.Forget]), since nothing will release them.
 func (c *Control) Prompt(ctx context.Context, items ...openresponses.Item) (*agentturn.RunEnd, error) {
 	before := c.agent.State()
-	end, err := c.agent.Prompt(c.RunContext(ctx), items...)
-	if eng := c.kit.Engine(); eng != nil && end != nil && len(before.Pending) > 0 && end.RunID != before.RunID {
-		eng.Forget(before.RunID)
+	ctx = c.RunContext(ctx)
+	end, err := c.agent.Prompt(ctx, items...)
+	if eng := c.kit.Engine(); eng != nil && end != nil && len(before.Pending) > 0 {
+		run := c.pendingRun(before)
+		was := &agentturn.RunEnd{RunID: run, Reason: agentturn.ReasonInputRequired, Pending: before.Pending}
+		eng.Resumed(ctx, was, nil, end)
+		eng.Forget(run)
 	}
 	return end, err
+}
+
+// pendingRun is the run the calls pending in st wait under in the
+// engine: the agent's last, or for an agent seeded with them that has
+// not run yet, the run that deferred them.
+func (c *Control) pendingRun(st agentturn.State) string {
+	if st.RunID != "" {
+		return st.RunID
+	}
+	return c.seedRun
 }
 
 // Resume implements [agentturn.Control]: the agent's Resume under
@@ -236,7 +277,11 @@ func (c *Control) Resume(ctx context.Context, answers ...agentturn.Answer) (*age
 	if err := checkAnswers(st.Pending, answers); err != nil {
 		return nil, err
 	}
-	end := &agentturn.RunEnd{RunID: st.RunID, Reason: agentturn.ReasonInputRequired, Pending: st.Pending}
+	end := &agentturn.RunEnd{
+		RunID:   c.pendingRun(st),
+		Reason:  agentturn.ReasonInputRequired,
+		Pending: st.Pending,
+	}
 	answers, err := eng.Release(ctx, end, answers...)
 	if err != nil {
 		return nil, err
@@ -317,25 +362,38 @@ type Permission struct {
 // Decision, which agentpolicy fills from its verdict and
 // agentturn/session reads back from the record), so an end read back
 // after a restart or received over a wire gives the same list as one
-// the engine decided. A call with no decision, one an abort cut off,
-// is listed with no question. It is nil for an end that is not
-// [agentturn.ReasonInputRequired], and empty for one that waits on held
-// calls alone: Resume with no answers releases those.
+// the engine decided. A call with no decision, one a Resume approved
+// whose batch then failed before the call ran, is read from the
+// engine's verdict under the end's run ([agentpolicy.Engine.Deferred]),
+// where [agentpolicy.Engine.Resumed] moved it; one the engine does not
+// hold either, a call an abort cut off, is listed with no question. It
+// is nil for an end that is not [agentturn.ReasonInputRequired], and
+// empty for one that waits on held calls alone: Resume with no answers
+// releases those.
 func (c *Control) Permissions(end *agentturn.RunEnd) []Permission {
 	if end == nil || end.Reason != agentturn.ReasonInputRequired {
 		return nil
 	}
+	eng := c.kit.Engine()
 	var out []Permission
 	for _, p := range end.Pending {
 		if p.Call == nil {
 			continue
 		}
 		perm := Permission{Call: p.Call}
-		if d := p.Decision; d != nil {
+		switch d := p.Decision; {
+		case d != nil:
 			if d.Held {
 				continue
 			}
 			perm.Reason, perm.Subject = d.Reason, d.Subject
+		case eng != nil:
+			if v, ok := eng.Deferred(end.RunID, p.Call.CallID); ok {
+				if v.Held {
+					continue
+				}
+				perm.Reason, perm.Subject = v.Reason, v.Subject
+			}
 		}
 		out = append(out, perm)
 	}
@@ -345,8 +403,9 @@ func (c *Control) Permissions(end *agentturn.RunEnd) []Permission {
 // ContinueFrom moves the head to the entry entryID of the kit's
 // session: the recorder is rebased there ([session.Recorder.Rebase]),
 // the agent is given that branch's transcript, pending calls, the
-// notes it owes ([session.OwedNotes]) and reasoning attribution, and a leaf label is appended so the move is on
-// the record, for a follower and for a session reopened later. The
+// notes it owes ([session.OwedNotes]) and reasoning attribution, and a
+// leaf label is appended so the move is on the record, for a follower
+// and for a session reopened later. The
 // conversation's skill grants are ended before the head leaves
 // ([Kit.RevokeSkillGrants]) and granted again from the new branch's
 // reads after ([Kit.RegrantSkills]), so a tool a skill on the old

@@ -38,12 +38,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   releases again; the error that asked to answer every pending call
   again is gone.
 - `Control.Permissions` reads the question, its subject and the held
-  mark from the deferring decision alone, which agentturn/session now
-  reads back from the record; an empty list for an `input_required`
-  end means `Resume()` with no answers releases it (#91, #92).
+  mark from the deferring decision, which agentturn/session now reads
+  back from the record, and from the engine's verdict under the end's
+  run for a call with no decision, one whose approved batch failed
+  before it ran; an empty list for an `input_required` end means
+  `Resume()` with no answers releases it (#91, #92).
+- A session resumed with a hold recorded before agentturn/session
+  v0.0.23, which wrote neither its held mark nor its subject, takes
+  both from the kit's `agentpolicy:verdict` entry for the call, so the
+  restart reads it as it did before (#91).
+- An agent seeded with a session's pending calls reports no run until
+  its first; `Kit.Control` names the run that left them pending from
+  the session's last run end, so an engine shared across kits
+  (`WithEngine`) releases and forgets them under that run.
+- `Kit.Control` refuses an agent that is running, as it said it
+  would.
 - A `Prompt` through `Control` that answers the pending calls with
   their outputs, and a `ContinueFrom` that leaves pending calls behind,
-  have the engine forget their run. `ContinueFrom` gives the agent the
+  have the engine forget their run. A prompt whose run failed before
+  the outputs went in leaves the calls pending under its own run, and
+  the engine holds them there (`Resumed` with no answers) rather than
+  forgetting them. `ContinueFrom` gives the agent the
   notes the branch it moves to owes (`session.OwedNotes`), a person's
   words a failed run could not append after their output, and puts
   back the ones the agent owed when it undoes a failed move. A resumed
