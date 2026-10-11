@@ -34,9 +34,12 @@ import (
 //   - Queue writes the queued entry before it returns
 //     ([session.Recorder.Queue]), so a steer is on the record before a
 //     quiet tool's next event would write it;
-//   - a question asked while a call runs is an [agentturn.Question]
-//     event, answered with Reply, when the kit has no elicitor of its
-//     own; an MCP server's too under [WithQuestionEvents].
+//   - under [WithQuestionEvents], a question asked while a call of one
+//     of its runs goes, a tool's own, a nested call the policy asks
+//     about and an MCP server's, is an [agentturn.Question] event to
+//     its subscribers, answered with Reply: each run carries its
+//     Control ([ContextWithControl]), and the kit's elicitor asks the
+//     Control of the run that asks.
 //
 // It is the composition agentconsole's kitbackend and dax each wrote
 // for themselves, written once, from exported calls alone; docs/manual.md
@@ -53,27 +56,30 @@ var _ agentturn.Control = (*Control)(nil)
 
 // Control returns the agent a as the human plane drives it, a built
 // over k: agentturn.New(k.Config(), k.AgentOptions()...) and attached
-// with [Kit.Attach]. Call it before the agent's first run. It does two
-// things at once:
+// with [Kit.Attach]. Call it before the agent's first run. A kit serves
+// as many conversations as it has agents, each driven through its own
+// Control.
 //
-//   - When k has no elicitor of its own ([WithToolElicitor]), the
-//     questions a tool asks mid-call become events: it sets
-//     [Control.Elicitor], the agent's
+//   - Under [WithQuestionEvents] the questions a tool asks mid-call
+//     are events: the kit's config carries an elicitor that asks the
+//     Control of the run the question comes from (the one on its
+//     context, [ControlFromContext]), through that agent's
 //     [agentturn.Agent.QuestionElicitor] with the run's recorder's
 //     [session.Recorder.Elicitor] around it, by
-//     [agentsession.ByHuman], as the ToolElicitor of a's config and of
-//     every [Kit.Config] after, so a config the product applies again
-//     with [agentturn.Agent.SetConfig] (after [Kit.ReloadSkills], say)
-//     keeps it. A tool's question and a nested call the policy asks
-//     about are then recorded under the call and delivered to the
-//     subscribers as [agentturn.Question]; an MCP server's too under
-//     [WithQuestionEvents], which offers the servers elicitation. A
-//     subscriber that cannot answer one replies
+//     [agentsession.ByHuman] ([Control.Elicitor]). Each conversation's
+//     questions reach its own subscribers and no one else's; a run
+//     that carries no Control, one started on the agent directly,
+//     answers its questions cancelled, by [agentsession.ByPolicy],
+//     and asks nobody. Control gives a an elicitor when its config has
+//     none. A subscriber that cannot answer a question replies
 //     [agenttool.ActionCancel], since the call waits for the reply or
-//     for its context to end. The kit's questions go to one agent, so
-//     Control refuses a second agent once it has installed the first's.
-//     A kit with its own elicitor answers in process, and the configs
-//     are left as they are.
+//     for its context to end.
+//   - Without it the questions go where the kit's config says: to the
+//     product's elicitor under [WithToolElicitor], which answers in
+//     process, or unasked, agentturn's default, so a host with nobody
+//     to answer never waits on one. A host that wants them answered by
+//     rule passes WithToolElicitor(agentsession.ByPolicy, fn) with an
+//     fn that answers, [agenttool.ActionCancel] for instance.
 //   - It hands a the inputs a resumed session owes
 //     ([session.Recorder.Requeue]), which the next run takes.
 //
@@ -83,31 +89,14 @@ func (k *Kit) Control(a *agentturn.Agent) (*Control, error) {
 		return nil, errors.New("agentkit: control: no agent")
 	}
 	c := &Control{kit: k, agent: a}
-	k.mu.Lock()
-	install := k.asker == a || (k.asker == nil && k.cfg.ToolElicitor == nil)
-	if k.asker != nil && k.asker != a {
-		k.mu.Unlock()
-		return nil, errors.New("agentkit: control: the kit's questions already go to another agent's Control")
-	}
-	var prev agenttool.Elicitor
-	if install {
-		prev = k.cfg.ToolElicitor
-		if k.asker == nil {
-			k.cfg.ToolElicitor, k.asker = c.Elicitor(), a
-		}
-	}
-	elicitor := k.cfg.ToolElicitor
-	k.mu.Unlock()
-	if install {
-		cfg := a.Config()
-		cfg.ToolElicitor = elicitor
-		if err := a.SetConfig(cfg); err != nil {
+	if k.questionEvents {
+		if cfg := a.Config(); cfg.ToolElicitor == nil {
 			k.mu.Lock()
-			if prev == nil {
-				k.cfg.ToolElicitor, k.asker = nil, nil
-			}
+			cfg.ToolElicitor = k.cfg.ToolElicitor
 			k.mu.Unlock()
-			return nil, fmt.Errorf("agentkit: control: %w", err)
+			if err := a.SetConfig(cfg); err != nil {
+				return nil, fmt.Errorf("agentkit: control: %w", err)
+			}
 		}
 	}
 	if rec := k.Recorder(); rec != nil {
@@ -119,13 +108,49 @@ func (k *Kit) Control(a *agentturn.Agent) (*Control, error) {
 	return c, nil
 }
 
+type controlKey struct{}
+
+// ContextWithControl returns ctx carrying c, the Control a run started
+// under it belongs to. [Control.RunContext] puts it on every run, and
+// the values of a run's context reach its tools, its hooks and the
+// sub-agents its tools run, so a question asked anywhere in the run
+// finds the conversation it belongs to.
+func ContextWithControl(ctx context.Context, c *Control) context.Context {
+	return context.WithValue(ctx, controlKey{}, c)
+}
+
+// ControlFromContext returns the Control [ContextWithControl] put on
+// ctx.
+func ControlFromContext(ctx context.Context) (*Control, bool) {
+	c, ok := ctx.Value(controlKey{}).(*Control)
+	return c, ok && c != nil
+}
+
+// questions is the ToolElicitor [WithQuestionEvents] puts on the kit's
+// config: the question goes to the Control of the run that asks, as an
+// event to its subscribers, and is answered cancelled, by the policy,
+// for a run that carries none. It asks no other conversation.
+func (k *Kit) questions(ctx context.Context, q agenttool.Elicitation) (agenttool.Answer, error) {
+	if c, ok := ControlFromContext(ctx); ok {
+		return c.Elicitor()(ctx, q)
+	}
+	cancel := func(context.Context, agenttool.Elicitation) (agenttool.Answer, error) {
+		return agenttool.Answer{Action: agenttool.ActionCancel}, nil
+	}
+	if rec := k.recorderFor(ctx); rec != nil {
+		return rec.Elicitor(agentsession.ByPolicy, cancel)(ctx, q)
+	}
+	return cancel(ctx, q)
+}
+
 // Agent is the agent Control drives, for what the contract does not
 // carry: its configuration, and SetConfig between runs.
 func (c *Control) Agent() *agentturn.Agent { return c.agent }
 
-// Elicitor is the elicitor Kit.Control installs: the agent's
-// QuestionElicitor, recorded by the run's recorder, the one on the
-// call's context or the kit's, as answered by a person.
+// Elicitor is the elicitor the kit's questions reach for a run of this
+// Control under [WithQuestionEvents]: the agent's QuestionElicitor,
+// recorded by the run's recorder, the one on the call's context or the
+// kit's, as answered by a person.
 func (c *Control) Elicitor() agenttool.Elicitor {
 	ask := c.agent.QuestionElicitor()
 	return func(ctx context.Context, q agenttool.Elicitation) (agenttool.Answer, error) {
@@ -140,13 +165,16 @@ func (c *Control) Elicitor() agenttool.Elicitor {
 	}
 }
 
-// RunContext puts on ctx what the kit expects of a run it records: its
-// recorder, the session's ID for the model calls and for memory a run
-// writes, and the reasoning attribution of the branch the head was last
-// moved to. Prompt, Resume, Queue and ContinueFrom use it; a front that
-// starts a run of its own on the agent does too. Without a recorder it
-// adds only the attribution.
+// RunContext puts on ctx what the kit expects of a run it drives: the
+// Control itself ([ContextWithControl]), so the run's questions reach
+// this conversation's subscribers; the kit's recorder, the session's
+// ID for the model calls and for memory a run writes; and the reasoning
+// attribution of the branch the head was last moved to. Prompt, Resume,
+// Queue and ContinueFrom use it; a front that starts a run of its own
+// on the agent does too. Without a recorder it adds the Control and the
+// attribution alone.
 func (c *Control) RunContext(ctx context.Context) context.Context {
+	ctx = ContextWithControl(ctx, c)
 	c.mu.Lock()
 	models := c.models
 	c.mu.Unlock()

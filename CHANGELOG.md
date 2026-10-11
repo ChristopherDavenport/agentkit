@@ -3,6 +3,51 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed (breaking)
+
+- `Control.Reply` takes a context, as agentturn v0.0.23's
+  `agentturn.Control` does. Who answered is the answerer the replier
+  names on it with `agentturn.ContextWithAnswerer`, which the record
+  writes beside the answer; a reply that names nobody is unattributed.
+- Questions as events are opt-in (#97). `Kit.Control` no longer
+  installs the question elicitor by itself: under `WithQuestionEvents`
+  the kit's config carries it, for a tool's own question, a nested call
+  the policy asks about and an MCP server's, and without it a tool's
+  questions go unasked, agentturn's default, so a host with nobody to
+  answer never waits on one. A product that relied on `Kit.Control`'s
+  events passes `WithQuestionEvents`; one that answers by rule passes
+  `WithToolElicitor(agentsession.ByPolicy, fn)`.
+- A kit serves as many conversations as it has agents, each through
+  its own `Kit.Control` (#93). The question elicitor asks the Control
+  of the run the question comes from, which `Control.RunContext` puts
+  on every run (`ContextWithControl`, `ControlFromContext`), so each
+  conversation's questions reach its own subscribers; a run that
+  carries no Control answers its questions cancelled, by the policy,
+  and asks nobody. `Kit.Control` no longer refuses a second agent.
+- `Control.Resume` releases the calls the agent has pending, read from
+  its state, not the last end this Control saw (#91, #92). A held call
+  is released from the decision that deferred it, so a session resumed
+  after a restart, whose engine remembers nothing, releases the held
+  calls beside the one the person answers, and a run that ended waiting
+  on held calls alone is released by `Resume()` with no answers. The
+  release is agentpolicy v0.0.16's two phases: `Release`, then
+  `Resumed` with the end the resumed run returned, so a Resume that did
+  not start, or stopped with calls still pending, is answered again and
+  releases again; the error that asked to answer every pending call
+  again is gone.
+- `Control.Permissions` reads the question, its subject and the held
+  mark from the deferring decision alone, which agentturn/session now
+  reads back from the record; an empty list for an `input_required`
+  end means `Resume()` with no answers releases it (#91, #92).
+- A `Prompt` through `Control` that answers the pending calls with
+  their outputs, and a `ContinueFrom` that leaves pending calls behind,
+  have the engine forget their run. `ContinueFrom` puts back the notes
+  the agent owed when it undoes a failed move.
+- Requires agentturn and agentturn/session v0.0.25, up from v0.0.22,
+  and agentpolicy v0.0.16, up from v0.0.15.
+
 ## v0.0.11 - 2026-10-10
 
 - Changed: `Control.Permissions` reads the question, the part it asks

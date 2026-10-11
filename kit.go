@@ -87,12 +87,12 @@ import (
 // the sender's.
 type Kit struct {
 	cfg agentturn.Config
-	// asker is the agent [Kit.Control] put cfg's ToolElicitor through,
-	// nil until it has. Guarded by mu, as cfg is.
-	asker   *agentturn.Agent
-	order   []string
-	omitted []Omission
-	origins []ToolOrigin
+	// questionEvents is [WithQuestionEvents]: cfg's ToolElicitor is
+	// [Kit.questions], which [Kit.Control] gives an agent without one.
+	questionEvents bool
+	order          []string
+	omitted        []Omission
+	origins        []ToolOrigin
 
 	engine  *agentpolicy.Engine
 	grants  *skillGrants
@@ -817,6 +817,12 @@ func (k *Kit) build(ctx context.Context, s *settings) error {
 			}
 			return fn(ctx, q)
 		}
+	}
+	// Under WithQuestionEvents: the Control whose run asks, each
+	// conversation's questions to its own views.
+	if s.questionEvents {
+		k.questionEvents = true
+		k.cfg.ToolElicitor = k.questions
 	}
 	return nil
 }

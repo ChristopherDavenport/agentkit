@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ChristopherDavenport/agentkit"
 	"github.com/ChristopherDavenport/agentmemory"
@@ -334,8 +335,8 @@ func TestControlQueueIsOnTheRecordWhenItReturns(t *testing.T) {
 	}
 }
 
-// A nested call the policy asks about is a Question event, answered
-// with Reply. A refusal's note reaches the model with the refusal and
+// Under WithQuestionEvents a nested call the policy asks about is a
+// Question event, answered with Reply. A refusal's note reaches the model with the refusal and
 // is on the record's answer entry.
 func TestControlAsksANestedCallAsAQuestion(t *testing.T) {
 	cases := []struct {
@@ -360,6 +361,7 @@ func TestControlAsksANestedCallAsAQuestion(t *testing.T) {
 				agentkit.WithModel(model, "test-model"),
 				agentkit.WithTools(eval, counting("bash", &ranBash)),
 				agentkit.WithPolicy(agentpolicy.Policy{Ask: policyRules(t, "bash"), Default: agentpolicy.Allow()}, nil),
+				agentkit.WithQuestionEvents(),
 			)
 			var questions []*agentturn.Question
 			var closed int
@@ -603,10 +605,9 @@ func TestQuestionEventsBesideAToolElicitorIsRefused(t *testing.T) {
 	}
 }
 
-// Once Control has installed the elicitor, the kit's config carries it,
-// so a config applied again after a skill reload still puts a nested
-// call's question as an event. A second agent cannot take the kit's
-// questions over.
+// Under WithQuestionEvents the kit's config carries the elicitor, so a
+// config applied again after a skill reload still puts a nested call's
+// question as an event.
 func TestControlsElicitorSurvivesAReappliedConfig(t *testing.T) {
 	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "digging", "bash")
 	var ranBash atomic.Int32
@@ -622,9 +623,10 @@ func TestControlsElicitorSurvivesAReappliedConfig(t *testing.T) {
 		agentkit.WithTools(eval, counting("bash", &ranBash)),
 		agentkit.WithSkills(skills),
 		agentkit.WithPolicy(agentpolicy.Policy{Ask: policyRules(t, "bash"), Default: agentpolicy.Allow()}, nil),
+		agentkit.WithQuestionEvents(),
 	)
 	if kit.Config().ToolElicitor == nil {
-		t.Fatal("the kit's config carries no elicitor after Control")
+		t.Fatal("the kit's config carries no elicitor under WithQuestionEvents")
 	}
 	if err := kit.ReloadSkills(t.Context()); err != nil {
 		t.Fatal(err)
@@ -646,11 +648,99 @@ func TestControlsElicitorSurvivesAReappliedConfig(t *testing.T) {
 	if questions != 1 || ranBash.Load() != 1 {
 		t.Fatalf("%d questions, bash ran %d times; want the nested call asked and run once", questions, ranBash.Load())
 	}
+}
 
-	if _, err := kit.Control(agentturn.New(kit.Config())); err == nil {
-		t.Fatal("a second agent took the kit's questions")
+// One kit serving several conversations puts each one's questions to
+// its own Control's subscribers: Bob's nested call is asked of Bob, not
+// of Alice, whose Control was made first; and an agent driven with no
+// Control asks nobody (agentkit#93).
+func TestEachConversationsQuestionsReachItsOwnControl(t *testing.T) {
+	var ranBash atomic.Int32
+	eval := agenttool.New("eval", "runs code", func(ctx context.Context, _ noArgs) (string, error) {
+		if _, err := agentturn.Invoke(ctx, "bash", json.RawMessage(`{}`)); err != nil {
+			return "the nested call failed: " + err.Error(), nil
+		}
+		return "ran", nil
+	})
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("eval", `{}`), textTurn("done"), callTurn("eval", `{}`)}}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(model, "test-model"),
+		agentkit.WithTools(eval, counting("bash", &ranBash)),
+		agentkit.WithPolicy(agentpolicy.Policy{Ask: policyRules(t, "bash"), Default: agentpolicy.Allow()}, nil),
+		agentkit.WithQuestionEvents(),
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := kit.Control(ctl.Agent()); err != nil {
-		t.Fatalf("Control again for the same agent: %v", err)
+	defer kit.Close()
+	conversation := func() (*agentkit.Control, *atomic.Int32) {
+		ctl, err := kit.Control(agentturn.New(kit.Config()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var asked atomic.Int32
+		t.Cleanup(ctl.Subscribe(func(ctx context.Context, ev agentturn.Event) error {
+			if q, ok := ev.(*agentturn.Question); ok {
+				asked.Add(1)
+				return ctl.Reply(ctx, q.ID, agenttool.Answer{Action: agenttool.ActionAccept})
+			}
+			return nil
+		}))
+		return ctl, &asked
+	}
+	_, alice := conversation()
+	bob, bobAsked := conversation()
+	if _, err := bob.Prompt(t.Context(), openresponses.UserText("clean up the pods")); err != nil {
+		t.Fatal(err)
+	}
+	if alice.Load() != 0 || bobAsked.Load() != 1 || ranBash.Load() != 1 {
+		t.Fatalf("Alice was asked %d, Bob %d; bash ran %d; want Bob asked once and bash run", alice.Load(), bobAsked.Load(), ranBash.Load())
+	}
+
+	carol := agentturn.New(kit.Config())
+	if _, err := carol.Prompt(t.Context(), openresponses.UserText("clean up the pods")); err != nil {
+		t.Fatal(err)
+	}
+	if alice.Load() != 0 || bobAsked.Load() != 1 || ranBash.Load() != 1 {
+		t.Fatalf("an agent with no Control asked: Alice %d, Bob %d, bash ran %d", alice.Load(), bobAsked.Load(), ranBash.Load())
+	}
+}
+
+// Without WithQuestionEvents a kit driven through Control asks nobody:
+// a nested call the policy asks about is not put as a question, and the
+// run ends without waiting for a reply that would never come
+// (agentkit#97).
+func TestWithoutQuestionEventsNothingWaitsForAReply(t *testing.T) {
+	var ranBash atomic.Int32
+	eval := agenttool.New("eval", "runs code", func(ctx context.Context, _ noArgs) (string, error) {
+		if _, err := agentturn.Invoke(ctx, "bash", json.RawMessage(`{}`)); err != nil {
+			return "the nested call failed: " + err.Error(), nil
+		}
+		return "ran", nil
+	})
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("eval", `{}`)}}
+	kit, ctl, _ := controlled(t,
+		agentkit.WithModel(model, "test-model"),
+		agentkit.WithTools(eval, counting("bash", &ranBash)),
+		agentkit.WithPolicy(agentpolicy.Policy{Ask: policyRules(t, "bash"), Default: agentpolicy.Allow()}, nil),
+	)
+	if kit.Config().ToolElicitor != nil || ctl.Agent().Config().ToolElicitor != nil {
+		t.Fatal("an elicitor was installed without WithQuestionEvents")
+	}
+	var questions atomic.Int32
+	defer ctl.Subscribe(func(_ context.Context, ev agentturn.Event) error {
+		if _, ok := ev.(*agentturn.Question); ok {
+			questions.Add(1)
+		}
+		return nil
+	})()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	end, err := ctl.Prompt(ctx, openresponses.UserText("go"))
+	if err != nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("prompt: %v, %+v; want done without waiting", err, end)
+	}
+	if questions.Load() != 0 || ranBash.Load() != 0 {
+		t.Fatalf("%d questions, bash ran %d; want none asked and the nested call not run", questions.Load(), ranBash.Load())
 	}
 }
