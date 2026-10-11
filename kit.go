@@ -48,8 +48,12 @@ import (
 // [Kit.MemoryManifest], which describe the render that happened last,
 // and the record of the manifest, which is written once per distinct
 // render because one session records both runs. A front serving one kit
-// to many conversations, each its own session, prompts each run under
-// [ContextWithRecorder] so what the kit records lands in the right one.
+// to many conversations, each its own session, builds the kit with no
+// session of its own and prompts each run under [ContextWithRecorder]
+// so what the kit records lands in the right one; driven through
+// [Kit.Control], each conversation's agent has a Control of its own,
+// whose RunContext leaves that recorder in place, and each run's
+// questions reach its own Control.
 //
 // Every agent built from a kit with a session is attached to it,
 // [Kit.Attach], or prompted under [ContextWithRecorder]. A run that is
@@ -61,9 +65,10 @@ import (
 // render the path cannot attribute to it. In the process that rendered
 // it, its saves are based on its own render as any run's are.
 //
-// That is the right sharing for concurrent runs of one agent and the
-// wrong sharing for two agents, which want two prompts, two manifests
-// and usually two sessions. Give each agent its own kit.
+// That is the right sharing for concurrent runs of one agent, in one
+// conversation or in many, and the wrong sharing for two different
+// agents, each with its own instructions, which want two prompts, two
+// manifests and usually two sessions. Give each of those its own kit.
 //
 // # Handoffs
 //
@@ -87,12 +92,12 @@ import (
 // the sender's.
 type Kit struct {
 	cfg agentturn.Config
-	// asker is the agent [Kit.Control] put cfg's ToolElicitor through,
-	// nil until it has. Guarded by mu, as cfg is.
-	asker   *agentturn.Agent
-	order   []string
-	omitted []Omission
-	origins []ToolOrigin
+	// questionEvents is [WithQuestionEvents]: cfg's ToolElicitor is
+	// [Kit.questions], which [Kit.Control] gives an agent without one.
+	questionEvents bool
+	order          []string
+	omitted        []Omission
+	origins        []ToolOrigin
 
 	engine  *agentpolicy.Engine
 	grants  *skillGrants
@@ -772,6 +777,15 @@ func (k *Kit) openSession(ctx context.Context, s *settings) error {
 	if k.seedOps, err = session.AgentOptions(sess, rec.ReadOptions()...); err != nil {
 		return fmt.Errorf("agentkit: reading the session's pending calls: %w", err)
 	}
+	// A hold recorded before agentturn/session v0.0.23 carries neither
+	// held nor subject; the kit's verdict entry beside it does.
+	pending, err := session.Pending(sess, rec.ReadOptions()...)
+	if err != nil {
+		return fmt.Errorf("agentkit: reading the session's pending calls: %w", err)
+	}
+	if held, ok := holdsFromVerdicts(sess, pending); ok {
+		k.seedOps = append(k.seedOps, agentturn.WithPending(held))
+	}
 	if s.compactSet {
 		if k.failedFold, err = session.CompactOptions(sess); err != nil {
 			return fmt.Errorf("agentkit: reading the session's last failed fold: %w", err)
@@ -817,6 +831,12 @@ func (k *Kit) build(ctx context.Context, s *settings) error {
 			}
 			return fn(ctx, q)
 		}
+	}
+	// Under WithQuestionEvents: the Control whose run asks, each
+	// conversation's questions to its own views.
+	if s.questionEvents {
+		k.questionEvents = true
+		k.cfg.ToolElicitor = k.questions
 	}
 	return nil
 }
@@ -1825,6 +1845,86 @@ func (k *Kit) recorderFor(ctx context.Context) *session.Recorder {
 		return rec
 	}
 	return k.rec
+}
+
+// holdsFromVerdicts gives each deferred call of pending whose decision
+// says neither that the engine held it nor what part of it the policy
+// asked about the Held and Subject of the latest [agentpolicy.VerdictNS]
+// entry for the call on the session's path, the kit's own record of the
+// verdict. agentturn/session reads both back from the hold decision
+// since v0.0.23; a hold recorded before then has neither, and without
+// them [Control.Permissions] would list a held call as a question and
+// the release would leave it unanswered. ok reports whether any call
+// changed; the decisions changed are copies.
+func holdsFromVerdicts(s *agentsession.Session, pending []agentturn.PendingCall) ([]agentturn.PendingCall, bool) {
+	want := map[string]bool{}
+	for _, p := range pending {
+		if d := p.Decision; p.Call != nil && d != nil && d.Action == agentturn.Defer && !d.Held && d.Subject == "" {
+			want[p.Call.CallID] = true
+		}
+	}
+	if len(want) == 0 {
+		return pending, false
+	}
+	type verdict struct {
+		CallID  string `json:"call_id"`
+		Action  string `json:"action"`
+		Held    bool   `json:"held"`
+		Subject string `json:"subject"`
+	}
+	latest := map[string]verdict{}
+	for _, e := range s.Path(s.Leaf()) {
+		c, ok := e.(*agentsession.CustomEntry)
+		if !ok || c.NS != agentpolicy.VerdictNS {
+			continue
+		}
+		var v verdict
+		if json.Unmarshal(c.Data, &v) != nil || !want[v.CallID] || v.Action != "defer" {
+			continue
+		}
+		latest[v.CallID] = v
+	}
+	out := append([]agentturn.PendingCall(nil), pending...)
+	changed := false
+	for i, p := range out {
+		v, ok := latest[callIDOf(p)]
+		if !ok || !want[v.CallID] || (!v.Held && v.Subject == "") {
+			continue
+		}
+		d := *p.Decision
+		d.Held, d.Subject = v.Held, v.Subject
+		out[i].Decision, changed = &d, true
+	}
+	return out, changed
+}
+
+// runOfPending is the run that left the calls pending, read from the
+// session's path: the last run end there, when it lists every one of
+// them as pending. It is "" when no run end does, as for a session cut
+// before its run ended.
+func runOfPending(s *agentsession.Session, pending []agentturn.PendingCall) string {
+	var last *agentsession.RunEntry
+	for _, e := range s.Path(s.Leaf()) {
+		if r, ok := e.(*agentsession.RunEntry); ok && r.IsEnd() {
+			last = r
+		}
+	}
+	if last == nil {
+		return ""
+	}
+	for _, p := range pending {
+		if p.Call == nil || !slices.Contains(last.Pending, p.Call.CallID) {
+			return ""
+		}
+	}
+	return last.RunID
+}
+
+func callIDOf(p agentturn.PendingCall) string {
+	if p.Call == nil {
+		return ""
+	}
+	return p.Call.CallID
 }
 
 // observeVerdicts is the observer the kit gives the engine it builds

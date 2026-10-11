@@ -189,7 +189,11 @@ agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
 ```
 
 A front that asks a person about a held call says so when it answers,
-or the record cannot tell the approval from one a script gave:
+or the record cannot tell the approval from one a script gave. The
+release is in two phases: `Release` changes nothing, and `Resumed`,
+given the end the resumed run returned, settles what that run took,
+even when Resume failed, so a Resume that did not start is answered
+again and released again:
 
 ```go
 answers, err := kit.Engine().Release(ctx, end,
@@ -197,8 +201,12 @@ answers, err := kit.Engine().Release(ctx, end,
 if err != nil {
 	return err
 }
-end, err = agent.Resume(ctx, answers...)
+next, err := agent.Resume(ctx, answers...)
+kit.Engine().Resumed(ctx, end, answers, next)
 ```
+
+`Kit.Control(agent)` does this for a front, from the calls the agent
+has pending.
 
 A host that wants its own run's memory writes to name its session puts
 the ID on the context it prompts with,
@@ -302,12 +310,12 @@ a2a.
 |---|---|
 | `openresponses` | v0.0.14 |
 | `agenttool`, `agenttool/mcpclient` | v0.0.22 |
-| `agentturn`, `agentturn/session` | v0.0.22 |
+| `agentturn`, `agentturn/session` | v0.0.26 |
 | `agentsession` | v0.0.20 |
 | `agentsmd` | v0.0.3 |
 | `agentskill` | v0.0.11 |
 | `agentmemory` | v0.0.10 |
-| `agentpolicy` | v0.0.15 |
+| `agentpolicy` | v0.0.16 |
 
 Every sibling is required at a released version with no `replace`, and
 `make no-replace` enforces it: the kit is the module that proves the

@@ -45,7 +45,7 @@ and no fold is recorded.
 | `ShouldStopAfterTurn` | `WithGuards`, `WithShouldStopAfterTurn` | `agentturn.ChainShouldStopAfterTurn(chain.ShouldStopAfterTurn(), yours...)` |
 | `Transform` | `WithCompaction`, `WithCompactionModel`, `WithCompactor`, `WithTransform`, `WithFoldObserver` | `agentturn.ChainTransform(yours, compact.NewLocal(model, compact.WithModel(name), compact.WithOnFold(fold), compact.WithBudget(n), theirs...).Transform)`, or `compact.New(compactor, ...)` with the same options for `WithCompactor`, where `fold` is `rec.Fold` and then the observer — see below |
 | `ToolRecorder` | `WithSession`, `WithResumedSession`, `WithRecorder` | `rec.RecordFunc()`; without a session the kit leaves it nil, and the loop honours a recorder the product installs with `agenttool.ContextWithRecorder` on the prompt's context |
-| `ToolElicitor` | `WithToolElicitor`, `Kit.Control` | a function that calls `rec.Elicitor(by, fn)` for the run's recorder, `recorderFor(ctx)` below, and `fn` without one; without the option the kit leaves it nil, and an elicitor on the prompt's context applies, until `Kit.Control(agent)` sets it to `Control.Elicitor()`: the same function over `agent.QuestionElicitor()` by `agentsession.ByHuman`, so questions are events the front answers with `agent.Reply`. `WithQuestionEvents` changes no field: it dials the MCP servers as `WithToolElicitor` does, with `mcpclient.WithElicitation()` |
+| `ToolElicitor` | `WithToolElicitor`, `WithQuestionEvents` | under `WithToolElicitor`, a function that calls `rec.Elicitor(by, fn)` for the run's recorder, `recorderFor(ctx)` below, and `fn` without one; under `WithQuestionEvents`, a function that asks the Control on the run's context, `c, ok := agentkit.ControlFromContext(ctx)` then `c.Elicitor()(ctx, q)` (the same function over `agent.QuestionElicitor()` by `agentsession.ByHuman`, so questions are events the front answers with `agent.Reply`), and with no Control answers `agenttool.ActionCancel` through `rec.Elicitor(agentsession.ByPolicy, …)`; it also dials the MCP servers as `WithToolElicitor` does, with `mcpclient.WithElicitation()`. Without either the kit leaves it nil: an elicitor on the prompt's context applies, and with none a tool's question goes unasked. `Kit.Control(agent)` gives an agent whose config has none the kit's |
 
 `chain` in the rows above is one `guard.Chain{Guards: gs, Observer:
 observe}`, where `observe` is the verdict observer described under
@@ -1247,35 +1247,56 @@ Ten things, all outside `agentturn.Config`:
 - `Kit.Control(agent)` is the agent as `agentturn.Control`, with
   what a kit's agent needs around each run, from these exported calls:
   every run, queued input and head move under `ContextWithRecorder`,
-  `session.ContextWithSessionID` and `agentmemory.WithSession` (its
-  `RunContext`); `Resume` after `engine.Release` with the last run's
-  end; `Queue` as `rec.Queue`; and, when the kit has no elicitor of its
-  own, `agent.SetConfig` with `ToolElicitor` set to
-  `rec.Elicitor(agentsession.ByHuman, agent.QuestionElicitor())` for the
-  run's recorder, so questions are events the front answers with
-  `agent.Reply`; the kit's `Config()` carries it from then on (the
-  `ToolElicitor` row above), so a config applied again keeps it. It hands the agent what a resumed session owes,
-  `rec.Requeue(ctx, agent)`. `ContinueFrom` is `kit.RevokeSkillGrants`,
-  `rec.Rebase`, `session.TranscriptModels`, `session.Pending`,
-  `agent.SetTranscript`, `agent.SetPending`, `kit.RegrantSkills` and a
-  leaf label from `s.MarkLeaf`, undone on failure. By hand:
+  `session.ContextWithSessionID` and `agentmemory.WithSession`, and
+  under `agentkit.ContextWithControl`, so under `WithQuestionEvents` the
+  run's questions reach its own subscribers (the `ToolElicitor` row
+  above); that is its `RunContext`. `Resume` is `engine.Release` with
+  an end of the agent's pending calls, under the run that left them
+  pending (the session's last run end for an agent seeded with them),
+  then `agent.Resume`, then `engine.Resumed` with the end the run
+  returned. A `Prompt` that answers pending calls with their outputs,
+  and a head move that leaves them, are followed by `engine.Resumed`
+  with no answers, for the calls still pending, and `engine.Forget` of
+  their run. `Queue` is `rec.Queue`. Under `WithQuestionEvents`, an
+  agent whose config has no `ToolElicitor` is given the kit's with
+  `agent.SetConfig`. It hands the agent what a resumed session owes,
+  `rec.Requeue(ctx, agent)`. `ContinueFrom` is
+  `kit.RevokeSkillGrants`, `rec.Rebase`, `session.TranscriptModels`,
+  `session.Pending`, `agent.SetTranscript`, `agent.SetPending`,
+  `session.OwedNotes` with `agent.SetNotes`, `kit.RegrantSkills`, a
+  leaf label from `s.MarkLeaf` and `engine.Forget` of the run it
+  leaves, undone on failure. A pending call whose hold was recorded
+  before agentturn/session v0.0.23 gets its held mark and subject from
+  the kit's `agentpolicy:verdict` entry for it. By hand:
 
   ```go
   agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
   defer kit.Attach(agent)()
   rec := kit.Recorder()
+  var ctl *agentkit.Control // the one ContextWithControl names, if any
   run := func(ctx context.Context) context.Context {
+  	ctx = agentkit.ContextWithControl(ctx, ctl)
   	ctx = agentkit.ContextWithRecorder(ctx, rec)
   	ctx = session.ContextWithSessionID(ctx, rec.SessionID())
   	return agentmemory.WithSession(ctx, rec.SessionID())
   }
-  cfg := agent.Config()
-  cfg.ToolElicitor = rec.Elicitor(agentsession.ByHuman, agent.QuestionElicitor())
-  _ = agent.SetConfig(cfg)
+  if cfg := agent.Config(); questionEvents && cfg.ToolElicitor == nil {
+  	cfg.ToolElicitor = kit.Config().ToolElicitor
+  	_ = agent.SetConfig(cfg)
+  }
   rec.Requeue(ctx, agent)
+  before := agent.State()
   end, _ := agent.Prompt(run(ctx), prompt)
+  if len(before.Pending) > 0 && end != nil {
+  	was := &agentturn.RunEnd{RunID: before.RunID, Reason: agentturn.ReasonInputRequired, Pending: before.Pending}
+  	kit.Engine().Resumed(run(ctx), was, nil, end)
+  	kit.Engine().Forget(before.RunID)
+  }
+  st := agent.State()
+  end = &agentturn.RunEnd{RunID: st.RunID, Reason: agentturn.ReasonInputRequired, Pending: st.Pending}
   answers, _ = kit.Engine().Release(run(ctx), end, answers...)
-  end, _ = agent.Resume(run(ctx), answers...)
+  next, _ := agent.Resume(run(ctx), answers...)
+  kit.Engine().Resumed(run(ctx), end, answers, next)
   ```
 
 None of them changes a field of the config, so none can make the manual

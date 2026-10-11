@@ -1186,16 +1186,25 @@ func WithToolElicitor(by string, fn agenttool.Elicitor) Option {
 }
 
 // WithQuestionEvents says the questions a tool asks the user mid-call,
-// an MCP server's elicitation among them, are put as agentturn events
-// and answered through [Kit.Control]: [Kit.Control] installs the
-// agent's [agentturn.Agent.QuestionElicitor] as ToolElicitor, and the
+// a tool's own, a nested call the policy asks about and an MCP
+// server's elicitation, are put as agentturn events and answered
+// through [Kit.Control]: the kit's config carries an elicitor that asks
+// the Control of the run the question comes from, through its agent's
+// [agentturn.Agent.QuestionElicitor], so one kit serving several
+// conversations puts each one's questions to its own subscribers. The
 // kit dials every server [WithMCP], [WithMCPTransport] and
 // [Kit.AddMCP] name with [mcpclient.WithElicitation], as it does under
-// [WithToolElicitor], so a server is offered elicitation and its
-// question reaches the agent's subscribers. MCP carries no note with
-// an answer, so what the user said with one is recorded and never sent
-// to the server. Until Kit.Control is called nobody is asked, and a
-// server's question is answered as cancelled.
+// [WithToolElicitor], so a server is offered elicitation. MCP carries
+// no note with an answer, so what the user said with one is recorded
+// and never sent to the server. A run that carries no Control, one
+// started on an agent directly, asks nobody: its questions are answered
+// cancelled, by the policy.
+//
+// A question so put waits for its answer, so a host turns this on when
+// someone attends its subscribers. Without it, and without
+// WithToolElicitor, a tool's questions go unasked, agentturn's default,
+// and a host with nobody to answer never waits on one; one that answers
+// by rule passes WithToolElicitor(agentsession.ByPolicy, fn).
 //
 // It is refused beside [WithToolElicitor], which answers in process:
 // the questions go to one or the other.

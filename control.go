@@ -28,13 +28,18 @@ import (
 //     decided for, the kit's session;
 //   - Resume puts the answers through the kit's engine
 //     ([agentpolicy.Engine.Release]) first, so a call the engine only
-//     held beside another call's ask is released with the batch;
+//     held beside another call's ask is released with the batch, and
+//     tells the engine how the resumed run went
+//     ([agentpolicy.Engine.Resumed]);
 //   - Queue writes the queued entry before it returns
 //     ([session.Recorder.Queue]), so a steer is on the record before a
 //     quiet tool's next event would write it;
-//   - a question asked while a call runs is an [agentturn.Question]
-//     event, answered with Reply, when the kit has no elicitor of its
-//     own; an MCP server's too under [WithQuestionEvents].
+//   - under [WithQuestionEvents], a question asked while a call of one
+//     of its runs goes, a tool's own, a nested call the policy asks
+//     about and an MCP server's, is an [agentturn.Question] event to
+//     its subscribers, answered with Reply: each run carries its
+//     Control ([ContextWithControl]), and the kit's elicitor asks the
+//     Control of the run that asks.
 //
 // It is the composition agentconsole's kitbackend and dax each wrote
 // for themselves, written once, from exported calls alone; docs/manual.md
@@ -43,36 +48,53 @@ type Control struct {
 	kit   *Kit
 	agent *agentturn.Agent
 
-	mu      sync.Mutex
-	lastEnd *agentturn.RunEnd         // how the last run ended, for the release
-	models  agentturn.ReasoningModels // of the branch the head was moved to
+	// seedRun is the run that left pending the calls an agent seeded
+	// from the kit's session holds, from the session's run end: the
+	// agent reports no run until its first, and the engine keeps what it
+	// held under the run that deferred it.
+	seedRun string
+
+	mu     sync.Mutex
+	models agentturn.ReasoningModels // of the branch the head was moved to
 }
 
 var _ agentturn.Control = (*Control)(nil)
 
 // Control returns the agent a as the human plane drives it, a built
 // over k: agentturn.New(k.Config(), k.AgentOptions()...) and attached
-// with [Kit.Attach]. Call it before the agent's first run. It does two
-// things at once:
+// with [Kit.Attach]. Call it before the agent's first run; it refuses
+// an agent that is running. A kit with a session of its own
+// ([WithSession], [WithResumedSession], [WithRecorder]) records every
+// run of every Control in that session, since RunContext puts the
+// kit's recorder on each, so it serves one conversation. A kit with
+// none serves several, each an agent of its own driven through its own
+// Control, each run under the [ContextWithRecorder] of its
+// conversation's session, which RunContext leaves in place.
 //
-//   - When k has no elicitor of its own ([WithToolElicitor]), the
-//     questions a tool asks mid-call become events: it sets
-//     [Control.Elicitor], the agent's
+//   - Under [WithQuestionEvents] the questions a tool asks mid-call
+//     are events: the kit's config carries an elicitor that asks the
+//     Control of the run the question comes from (the one on its
+//     context, [ControlFromContext]), through that agent's
 //     [agentturn.Agent.QuestionElicitor] with the run's recorder's
 //     [session.Recorder.Elicitor] around it, by
-//     [agentsession.ByHuman], as the ToolElicitor of a's config and of
-//     every [Kit.Config] after, so a config the product applies again
-//     with [agentturn.Agent.SetConfig] (after [Kit.ReloadSkills], say)
-//     keeps it. A tool's question and a nested call the policy asks
-//     about are then recorded under the call and delivered to the
-//     subscribers as [agentturn.Question]; an MCP server's too under
-//     [WithQuestionEvents], which offers the servers elicitation. A
-//     subscriber that cannot answer one replies
+//     [agentsession.ByHuman] ([Control.Elicitor]). Each conversation's
+//     questions reach its own subscribers and no one else's; a run
+//     that carries no Control, one started on the agent directly,
+//     answers its questions cancelled, by [agentsession.ByPolicy],
+//     and asks nobody. Control gives a an elicitor when its config has
+//     none. A subscriber that cannot answer a question replies
 //     [agenttool.ActionCancel], since the call waits for the reply or
-//     for its context to end. The kit's questions go to one agent, so
-//     Control refuses a second agent once it has installed the first's.
-//     A kit with its own elicitor answers in process, and the configs
-//     are left as they are.
+//     for its context to end, and names itself on the reply's context
+//     with [agentturn.ContextWithAnswerer], a trigger of its own kind,
+//     so the record's answer entry says who answered (its source); the
+//     entry's by stays [agentsession.ByHuman], which the elicitor was
+//     built with.
+//   - Without it the questions go where the kit's config says: to the
+//     product's elicitor under [WithToolElicitor], which answers in
+//     process, or unasked, agentturn's default, so a host with nobody
+//     to answer never waits on one. A host that wants them answered by
+//     rule passes WithToolElicitor(agentsession.ByPolicy, fn) with an
+//     fn that answers, [agenttool.ActionCancel] for instance.
 //   - It hands a the inputs a resumed session owes
 //     ([session.Recorder.Requeue]), which the next run takes.
 //
@@ -81,32 +103,21 @@ func (k *Kit) Control(a *agentturn.Agent) (*Control, error) {
 	if a == nil {
 		return nil, errors.New("agentkit: control: no agent")
 	}
+	if a.State().Running {
+		return nil, fmt.Errorf("agentkit: control: %w", agentturn.ErrRunning)
+	}
 	c := &Control{kit: k, agent: a}
-	k.mu.Lock()
-	install := k.asker == a || (k.asker == nil && k.cfg.ToolElicitor == nil)
-	if k.asker != nil && k.asker != a {
-		k.mu.Unlock()
-		return nil, errors.New("agentkit: control: the kit's questions already go to another agent's Control")
+	if st := a.State(); st.RunID == "" && len(st.Pending) > 0 && k.sess != nil {
+		c.seedRun = runOfPending(k.sess, st.Pending)
 	}
-	var prev agenttool.Elicitor
-	if install {
-		prev = k.cfg.ToolElicitor
-		if k.asker == nil {
-			k.cfg.ToolElicitor, k.asker = c.Elicitor(), a
-		}
-	}
-	elicitor := k.cfg.ToolElicitor
-	k.mu.Unlock()
-	if install {
-		cfg := a.Config()
-		cfg.ToolElicitor = elicitor
-		if err := a.SetConfig(cfg); err != nil {
+	if k.questionEvents {
+		if cfg := a.Config(); cfg.ToolElicitor == nil {
 			k.mu.Lock()
-			if prev == nil {
-				k.cfg.ToolElicitor, k.asker = nil, nil
-			}
+			cfg.ToolElicitor = k.cfg.ToolElicitor
 			k.mu.Unlock()
-			return nil, fmt.Errorf("agentkit: control: %w", err)
+			if err := a.SetConfig(cfg); err != nil {
+				return nil, fmt.Errorf("agentkit: control: %w", err)
+			}
 		}
 	}
 	if rec := k.Recorder(); rec != nil {
@@ -118,13 +129,49 @@ func (k *Kit) Control(a *agentturn.Agent) (*Control, error) {
 	return c, nil
 }
 
+type controlKey struct{}
+
+// ContextWithControl returns ctx carrying c, the Control a run started
+// under it belongs to. [Control.RunContext] puts it on every run, and
+// the values of a run's context reach its tools, its hooks and the
+// sub-agents its tools run, so a question asked anywhere in the run
+// finds the conversation it belongs to.
+func ContextWithControl(ctx context.Context, c *Control) context.Context {
+	return context.WithValue(ctx, controlKey{}, c)
+}
+
+// ControlFromContext returns the Control [ContextWithControl] put on
+// ctx.
+func ControlFromContext(ctx context.Context) (*Control, bool) {
+	c, ok := ctx.Value(controlKey{}).(*Control)
+	return c, ok && c != nil
+}
+
+// questions is the ToolElicitor [WithQuestionEvents] puts on the kit's
+// config: the question goes to the Control of the run that asks, as an
+// event to its subscribers, and is answered cancelled, by the policy,
+// for a run that carries none. It asks no other conversation.
+func (k *Kit) questions(ctx context.Context, q agenttool.Elicitation) (agenttool.Answer, error) {
+	if c, ok := ControlFromContext(ctx); ok {
+		return c.Elicitor()(ctx, q)
+	}
+	cancel := func(context.Context, agenttool.Elicitation) (agenttool.Answer, error) {
+		return agenttool.Answer{Action: agenttool.ActionCancel}, nil
+	}
+	if rec := k.recorderFor(ctx); rec != nil {
+		return rec.Elicitor(agentsession.ByPolicy, cancel)(ctx, q)
+	}
+	return cancel(ctx, q)
+}
+
 // Agent is the agent Control drives, for what the contract does not
 // carry: its configuration, and SetConfig between runs.
 func (c *Control) Agent() *agentturn.Agent { return c.agent }
 
-// Elicitor is the elicitor Kit.Control installs: the agent's
-// QuestionElicitor, recorded by the run's recorder, the one on the
-// call's context or the kit's, as answered by a person.
+// Elicitor is the elicitor the kit's questions reach for a run of this
+// Control under [WithQuestionEvents]: the agent's QuestionElicitor,
+// recorded by the run's recorder, the one on the call's context or the
+// kit's, as answered by a person.
 func (c *Control) Elicitor() agenttool.Elicitor {
 	ask := c.agent.QuestionElicitor()
 	return func(ctx context.Context, q agenttool.Elicitation) (agenttool.Answer, error) {
@@ -139,13 +186,19 @@ func (c *Control) Elicitor() agenttool.Elicitor {
 	}
 }
 
-// RunContext puts on ctx what the kit expects of a run it records: its
-// recorder, the session's ID for the model calls and for memory a run
-// writes, and the reasoning attribution of the branch the head was last
-// moved to. Prompt, Resume, Queue and ContinueFrom use it; a front that
-// starts a run of its own on the agent does too. Without a recorder it
-// adds only the attribution.
+// RunContext puts on ctx what the kit expects of a run it drives: the
+// Control itself ([ContextWithControl]), so the run's questions reach
+// this conversation's subscribers; the kit's recorder, the session's
+// ID for the model calls and for memory a run writes; and the reasoning
+// attribution of the branch the head was last moved to. Prompt, Resume,
+// Queue and ContinueFrom use it; a front that starts a run of its own
+// on the agent does too. With a recorder of the kit's own it replaces
+// any recorder the caller put on ctx; without one it adds the Control
+// and the attribution alone, and a recorder the caller put there
+// ([ContextWithRecorder]) stays, which is how one kit with no session
+// serves several conversations, each recorded in its own.
 func (c *Control) RunContext(ctx context.Context) context.Context {
+	ctx = ContextWithControl(ctx, c)
 	c.mu.Lock()
 	models := c.models
 	c.mu.Unlock()
@@ -165,69 +218,77 @@ func (c *Control) RunContext(ctx context.Context) context.Context {
 	return agentmemory.WithSession(ctx, rec.SessionID())
 }
 
-// ended keeps how a run ended. A run that returned no end (it failed
-// before it began) leaves the one before it, whose calls still wait.
-func (c *Control) ended(end *agentturn.RunEnd) {
-	if end == nil {
-		return
-	}
-	c.mu.Lock()
-	c.lastEnd = end
-	c.mu.Unlock()
-}
-
 // Prompt implements [agentturn.Control]: the agent's Prompt under
-// RunContext.
+// RunContext. A prompt that opens with the outputs of the calls a run
+// left pending answers them without a Resume, so what the kit's engine
+// held of that run is settled with the run the prompt started: the
+// calls its end still lists, those of a run that failed before the
+// outputs went in, wait under the new run ([agentpolicy.Engine.Resumed]
+// with no answers), and the rest of the old run is forgotten
+// ([agentpolicy.Engine.Forget]), since nothing will release them.
 func (c *Control) Prompt(ctx context.Context, items ...openresponses.Item) (*agentturn.RunEnd, error) {
-	end, err := c.agent.Prompt(c.RunContext(ctx), items...)
-	c.ended(end)
+	before := c.agent.State()
+	ctx = c.RunContext(ctx)
+	end, err := c.agent.Prompt(ctx, items...)
+	if eng := c.kit.Engine(); eng != nil && end != nil && len(before.Pending) > 0 {
+		run := c.pendingRun(before)
+		was := &agentturn.RunEnd{RunID: run, Reason: agentturn.ReasonInputRequired, Pending: before.Pending}
+		eng.Resumed(ctx, was, nil, end)
+		eng.Forget(run)
+	}
 	return end, err
 }
 
+// pendingRun is the run the calls pending in st wait under in the
+// engine: the agent's last, or for an agent seeded with them that has
+// not run yet, the run that deferred them.
+func (c *Control) pendingRun(st agentturn.State) string {
+	if st.RunID != "" {
+		return st.RunID
+	}
+	return c.seedRun
+}
+
 // Resume implements [agentturn.Control]: the agent's Resume under
-// RunContext, with the answers put through the kit's engine first. The
-// engine is given the end the last run left its calls pending with,
-// unless none of the answers is about it (a restart restored the
-// calls, or another run ended since): it answers the calls it only
-// held beside the ones asked about, and fails, changing nothing, when
-// one is left unanswered.
+// RunContext, with the answers put through the kit's engine. The
+// engine is given the calls the agent has pending, as an end of the
+// agent's last run ([agentturn.State]), so a call it held is released
+// from the decision that deferred it ([agentturn.PendingCall]'s
+// Decision, Held set), which a session read back after a restart, or an
+// end from a wire, carries as the run's own did. A run that ended
+// waiting on held calls alone, which [Control.Permissions] lists
+// nothing for, is released by Resume with no answers.
 //
-// Answers Resume would refuse are refused before the release, which
-// forgets the calls it answers and records them released: one for a
-// call that is not pending, and two for one call. When the release
-// went through and the run then did not start, the end is dropped and
-// the error says to answer every pending call again, since the engine
-// holds none of them now.
+// The release is in two phases ([agentpolicy.Engine.Release], then
+// [agentpolicy.Engine.Resumed] with the end the resumed run returned):
+// a Resume that did not start, or stopped with calls still pending,
+// leaves the engine holding what it held, and the next Resume, under
+// the run ID the agent then reports, releases them again. Answers
+// Resume would refuse, one for a call that is not pending and two for
+// one call, are refused first, and a pending call nobody answers is
+// [agentpolicy.ErrUnanswered]; neither changes anything.
 func (c *Control) Resume(ctx context.Context, answers ...agentturn.Answer) (*agentturn.RunEnd, error) {
 	ctx = c.RunContext(ctx)
 	eng := c.kit.Engine()
 	if eng == nil {
-		end, err := c.agent.Resume(ctx, answers...)
-		c.ended(end)
-		return end, err
+		return c.agent.Resume(ctx, answers...)
 	}
-	if err := checkAnswers(c.agent.State().Pending, answers); err != nil {
+	st := c.agent.State()
+	if err := checkAnswers(st.Pending, answers); err != nil {
 		return nil, err
 	}
-	c.mu.Lock()
-	end := c.lastEnd
-	c.mu.Unlock()
-	if end != nil && !slices.ContainsFunc(answers, func(a agentturn.Answer) bool { return pendingIn(end, a.CallID) }) {
-		end = nil
+	end := &agentturn.RunEnd{
+		RunID:   c.pendingRun(st),
+		Reason:  agentturn.ReasonInputRequired,
+		Pending: st.Pending,
 	}
 	answers, err := eng.Release(ctx, end, answers...)
 	if err != nil {
 		return nil, err
 	}
-	ran, err := c.agent.Resume(ctx, answers...)
-	if ran == nil && err != nil && end != nil {
-		c.mu.Lock()
-		c.lastEnd = nil
-		c.mu.Unlock()
-		return nil, fmt.Errorf("agentkit: the run did not start after the calls were released (answer every pending call again): %w", err)
-	}
-	c.ended(ran)
-	return ran, err
+	next, err := c.agent.Resume(ctx, answers...)
+	eng.Resumed(ctx, end, answers, next)
+	return next, err
 }
 
 // checkAnswers refuses answers Resume would refuse, before anything is
@@ -244,10 +305,6 @@ func checkAnswers(pending []agentturn.PendingCall, answers []agentturn.Answer) e
 		}
 	}
 	return nil
-}
-
-func pendingIn(end *agentturn.RunEnd, callID string) bool {
-	return slices.ContainsFunc(end.Pending, func(p agentturn.PendingCall) bool { return p.Call != nil && p.Call.CallID == callID })
 }
 
 // Queue implements [agentturn.Control]: with a recorder, each item is
@@ -275,10 +332,15 @@ func (c *Control) Subscribe(fn func(context.Context, agentturn.Event) error) fun
 }
 
 // Reply implements [agentturn.Control]: the agent's Reply. A note
-// given with the answer reaches the model when the question was about
-// a call (agentturn.Ask), and the record.
-func (c *Control) Reply(id string, answer agenttool.Answer) error {
-	return c.agent.Reply(id, answer)
+// given with the answer reaches the model, as what the person said,
+// after the outputs of the batch the question was asked under, and the
+// record. Who answered is the answerer the replier put on ctx with
+// [agentturn.ContextWithAnswerer], which the record writes beside the
+// answer; the run's trigger, which a Question's own event context
+// carries, does not name the answerer, so a reply that names nobody is
+// unattributed.
+func (c *Control) Reply(ctx context.Context, id string, answer agenttool.Answer) error {
+	return c.agent.Reply(ctx, id, answer)
 }
 
 // Permission is a call a run left for someone to answer, with the
@@ -297,10 +359,17 @@ type Permission struct {
 // kit's engine only holds beside them, which Resume releases with the
 // answers. The question, the part it is about and the held mark are
 // the decision's that deferred the call ([agentturn.PendingCall]'s
-// Decision, which agentpolicy fills from its verdict), so an end read
-// back from the record or over a wire gives the same list; the
-// engine's verdict stands in for a call with no decision. It is nil
-// for an end that is not [agentturn.ReasonInputRequired].
+// Decision, which agentpolicy fills from its verdict and
+// agentturn/session reads back from the record), so an end read back
+// after a restart or received over a wire gives the same list as one
+// the engine decided. A call with no decision, one a Resume approved
+// whose batch then failed before the call ran, is read from the
+// engine's verdict under the end's run ([agentpolicy.Engine.Deferred]),
+// where [agentpolicy.Engine.Resumed] moved it; one the engine does not
+// hold either, a call an abort cut off, is listed with no question. It
+// is nil for an end that is not [agentturn.ReasonInputRequired], and
+// empty for one that waits on held calls alone: Resume with no answers
+// releases those.
 func (c *Control) Permissions(end *agentturn.RunEnd) []Permission {
 	if end == nil || end.Reason != agentturn.ReasonInputRequired {
 		return nil
@@ -333,9 +402,10 @@ func (c *Control) Permissions(end *agentturn.RunEnd) []Permission {
 
 // ContinueFrom moves the head to the entry entryID of the kit's
 // session: the recorder is rebased there ([session.Recorder.Rebase]),
-// the agent is given that branch's transcript, pending calls and
-// reasoning attribution, and a leaf label is appended so the move is on
-// the record, for a follower and for a session reopened later. The
+// the agent is given that branch's transcript, pending calls, the
+// notes it owes ([session.OwedNotes]) and reasoning attribution, and a
+// leaf label is appended so the move is on the record, for a follower
+// and for a session reopened later. The
 // conversation's skill grants are ended before the head leaves
 // ([Kit.RevokeSkillGrants]) and granted again from the new branch's
 // reads after ([Kit.RegrantSkills]), so a tool a skill on the old
@@ -378,7 +448,7 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 
 	prevLeaf, prev := s.Leaf(), c.agent.State()
 	c.mu.Lock()
-	prevModels, prevEnd := c.models, c.lastEnd
+	prevModels := c.models
 	c.mu.Unlock()
 	ctx = c.RunContext(ctx)
 	// The revocation writes its verdicts to the branch being left, which
@@ -409,11 +479,14 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 		if rerr := c.agent.SetPending(prev.Pending); rerr != nil {
 			errs = append(errs, rerr)
 		}
+		if rerr := c.agent.SetNotes(prev.Notes); rerr != nil {
+			errs = append(errs, rerr)
+		}
 		if rerr := c.kit.RegrantSkills(ctx, s); rerr != nil {
 			errs = append(errs, rerr)
 		}
 		c.mu.Lock()
-		c.models, c.lastEnd = prevModels, prevEnd
+		c.models = prevModels
 		c.mu.Unlock()
 		if len(errs) > 0 {
 			err = fmt.Errorf("%w (and putting the head back failed: %w)", err, errors.Join(errs...))
@@ -438,11 +511,21 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 	if err := c.agent.SetPending(pending); err != nil {
 		return fail(err)
 	}
+	// The notes the branch owes after outputs already on it, which a
+	// failed run there could not append; with calls pending, Pending
+	// put them on the last call instead.
+	owed, err := session.OwedNotes(s)
+	if err != nil {
+		return fail(err)
+	}
+	if err := c.agent.SetNotes(owed); err != nil {
+		return fail(err)
+	}
 	if err := c.kit.RegrantSkills(ctx, s); err != nil {
 		return fail(err)
 	}
 	c.mu.Lock()
-	c.models, c.lastEnd = models, nil
+	c.models = models
 	c.mu.Unlock()
 	mark, err := s.MarkLeaf()
 	if err != nil {
@@ -450,6 +533,11 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 	}
 	if _, err := rec.Store().Append(ctx, rec.SessionID(), mark); err != nil {
 		return fail(fmt.Errorf("mark the head: %w", err))
+	}
+	if eng := c.kit.Engine(); eng != nil && len(prev.Pending) > 0 {
+		// The calls the head left behind will not be answered: what
+		// the engine held of their run goes with them.
+		eng.Forget(prev.RunID)
 	}
 	return nil
 }

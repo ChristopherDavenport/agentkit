@@ -3,6 +3,70 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed (breaking)
+
+- `Control.Reply` takes a context, as agentturn v0.0.23's
+  `agentturn.Control` does. Who answered is the answerer the replier
+  names on it with `agentturn.ContextWithAnswerer`, which the record
+  writes beside the answer; a reply that names nobody is unattributed.
+- Questions as events are opt-in (#97). `Kit.Control` no longer
+  installs the question elicitor by itself: under `WithQuestionEvents`
+  the kit's config carries it, for a tool's own question, a nested call
+  the policy asks about and an MCP server's, and without it a tool's
+  questions go unasked, agentturn's default, so a host with nobody to
+  answer never waits on one. A product that relied on `Kit.Control`'s
+  events passes `WithQuestionEvents`; one that answers by rule passes
+  `WithToolElicitor(agentsession.ByPolicy, fn)`.
+- A kit serves as many conversations as it has agents, each through
+  its own `Kit.Control` (#93). The question elicitor asks the Control
+  of the run the question comes from, which `Control.RunContext` puts
+  on every run (`ContextWithControl`, `ControlFromContext`), so each
+  conversation's questions reach its own subscribers; a run that
+  carries no Control answers its questions cancelled, by the policy,
+  and asks nobody. `Kit.Control` no longer refuses a second agent.
+- `Control.Resume` releases the calls the agent has pending, read from
+  its state, not the last end this Control saw (#91, #92). A held call
+  is released from the decision that deferred it, so a session resumed
+  after a restart, whose engine remembers nothing, releases the held
+  calls beside the one the person answers, and a run that ended waiting
+  on held calls alone is released by `Resume()` with no answers. The
+  release is agentpolicy v0.0.16's two phases: `Release`, then
+  `Resumed` with the end the resumed run returned, so a Resume that did
+  not start, or stopped with calls still pending, is answered again and
+  releases again; the error that asked to answer every pending call
+  again is gone.
+- `Control.Permissions` reads the question, its subject and the held
+  mark from the deferring decision, which agentturn/session now reads
+  back from the record, and from the engine's verdict under the end's
+  run for a call with no decision, one whose approved batch failed
+  before it ran; an empty list for an `input_required` end means
+  `Resume()` with no answers releases it (#91, #92).
+- A session resumed with a hold recorded before agentturn/session
+  v0.0.23, which wrote neither its held mark nor its subject, takes
+  both from the kit's `agentpolicy:verdict` entry for the call, so the
+  restart reads it as it did before (#91).
+- An agent seeded with a session's pending calls reports no run until
+  its first; `Kit.Control` names the run that left them pending from
+  the session's last run end, so an engine shared across kits
+  (`WithEngine`) releases and forgets them under that run.
+- `Kit.Control` refuses an agent that is running, as it said it
+  would.
+- A `Prompt` through `Control` that answers the pending calls with
+  their outputs, and a `ContinueFrom` that leaves pending calls behind,
+  have the engine forget their run. A prompt whose run failed before
+  the outputs went in leaves the calls pending under its own run, and
+  the engine holds them there (`Resumed` with no answers) rather than
+  forgetting them. `ContinueFrom` gives the agent the
+  notes the branch it moves to owes (`session.OwedNotes`), a person's
+  words a failed run could not append after their output, and puts
+  back the ones the agent owed when it undoes a failed move. A resumed
+  session's owed notes arrive with `Kit.AgentOptions`
+  (`session.AgentOptions`).
+- Requires agentturn and agentturn/session v0.0.26, up from v0.0.22,
+  and agentpolicy v0.0.16, up from v0.0.15.
+
 ## v0.0.11 - 2026-10-10
 
 - Changed: `Control.Permissions` reads the question, the part it asks
