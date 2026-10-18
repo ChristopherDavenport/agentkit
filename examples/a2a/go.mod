@@ -15,7 +15,7 @@ require (
 )
 
 require (
-	github.com/ChristopherDavenport/agentsession v0.0.27
+	github.com/ChristopherDavenport/agentsession v0.0.28
 	github.com/ChristopherDavenport/agentturn/session v0.0.30
 	github.com/ChristopherDavenport/openresponses v0.0.15
 )

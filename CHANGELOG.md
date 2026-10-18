@@ -3,6 +3,17 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- Dependencies: requires agentsession v0.0.28, up from v0.0.27, in the
+  root and in `examples/a2a`. A redacted session now hashes
+  independently: a redactor gives each redacted response the
+  `request_hash` of the request the redacted session rebuilds for it,
+  so readers verify and replay it with no exception for redacted
+  entries. Nothing else moves, and no API of this module changes.
+
 ## v0.0.14 - 2026-10-18
 
 ### Changed
