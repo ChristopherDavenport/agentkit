@@ -311,7 +311,7 @@ a2a.
 | `openresponses` | v0.0.15 |
 | `agenttool`, `agenttool/mcpclient` | v0.0.23 |
 | `agentturn`, `agentturn/session` | v0.0.30 |
-| `agentsession` | v0.0.27 |
+| `agentsession` | v0.0.28 |
 | `agentsmd` | v0.0.3 |
 | `agentskill` | v0.0.12 |
 | `agentmemory` | v0.0.10 |
