@@ -8,15 +8,15 @@ go 1.26.0
 require (
 	github.com/ChristopherDavenport/agentkit v0.0.0
 	github.com/ChristopherDavenport/agenttool v0.0.23
-	github.com/ChristopherDavenport/agentturn v0.0.29
-	github.com/ChristopherDavenport/agentturn/front/a2a v0.0.29
-	github.com/ChristopherDavenport/agentturn/tools/a2a v0.0.29
+	github.com/ChristopherDavenport/agentturn v0.0.30
+	github.com/ChristopherDavenport/agentturn/front/a2a v0.0.30
+	github.com/ChristopherDavenport/agentturn/tools/a2a v0.0.30
 	github.com/a2aproject/a2a-go v0.3.15
 )
 
 require (
 	github.com/ChristopherDavenport/agentsession v0.0.27
-	github.com/ChristopherDavenport/agentturn/session v0.0.29
+	github.com/ChristopherDavenport/agentturn/session v0.0.30
 	github.com/ChristopherDavenport/openresponses v0.0.15
 )
 
