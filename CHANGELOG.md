@@ -3,6 +3,23 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- **Breaking**: requires agentsession v0.0.27, up from v0.0.20,
+  agentturn and agentturn/session v0.0.29, up from v0.0.26, agenttool
+  and agenttool/mcpclient v0.0.23, up from v0.0.22, agentpolicy
+  v0.0.17, up from v0.0.16, agentskill v0.0.12, up from v0.0.11, and
+  openresponses v0.0.15, up from v0.0.14. Sessions are written as
+  `agentsession/0.13`, and a file the recorder appends to is raised to
+  0.13, after which agentsession v0.0.26 and earlier refuse it: upgrade
+  every reader of a store first. A file from before 0.13 that holds a
+  `redacted` or `redacted_from` member is not raised, and an append to
+  it is refused (agentsession's `ErrNoRaise`). `examples/a2a` requires
+  front/a2a and tools/a2a v0.0.29, up from v0.0.16. agentmemory and
+  agentsmd have no newer release.
+
 ## v0.0.13 - 2026-10-11
 
 ### Added
