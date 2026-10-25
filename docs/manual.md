@@ -1107,6 +1107,15 @@ Ten things, all outside `agentturn.Config`:
   guarded render, which the recorder asks about for a run's first
   config entry. Never the layers' own render: that is text a guard kept
   from the model.
+- `WithSession` and `WithResumedSession` open the recorder with
+  `session.WithReopened` too, keeping the session `Kit.Session()`
+  returns: by hand, a variable the hook sets,
+  `session.WithReopened(func(s *agentsession.Session) { sess = s })`.
+  When the store reports an append with `Reopen`, the session it held
+  is replaced, and anything read afterwards is read from the one it
+  opened again. `Control.ContinueFrom` takes the session from
+  `rec.Store().Open` after each `rec.Rebase`, which can append, rather
+  than keep the one it rebased.
 - `Kit.AgentOptions()` is `session.AgentOptions(sess, rec.ReadOptions()...)`,
   read in `New`: the transcript at the leaf, `session.Transcript`, with
   the items the filter kept from the model put back; the model each

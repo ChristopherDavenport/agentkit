@@ -108,8 +108,8 @@ func (k *Kit) Control(a *agentturn.Agent) (*Control, error) {
 		return nil, fmt.Errorf("agentkit: control: %w", agentturn.ErrRunning)
 	}
 	c := &Control{kit: k, agent: a}
-	if st := a.State(); st.RunID == "" && len(st.Pending) > 0 && k.sess != nil {
-		c.seedRun = runOfPending(k.sess, st.Pending)
+	if st, sess := a.State(), k.sess.Load(); st.RunID == "" && len(st.Pending) > 0 && sess != nil {
+		c.seedRun = runOfPending(sess, st.Pending)
 	}
 	if k.questionEvents {
 		if cfg := a.Config(); cfg.ToolElicitor == nil {
@@ -476,7 +476,12 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 	if c.agent.State().Running {
 		return agentturn.ErrRunning
 	}
-	s, err := rec.Store().Open(ctx, rec.SessionID())
+	// held is the session the store appends to. A rebase can append (a
+	// run it closes, an input it writes again), and an append the store
+	// reports with Reopen replaces the session, so it is taken again
+	// after each rebase rather than kept.
+	held := func() (*agentsession.Session, error) { return rec.Store().Open(ctx, rec.SessionID()) }
+	s, err := held()
 	if err != nil {
 		return fail(err)
 	}
@@ -509,7 +514,20 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 			// back to.
 			c.kit.RevokeSkillGrants(ctx)
 		}
-		if rerr := rec.Rebase(s, prevLeaf); rerr != nil {
+		// s follows the store's session wherever it can be opened, so
+		// the grants below read the path the head went back to.
+		reheld := func() error {
+			cur, err := held()
+			if err == nil {
+				s = cur
+			}
+			return err
+		}
+		if rerr := reheld(); rerr != nil {
+			errs = append(errs, rerr)
+		} else if rerr := rec.Rebase(s, prevLeaf); rerr != nil {
+			errs = append(errs, rerr)
+		} else if rerr := reheld(); rerr != nil {
 			errs = append(errs, rerr)
 		} else if mark, rerr := s.MarkLeaf(); rerr != nil {
 			errs = append(errs, rerr)
@@ -540,6 +558,9 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 		return fail(err)
 	}
 	moved = true
+	if s, err = held(); err != nil {
+		return fail(err)
+	}
 	items, models, err := session.TranscriptModels(s)
 	if err != nil {
 		return fail(err)

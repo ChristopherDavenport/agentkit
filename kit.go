@@ -99,10 +99,12 @@ type Kit struct {
 	omitted        []Omission
 	origins        []ToolOrigin
 
-	engine  *agentpolicy.Engine
-	grants  *skillGrants
-	rec     *session.Recorder
-	sess    *agentsession.Session
+	engine *agentpolicy.Engine
+	grants *skillGrants
+	rec    *session.Recorder
+	// sess is the session New opened, or the one the store replaced it
+	// with ([session.WithReopened]).
+	sess    atomic.Pointer[agentsession.Session]
 	seed    agentturn.Transcript
 	seedOps []agentturn.Option
 	// failedFold is session.CompactOptions of the session New opened:
@@ -370,9 +372,9 @@ func New(ctx context.Context, opts ...Option) (*Kit, error) {
 	if err := k.build(ctx, &s); err != nil {
 		return fail(err)
 	}
-	if k.grants != nil && k.sess != nil {
+	if sess := k.sess.Load(); k.grants != nil && sess != nil {
 		k.grants.gmu.Lock()
-		k.grants.regrant(agentpolicy.ContextWithGrantScope(ctx, k.resumeScope(ctx, k.rec, "")), k.sess, k.grants.scoped)
+		k.grants.regrant(agentpolicy.ContextWithGrantScope(ctx, k.resumeScope(ctx, k.rec, "")), sess, k.grants.scoped)
 		k.grants.gmu.Unlock()
 	}
 	return k, nil
@@ -753,7 +755,7 @@ func (k *Kit) openSession(ctx context.Context, s *settings) error {
 	)
 	// The kit's parts first, so a WithInstructionsParts the caller
 	// passed replaces them.
-	opts := append([]session.Option{session.WithInstructionsParts(k.PartsFor)}, s.sessionOpts...)
+	opts := append([]session.Option{session.WithInstructionsParts(k.PartsFor), session.WithReopened(k.sess.Store)}, s.sessionOpts...)
 	if s.sessionResume {
 		rec, sess, err = session.Resume(ctx, s.sessionStore, s.sessionID, opts...)
 	} else {
@@ -762,7 +764,8 @@ func (k *Kit) openSession(ctx context.Context, s *settings) error {
 	if err != nil {
 		return fmt.Errorf("agentkit: opening the session: %w", err)
 	}
-	k.rec, k.sess, k.ownRec = rec, sess, true
+	k.rec, k.ownRec = rec, true
+	k.sess.Store(sess)
 
 	// The items in force at the leaf, with the ones the filter kept from
 	// the model put back, which model each reasoning item came from, and
@@ -1652,24 +1655,23 @@ func runSessionID(ctx context.Context, rec *session.Recorder) string {
 }
 
 // sessionOf returns the live session sid that rec writes, or nil when
-// its store will not open it. It is the one New opened when that is the
-// session, and otherwise what the recorder's store holds, which is the
-// session the recorder appends to: Open on a session a store holds
+// its store will not open it: what the recorder's store holds, which is
+// the session the recorder appends to. Open on a session a store holds
 // hands back the session it holds, as the recorder's own reopening
-// relies on.
+// relies on, and after an append the store reported with Reopen it is
+// the one the store opened again, which the session New opened no
+// longer is. That one is the answer only for a store that will not
+// open the session.
 func (k *Kit) sessionOf(ctx context.Context, rec *session.Recorder, sid string) *agentsession.Session {
-	if k.sess != nil && rec == k.rec && sid == k.sess.ID() {
-		return k.sess
+	if st := rec.Store(); st != nil {
+		if sess, err := st.Open(context.WithoutCancel(ctx), sid); err == nil {
+			return sess
+		}
 	}
-	st := rec.Store()
-	if st == nil {
-		return nil
+	if sess := k.sess.Load(); sess != nil && rec == k.rec && sid == sess.ID() {
+		return sess
 	}
-	sess, err := st.Open(context.WithoutCancel(ctx), sid)
-	if err != nil {
-		return nil
-	}
-	return sess
+	return nil
 }
 
 // lastWritten is the manifest record any kit in the process last wrote
@@ -2694,8 +2696,13 @@ func (k *Kit) Recorder() *session.Recorder { return k.rec }
 
 // Session is the session [New] started or resumed, or nil, as it is
 // under [WithRecorder]. After a resume [Kit.AgentOptions] seeds an agent
-// with it.
-func (k *Kit) Session() *agentsession.Session { return k.sess }
+// with it. When the store reports an append with Reopen
+// ([agentsession.Result]) the recorder opens the session again, and
+// Session is from then on the one the store opened
+// ([session.WithReopened]), unless the opts of [WithSession] or
+// [WithResumedSession] hold a session.WithReopened of their own, which
+// replaces the kit's.
+func (k *Kit) Session() *agentsession.Session { return k.sess.Load() }
 
 // Transcript is the conversation in force at the session's leaf,
 // [session.Transcript]: its context's items with the ones the filter
