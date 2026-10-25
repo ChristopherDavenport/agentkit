@@ -35,7 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   store's `agentsession.Writer`, following a Reopen reported for one;
   the kit's reads take the session the store holds; and `ContinueFrom`
   takes it again before and after the rebase, before the label, and in
-  its undo, opened past a cancel so a cancelled move is still undone.
+  its undo. A move whose context is cancelled before it starts now
+  moves nothing, and the undo runs past a cancel, so a move cancelled
+  partway is put back in the store as well as in the agent.
 
 ## v0.0.14 - 2026-10-18
 

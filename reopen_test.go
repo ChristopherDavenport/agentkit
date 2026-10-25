@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ChristopherDavenport/agentkit"
+	"github.com/ChristopherDavenport/agentpolicy"
 	"github.com/ChristopherDavenport/agentsession"
+	"github.com/ChristopherDavenport/agentskill"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
 )
@@ -186,6 +190,15 @@ func TestControlContinueFromUndoesOnAReopenedSession(t *testing.T) {
 			if live.Leaf() != prevLeaf {
 				t.Fatalf("the store's leaf is %s after the undo, want %s", live.Leaf(), prevLeaf)
 			}
+			// What a reopen after a crash would find: the leaf the entries
+			// record, not one moved in memory alone.
+			read, err := store.Read(t.Context(), kit.SessionID())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if read.Leaf() != prevLeaf {
+				t.Fatalf("the recorded leaf is %s after the undo, want %s", read.Leaf(), prevLeaf)
+			}
 			if kit.Session() != live {
 				t.Error("Session is not the session the store opened again")
 			}
@@ -267,5 +280,92 @@ func TestControlContinueFromFollowsAReopenOnItsMark(t *testing.T) {
 	}
 	if live := openSession(t, store, kit.SessionID()); kit.Session() != live {
 		t.Error("Session is not the session the store opened again")
+	}
+}
+
+// A head move whose context is cancelled before it starts moves
+// nothing, on the record or in the agent.
+func TestControlContinueFromCancelledBeforeItStartsMovesNothing(t *testing.T) {
+	store := newReopenStore(rewindEnd)
+	kit, ctl, first := reopenedKit(t, store)
+	entries := len(kit.Session().Entries())
+	before := len(ctl.State().Transcript)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := ctl.ContinueFrom(ctx, first); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if n := len(openSession(t, store, kit.SessionID()).Entries()); n != entries || store.reopens != 0 {
+		t.Errorf("a cancelled move wrote %d entries, %d reopens", n-entries, store.reopens)
+	}
+	if n := len(ctl.State().Transcript); n != before {
+		t.Errorf("transcript has %d items, want %d", n, before)
+	}
+}
+
+// The revocation of a skill's grants before a head move appends its
+// verdicts, and when the store reports one with Reopen the move
+// rebases the session the store opened again rather than be refused.
+func TestControlContinueFromRebasesAfterARevocationsReopen(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "digging", "danger")
+	var ran atomic.Int32
+	armed := false
+	store := newReopenStore(func(e agentsession.Entry) bool {
+		c, ok := e.(*agentsession.CustomEntry)
+		if armed && ok && c.NS == agentpolicy.VerdictNS {
+			armed = false
+			return true
+		}
+		return false
+	})
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(&scriptModel{turns: []func(*openresponses.Emitter) error{callTurn(agentskill.ToolName, `{"name":"digging"}`)}}, "test-model"),
+		agentkit.WithTools(counting("danger", &ran)),
+		agentkit.WithSkills(skills),
+		agentkit.WithPolicy(agentpolicy.Policy{Allow: policyRules(t, "skill"), Default: agentpolicy.Ask()}, nil),
+		agentkit.WithSkillGrants(func(sk *agentskill.Skill) agentpolicy.Source {
+			return agentpolicy.Source{Name: "skill:" + sk.Name, Path: sk.Location, Trusted: true}
+		}),
+		agentkit.WithSkillGrantScope(),
+		agentkit.WithSession(store, agentsession.Header{Records: agentsession.AllRecords}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { kit.Close() })
+	agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
+	t.Cleanup(kit.Attach(agent))
+	ctl, err := kit.Control(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctl.Prompt(t.Context(), openresponses.UserText("learn")); err != nil {
+		t.Fatal(err)
+	}
+	var user string
+	for _, e := range kit.Session().Entries() {
+		if it, ok := e.(*agentsession.ItemEntry); ok {
+			if m, ok := it.Item.(*openresponses.Message); ok && m.Role == openresponses.RoleUser {
+				user = e.Base().ID
+				break
+			}
+		}
+	}
+	armed = true
+	if err := ctl.ContinueFrom(t.Context(), user); err != nil {
+		t.Fatalf("continue from the prompt: %v", err)
+	}
+	if store.reopens != 1 {
+		t.Fatalf("reopens = %d, want the revocation's verdict", store.reopens)
+	}
+	live := openSession(t, store, kit.SessionID())
+	if kit.Session() != live {
+		t.Error("Session is not the session the store opened again")
+	}
+	if n := len(ctl.State().Transcript); n != 1 {
+		t.Errorf("transcript has %d items after moving to the prompt, want the prompt alone", n)
+	}
+	if err := live.VerifyRecords(live.Leaf()); err != nil {
+		t.Errorf("verify records: %v", err)
 	}
 }

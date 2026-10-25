@@ -476,6 +476,11 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 	if c.agent.State().Running {
 		return agentturn.ErrRunning
 	}
+	// A move cancelled before it starts moves nothing: past here the
+	// undo runs past a cancel.
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
 	// held is the session the store appends to. The grants' verdicts, a
 	// rebase (a run it closes, an input it writes again) and the head's
 	// mark all append, and an append the store reports with Reopen
@@ -488,6 +493,15 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 	s, err := held()
 	if err != nil {
 		return fail(err)
+	}
+	// rehold takes s again, and leaves it as it was when the store
+	// will not open the session, so what reads it after still has one.
+	rehold := func() error {
+		cur, err := held()
+		if err == nil {
+			s = cur
+		}
+		return err
 	}
 	if err := mayRestOn(s, entryID); err != nil {
 		return fail(err)
@@ -511,6 +525,9 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 		if err == nil {
 			return
 		}
+		// The undo is cleanup: it runs past a cancel, as Rebase's own
+		// appends do, so the store is put back as the agent is.
+		ctx := context.WithoutCancel(ctx)
 		var errs []error
 		if moved {
 			// The grants are the new branch's now: end them while the
@@ -520,18 +537,11 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 		}
 		// s follows the store's session wherever it can be opened, so
 		// the grants below read the path the head went back to.
-		reheld := func() error {
-			cur, err := held()
-			if err == nil {
-				s = cur
-			}
-			return err
-		}
-		if rerr := reheld(); rerr != nil {
+		if rerr := rehold(); rerr != nil {
 			errs = append(errs, rerr)
 		} else if rerr := rec.Rebase(s, prevLeaf); rerr != nil {
 			errs = append(errs, rerr)
-		} else if rerr := reheld(); rerr != nil {
+		} else if rerr := rehold(); rerr != nil {
 			errs = append(errs, rerr)
 		} else if rerr := c.markHead(ctx, rec, s); rerr != nil {
 			errs = append(errs, rerr)
@@ -556,14 +566,14 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 		}
 	}()
 
-	if s, err = held(); err != nil {
+	if err := rehold(); err != nil {
 		return fail(err)
 	}
 	if err := rec.Rebase(s, entryID); err != nil {
 		return fail(err)
 	}
 	moved = true
-	if s, err = held(); err != nil {
+	if err := rehold(); err != nil {
 		return fail(err)
 	}
 	items, models, err := session.TranscriptModels(s)
@@ -596,7 +606,7 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 	c.mu.Lock()
 	c.models = models
 	c.mu.Unlock()
-	if s, err = held(); err != nil {
+	if err := rehold(); err != nil {
 		return fail(err)
 	}
 	if err := c.markHead(ctx, rec, s); err != nil {
@@ -630,6 +640,8 @@ func (c *Control) markHead(ctx context.Context, rec *session.Recorder, s *agents
 	if err != nil {
 		return err
 	}
+	// A failed open leaves Session as it was; the store's next Open
+	// tries again.
 	if k := c.kit; r.Reopen && rec == k.rec {
 		if cur := k.sess.Load(); cur != nil && cur.ID() == rec.SessionID() {
 			if fresh, err := st.Open(context.WithoutCancel(ctx), rec.SessionID()); err == nil {

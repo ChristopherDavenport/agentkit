@@ -1278,9 +1278,13 @@ Eleven things, all outside `agentturn.Config`:
   leaf label from `s.MarkLeaf` written through the store's
   `agentsession.Writer`, and `engine.Forget` of the run it leaves,
   undone on failure. Each step that appends can be reported with
-  `Reopen`, so `s` is taken again from `rec.Store().Open` (past a
-  cancel, `context.WithoutCancel`) before the rebase, after it, and
-  before the label, and in the undo before each of its own. A pending call whose hold was recorded
+  `Reopen`, so `s` is taken again from `rec.Store().Open` before the
+  rebase, after it, and before the label, and in the undo before each
+  of its own; a `Reopen` on the label is followed as the recorder's
+  hook follows one, the session kept being the one `Open` returns. A
+  context cancelled before the move is refused before anything moves,
+  and the undo runs under `context.WithoutCancel`, so a move cancelled
+  partway is put back in the store as well as in the agent. A pending call whose hold was recorded
   before agentturn/session v0.0.23 gets its held mark and subject from
   the kit's `agentpolicy:verdict` entry for it. By hand:
 
