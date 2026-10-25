@@ -988,7 +988,7 @@ func WithVerdictObserver(fn func(context.Context, agentpolicy.Verdict)) Option {
 // replaces the kit's. It is opened with [session.WithReopened] too,
 // ahead of opts, so [Kit.Session] is the session the store opened again
 // after an append it reported with Reopen; one in opts replaces the
-// kit's, and Kit.Session then stays the one New opened.
+// kit's, as [Kit.Session] says.
 func WithSession(store agentsession.Store, h agentsession.Header, opts ...session.Option) Option {
 	return func(s *settings) {
 		s.sessionStore, s.sessionHeader, s.sessionSet = store, h, true

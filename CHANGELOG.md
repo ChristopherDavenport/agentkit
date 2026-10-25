@@ -31,8 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   rebased it and was refused; and `Kit.Session` and the memory
   manifest's reads used it. The kit now opens the recorder with
   `session.WithReopened`, so `Kit.Session` is the session the store
-  opened again; the kit's reads take the session the store holds; and
-  `ContinueFrom` takes it again after each rebase.
+  opened again, and writes `ContinueFrom`'s leaf labels through the
+  store's `agentsession.Writer`, following a Reopen reported for one;
+  the kit's reads take the session the store holds; and `ContinueFrom`
+  takes it again before and after the rebase, before the label, and in
+  its undo, opened past a cancel so a cancelled move is still undone.
 
 ## v0.0.14 - 2026-10-18
 

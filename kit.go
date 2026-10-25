@@ -2697,11 +2697,13 @@ func (k *Kit) Recorder() *session.Recorder { return k.rec }
 // Session is the session [New] started or resumed, or nil, as it is
 // under [WithRecorder]. After a resume [Kit.AgentOptions] seeds an agent
 // with it. When the store reports an append with Reopen
-// ([agentsession.Result]) the recorder opens the session again, and
-// Session is from then on the one the store opened
-// ([session.WithReopened]), unless the opts of [WithSession] or
-// [WithResumedSession] hold a session.WithReopened of their own, which
-// replaces the kit's.
+// ([agentsession.Result]) the session it held is replaced, and Session
+// is from then on the one the store opened again: for the recorder's
+// appends through the kit's [session.WithReopened], and for the leaf
+// labels [Control.ContinueFrom] appends. A session.WithReopened in the
+// opts of [WithSession] or [WithResumedSession] replaces the kit's, and
+// Session then follows only the kit's own labels; the store's Open
+// returns the current session either way.
 func (k *Kit) Session() *agentsession.Session { return k.sess.Load() }
 
 // Transcript is the conversation in force at the session's leaf,

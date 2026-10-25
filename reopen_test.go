@@ -3,6 +3,7 @@ package agentkit_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +24,8 @@ import (
 type reopenStore struct {
 	*agentsession.MemoryStore
 	at func(agentsession.Entry) bool
+	// fail, when set, fails the writes it returns an error for.
+	fail func(agentsession.Entry) error
 
 	mu      sync.Mutex
 	cur     map[string]*agentsession.Session
@@ -34,6 +37,10 @@ func newReopenStore(at func(agentsession.Entry) bool) *reopenStore {
 }
 
 func (s *reopenStore) Open(ctx context.Context, id string) (*agentsession.Session, error) {
+	// A cancelled context fails an Open, as cas's does.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if sess, ok := s.cur[id]; ok {
@@ -56,6 +63,11 @@ func (s *reopenStore) Append(ctx context.Context, id string, e agentsession.Entr
 }
 
 func (s *reopenStore) Write(ctx context.Context, id string, e agentsession.Entry) (agentsession.Result, error) {
+	if s.fail != nil {
+		if err := s.fail(e); err != nil {
+			return agentsession.Result{}, err
+		}
+	}
 	live, err := s.Open(ctx, id)
 	if err != nil {
 		return agentsession.Result{}, err
@@ -93,15 +105,9 @@ func rebuilt(s *agentsession.Session) (*agentsession.Session, error) {
 	return agentsession.Read(&buf)
 }
 
-// A head move into a run has the rebase close that run, and when the
-// store reports the end with Reopen, the move reads the branch, and
-// marks the head, on the session the store opened again; Session is
-// that session from then on.
-func TestControlContinueFromFollowsAReopenedSession(t *testing.T) {
-	store := newReopenStore(func(e agentsession.Entry) bool {
-		r, ok := e.(*agentsession.RunEntry)
-		return ok && r.IsEnd() && strings.HasPrefix(r.Ref, "rewind to ")
-	})
+// reopenedKit is a kit recording into store, its agent prompted twice.
+func reopenedKit(t *testing.T, store agentsession.Store) (*agentkit.Kit, *agentkit.Control, string) {
+	t.Helper()
 	kit, err := agentkit.New(t.Context(),
 		agentkit.WithModel(&scriptModel{}, "test-model"),
 		agentkit.WithSession(store, agentsession.Header{Records: agentsession.AllRecords}),
@@ -121,9 +127,8 @@ func TestControlContinueFromFollowsAReopenedSession(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	opened := kit.Session()
 	var first string
-	for _, e := range opened.Entries() {
+	for _, e := range kit.Session().Entries() {
 		if it, ok := e.(*agentsession.ItemEntry); ok {
 			if m, ok := it.Item.(*openresponses.Message); ok && m.Role == openresponses.RoleUser {
 				first = e.Base().ID
@@ -134,6 +139,77 @@ func TestControlContinueFromFollowsAReopenedSession(t *testing.T) {
 	if first == "" {
 		t.Fatal("no prompt on the record")
 	}
+	return kit, ctl, first
+}
+
+// rewindEnd picks the run end a rebase into a run writes.
+func rewindEnd(e agentsession.Entry) bool {
+	r, ok := e.(*agentsession.RunEntry)
+	return ok && r.IsEnd() && strings.HasPrefix(r.Ref, "rewind to ")
+}
+
+// A head move whose rebase the store reported with Reopen, and which
+// fails after it, puts the head back on the session the store opened
+// again, cancelled or not: the undo opens it past the cancel.
+func TestControlContinueFromUndoesOnAReopenedSession(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		name := "failed"
+		if cancelled {
+			name = "cancelled"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			store := newReopenStore(rewindEnd)
+			kit, ctl, first := reopenedKit(t, store)
+			prevLeaf := kit.Session().Leaf()
+			before := len(ctl.State().Transcript)
+			refused := false
+			store.fail = func(e agentsession.Entry) error {
+				if l, ok := e.(*agentsession.LabelEntry); ok && l.Label != nil && *l.Label == agentsession.LeafLabel && !refused {
+					refused = true
+					if cancelled {
+						cancel()
+						return context.Canceled
+					}
+					return errors.New("store away")
+				}
+				return nil
+			}
+			if err := ctl.ContinueFrom(ctx, first); err == nil {
+				t.Fatal("the move succeeded past a refused mark")
+			}
+			if store.reopens != 1 {
+				t.Fatalf("reopens = %d, want the rewind's run end", store.reopens)
+			}
+			live := openSession(t, store, kit.SessionID())
+			if live.Leaf() != prevLeaf {
+				t.Fatalf("the store's leaf is %s after the undo, want %s", live.Leaf(), prevLeaf)
+			}
+			if kit.Session() != live {
+				t.Error("Session is not the session the store opened again")
+			}
+			if n := len(ctl.State().Transcript); n != before {
+				t.Errorf("transcript has %d items after the undo, want %d", n, before)
+			}
+			if _, err := ctl.Prompt(t.Context(), openresponses.UserText("three")); err != nil {
+				t.Fatal(err)
+			}
+			if err := live.VerifyRecords(live.Leaf()); err != nil {
+				t.Errorf("verify records: %v", err)
+			}
+		})
+	}
+}
+
+// A head move into a run has the rebase close that run, and when the
+// store reports the end with Reopen, the move reads the branch, and
+// marks the head, on the session the store opened again; Session is
+// that session from then on.
+func TestControlContinueFromFollowsAReopenedSession(t *testing.T) {
+	store := newReopenStore(rewindEnd)
+	kit, ctl, first := reopenedKit(t, store)
+	opened := kit.Session()
 
 	if err := ctl.ContinueFrom(t.Context(), first); err != nil {
 		t.Fatalf("continue from the first prompt: %v", err)
@@ -171,5 +247,25 @@ func TestControlContinueFromFollowsAReopenedSession(t *testing.T) {
 	}
 	if err := live.VerifyRecords(live.Leaf()); err != nil {
 		t.Errorf("verify records: %v", err)
+	}
+}
+
+// A Reopen the store reports for the leaf label a head move appends
+// is the kit's to follow: Session is the session the store opened
+// again.
+func TestControlContinueFromFollowsAReopenOnItsMark(t *testing.T) {
+	store := newReopenStore(func(e agentsession.Entry) bool {
+		l, ok := e.(*agentsession.LabelEntry)
+		return ok && l.Label != nil && *l.Label == agentsession.LeafLabel
+	})
+	kit, ctl, first := reopenedKit(t, store)
+	if err := ctl.ContinueFrom(t.Context(), first); err != nil {
+		t.Fatalf("continue from the first prompt: %v", err)
+	}
+	if store.reopens != 1 {
+		t.Fatalf("reopens = %d, want the mark's", store.reopens)
+	}
+	if live := openSession(t, store, kit.SessionID()); kit.Session() != live {
+		t.Error("Session is not the session the store opened again")
 	}
 }

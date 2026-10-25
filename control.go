@@ -476,11 +476,15 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 	if c.agent.State().Running {
 		return agentturn.ErrRunning
 	}
-	// held is the session the store appends to. A rebase can append (a
-	// run it closes, an input it writes again), and an append the store
-	// reports with Reopen replaces the session, so it is taken again
-	// after each rebase rather than kept.
-	held := func() (*agentsession.Session, error) { return rec.Store().Open(ctx, rec.SessionID()) }
+	// held is the session the store appends to. The grants' verdicts, a
+	// rebase (a run it closes, an input it writes again) and the head's
+	// mark all append, and an append the store reports with Reopen
+	// replaces the session, so it is taken again after each rather than
+	// kept. It is opened past a cancel, as Rebase opens, so the undo
+	// still puts the head back when the move was cancelled.
+	held := func() (*agentsession.Session, error) {
+		return rec.Store().Open(context.WithoutCancel(ctx), rec.SessionID())
+	}
 	s, err := held()
 	if err != nil {
 		return fail(err)
@@ -529,9 +533,7 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 			errs = append(errs, rerr)
 		} else if rerr := reheld(); rerr != nil {
 			errs = append(errs, rerr)
-		} else if mark, rerr := s.MarkLeaf(); rerr != nil {
-			errs = append(errs, rerr)
-		} else if _, rerr := rec.Store().Append(ctx, rec.SessionID(), mark); rerr != nil {
+		} else if rerr := c.markHead(ctx, rec, s); rerr != nil {
 			errs = append(errs, rerr)
 		}
 		if rerr := c.agent.SetTranscript(prev.Transcript); rerr != nil {
@@ -554,6 +556,9 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 		}
 	}()
 
+	if s, err = held(); err != nil {
+		return fail(err)
+	}
 	if err := rec.Rebase(s, entryID); err != nil {
 		return fail(err)
 	}
@@ -591,17 +596,46 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 	c.mu.Lock()
 	c.models = models
 	c.mu.Unlock()
-	mark, err := s.MarkLeaf()
-	if err != nil {
+	if s, err = held(); err != nil {
 		return fail(err)
 	}
-	if _, err := rec.Store().Append(ctx, rec.SessionID(), mark); err != nil {
+	if err := c.markHead(ctx, rec, s); err != nil {
 		return fail(fmt.Errorf("mark the head: %w", err))
 	}
 	if eng := c.kit.Engine(); eng != nil && len(prev.Pending) > 0 {
 		// The calls the head left behind will not be answered: what
 		// the engine held of their run goes with them.
 		eng.Forget(prev.RunID)
+	}
+	return nil
+}
+
+// markHead appends a leaf label at s's leaf, so the move is on the
+// record. It writes through the store's agentsession.Writer when it has
+// one: a Reopen the store reports for the label replaces the session,
+// and the kit's session is then the one the store opened again, as it
+// is after a recorder's append through the kit's session.WithReopened.
+func (c *Control) markHead(ctx context.Context, rec *session.Recorder, s *agentsession.Session) error {
+	mark, err := s.MarkLeaf()
+	if err != nil {
+		return err
+	}
+	st := rec.Store()
+	w, ok := st.(agentsession.Writer)
+	if !ok {
+		_, err := st.Append(ctx, rec.SessionID(), mark)
+		return err
+	}
+	r, err := w.Write(ctx, rec.SessionID(), mark)
+	if err != nil {
+		return err
+	}
+	if k := c.kit; r.Reopen && rec == k.rec {
+		if cur := k.sess.Load(); cur != nil && cur.ID() == rec.SessionID() {
+			if fresh, err := st.Open(context.WithoutCancel(ctx), rec.SessionID()); err == nil {
+				k.sess.Store(fresh)
+			}
+		}
 	}
 	return nil
 }
