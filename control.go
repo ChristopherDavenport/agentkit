@@ -462,6 +462,12 @@ func (c *Control) Permissions(end *agentturn.RunEnd) []Permission {
 // and the move are not atomic (agentturn#220): a run that starts in
 // between fails the move, and the undo puts it back.
 //
+// A context cancelled before the move is refused before anything
+// moves. The undo is cleanup and runs past a cancel, as the rebase's
+// own appends do: a store that blocks blocks it, and the verdict
+// observer and the skill grant report it calls get a context that is
+// never cancelled.
+//
 // It needs a recorder that writes a store it can open the session
 // from, and returns [agentturn.ErrRunning] while a run goes.
 func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) {
