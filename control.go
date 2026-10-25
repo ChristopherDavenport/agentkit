@@ -108,8 +108,8 @@ func (k *Kit) Control(a *agentturn.Agent) (*Control, error) {
 		return nil, fmt.Errorf("agentkit: control: %w", agentturn.ErrRunning)
 	}
 	c := &Control{kit: k, agent: a}
-	if st := a.State(); st.RunID == "" && len(st.Pending) > 0 && k.sess != nil {
-		c.seedRun = runOfPending(k.sess, st.Pending)
+	if st, sess := a.State(), k.sess.Load(); st.RunID == "" && len(st.Pending) > 0 && sess != nil {
+		c.seedRun = runOfPending(sess, st.Pending)
 	}
 	if k.questionEvents {
 		if cfg := a.Config(); cfg.ToolElicitor == nil {
@@ -462,6 +462,12 @@ func (c *Control) Permissions(end *agentturn.RunEnd) []Permission {
 // and the move are not atomic (agentturn#220): a run that starts in
 // between fails the move, and the undo puts it back.
 //
+// A context cancelled before the move is refused before anything
+// moves. The undo is cleanup and runs past a cancel, as the rebase's
+// own appends do: a store that blocks blocks it, and the verdict
+// observer and the skill grant report it calls get a context that is
+// never cancelled.
+//
 // It needs a recorder that writes a store it can open the session
 // from, and returns [agentturn.ErrRunning] while a run goes.
 func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) {
@@ -476,9 +482,32 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 	if c.agent.State().Running {
 		return agentturn.ErrRunning
 	}
-	s, err := rec.Store().Open(ctx, rec.SessionID())
+	// A move cancelled before it starts moves nothing: past here the
+	// undo runs past a cancel.
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
+	// held is the session the store appends to. The grants' verdicts, a
+	// rebase (a run it closes, an input it writes again) and the head's
+	// mark all append, and an append the store reports with Reopen
+	// replaces the session, so it is taken again after each rather than
+	// kept. It is opened past a cancel, as Rebase opens, so the undo
+	// still puts the head back when the move was cancelled.
+	held := func() (*agentsession.Session, error) {
+		return rec.Store().Open(context.WithoutCancel(ctx), rec.SessionID())
+	}
+	s, err := held()
 	if err != nil {
 		return fail(err)
+	}
+	// rehold takes s again, and leaves it as it was when the store
+	// will not open the session, so what reads it after still has one.
+	rehold := func() error {
+		cur, err := held()
+		if err == nil {
+			s = cur
+		}
+		return err
 	}
 	if err := mayRestOn(s, entryID); err != nil {
 		return fail(err)
@@ -502,6 +531,9 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 		if err == nil {
 			return
 		}
+		// The undo is cleanup: it runs past a cancel, as Rebase's own
+		// appends do, so the store is put back as the agent is.
+		ctx := context.WithoutCancel(ctx)
 		var errs []error
 		if moved {
 			// The grants are the new branch's now: end them while the
@@ -509,11 +541,15 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 			// back to.
 			c.kit.RevokeSkillGrants(ctx)
 		}
-		if rerr := rec.Rebase(s, prevLeaf); rerr != nil {
+		// s follows the store's session wherever it can be opened, so
+		// the grants below read the path the head went back to.
+		if rerr := rehold(); rerr != nil {
 			errs = append(errs, rerr)
-		} else if mark, rerr := s.MarkLeaf(); rerr != nil {
+		} else if rerr := rec.Rebase(s, prevLeaf); rerr != nil {
 			errs = append(errs, rerr)
-		} else if _, rerr := rec.Store().Append(ctx, rec.SessionID(), mark); rerr != nil {
+		} else if rerr := rehold(); rerr != nil {
+			errs = append(errs, rerr)
+		} else if rerr := c.markHead(ctx, rec, s); rerr != nil {
 			errs = append(errs, rerr)
 		}
 		if rerr := c.agent.SetTranscript(prev.Transcript); rerr != nil {
@@ -536,10 +572,16 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 		}
 	}()
 
+	if err := rehold(); err != nil {
+		return fail(err)
+	}
 	if err := rec.Rebase(s, entryID); err != nil {
 		return fail(err)
 	}
 	moved = true
+	if err := rehold(); err != nil {
+		return fail(err)
+	}
 	items, models, err := session.TranscriptModels(s)
 	if err != nil {
 		return fail(err)
@@ -570,17 +612,48 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 	c.mu.Lock()
 	c.models = models
 	c.mu.Unlock()
-	mark, err := s.MarkLeaf()
-	if err != nil {
+	if err := rehold(); err != nil {
 		return fail(err)
 	}
-	if _, err := rec.Store().Append(ctx, rec.SessionID(), mark); err != nil {
+	if err := c.markHead(ctx, rec, s); err != nil {
 		return fail(fmt.Errorf("mark the head: %w", err))
 	}
 	if eng := c.kit.Engine(); eng != nil && len(prev.Pending) > 0 {
 		// The calls the head left behind will not be answered: what
 		// the engine held of their run goes with them.
 		eng.Forget(prev.RunID)
+	}
+	return nil
+}
+
+// markHead appends a leaf label at s's leaf, so the move is on the
+// record. It writes through the store's agentsession.Writer when it has
+// one: a Reopen the store reports for the label replaces the session,
+// and the kit's session is then the one the store opened again, as it
+// is after a recorder's append through the kit's session.WithReopened.
+func (c *Control) markHead(ctx context.Context, rec *session.Recorder, s *agentsession.Session) error {
+	mark, err := s.MarkLeaf()
+	if err != nil {
+		return err
+	}
+	st := rec.Store()
+	w, ok := st.(agentsession.Writer)
+	if !ok {
+		_, err := st.Append(ctx, rec.SessionID(), mark)
+		return err
+	}
+	r, err := w.Write(ctx, rec.SessionID(), mark)
+	if err != nil {
+		return err
+	}
+	// A failed open leaves Session as it was; the store's next Open
+	// tries again.
+	if k := c.kit; r.Reopen && rec == k.rec {
+		if cur := k.sess.Load(); cur != nil && cur.ID() == rec.SessionID() {
+			if fresh, err := st.Open(context.WithoutCancel(ctx), rec.SessionID()); err == nil {
+				k.sess.Store(fresh)
+			}
+		}
 	}
 	return nil
 }

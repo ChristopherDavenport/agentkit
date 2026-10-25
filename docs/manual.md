@@ -1042,7 +1042,7 @@ message after either changes the digest.
 
 ## What the kit does that no line here covers
 
-Ten things, all outside `agentturn.Config`:
+Eleven things, all outside `agentturn.Config`:
 
 - `Kit.Attach(agent)` is `rec.Attach(agent)`, and returns the same
   unsubscribe. It cannot be a config field because the recorder
@@ -1107,6 +1107,15 @@ Ten things, all outside `agentturn.Config`:
   guarded render, which the recorder asks about for a run's first
   config entry. Never the layers' own render: that is text a guard kept
   from the model.
+- `WithSession` and `WithResumedSession` open the recorder with
+  `session.WithReopened` too, keeping the session `Kit.Session()`
+  returns. The hook runs on the goroutine writing the entry, under the
+  recorder's lock, so by hand it stores into something another
+  goroutine can read, such as an `atomic.Pointer`:
+  `session.WithReopened(func(s *agentsession.Session) { sess.Store(s) })`.
+  When the store reports an append with `Reopen`, the session it held
+  is replaced, and anything read afterwards is read from the one it
+  opened again, which the store's `Open` returns.
 - `Kit.AgentOptions()` is `session.AgentOptions(sess, rec.ReadOptions()...)`,
   read in `New`: the transcript at the leaf, `session.Transcript`, with
   the items the filter kept from the model put back; the model each
@@ -1266,8 +1275,16 @@ Ten things, all outside `agentturn.Config`:
   `kit.RevokeSkillGrants`, `rec.Rebase`, `session.TranscriptModels`,
   `session.Pending`, `agent.SetTranscript`, `agent.SetPending`,
   `session.OwedNotes` with `agent.SetNotes`, `kit.RegrantSkills`, a
-  leaf label from `s.MarkLeaf` and `engine.Forget` of the run it
-  leaves, undone on failure. A pending call whose hold was recorded
+  leaf label from `s.MarkLeaf` written through the store's
+  `agentsession.Writer`, and `engine.Forget` of the run it leaves,
+  undone on failure. Each step that appends can be reported with
+  `Reopen`, so `s` is taken again from `rec.Store().Open` before the
+  rebase, after it, and before the label, and in the undo before each
+  of its own; a `Reopen` on the label is followed as the recorder's
+  hook follows one, the session kept being the one `Open` returns. A
+  context cancelled before the move is refused before anything moves,
+  and the undo runs under `context.WithoutCancel`, so a move cancelled
+  partway is put back in the store as well as in the agent. A pending call whose hold was recorded
   before agentturn/session v0.0.23 gets its held mark and subject from
   the kit's `agentpolicy:verdict` entry for it. By hand:
 

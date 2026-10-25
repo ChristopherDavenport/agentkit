@@ -985,7 +985,10 @@ func WithVerdictObserver(fn func(context.Context, agentpolicy.Verdict)) Option {
 // [Kit.PartsFor], ahead of opts, so its config entries carry the
 // instructions as [Kit.Parts] and what the layers left out as
 // instructions_omitted. A session.WithInstructionsParts in opts
-// replaces the kit's.
+// replaces the kit's. It is opened with [session.WithReopened] too,
+// ahead of opts, so [Kit.Session] is the session the store opened again
+// after an append it reported with Reopen; one in opts replaces the
+// kit's, as [Kit.Session] says.
 func WithSession(store agentsession.Store, h agentsession.Header, opts ...session.Option) Option {
 	return func(s *settings) {
 		s.sessionStore, s.sessionHeader, s.sessionSet = store, h, true

@@ -13,6 +13,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `request_hash` of the request the redacted session rebuilds for it,
   so readers verify and replay it with no exception for redacted
   entries. Nothing else moves, and no API of this module changes.
+- Dependencies: requires agentturn and agentturn/session v0.0.32, up
+  from v0.0.30, and agenttool and agenttool/mcpclient v0.0.24, up from
+  v0.0.23, in the root and in `examples/a2a` (with agentturn's
+  `front/a2a` and `tools/a2a` there). The recorder writes through the
+  store's `agentsession.Writer`, and when the store reports an append
+  with `Reopen` it opens the session again (agentturn#268). A batch's
+  calls wait for the calls `agenttool.Executor.Preceding` names, so a
+  `Barrier` tool runs alone in its place.
+
+### Fixed
+
+- After an append the store reported with `Reopen`, the kit kept the
+  session the store replaced. `Control.ContinueFrom` read the branch
+  from it and marked the head from its leaf after a rebase that
+  appended, so the head went back to where the rewind started; its undo
+  rebased it and was refused; and `Kit.Session` and the memory
+  manifest's reads used it. The kit now opens the recorder with
+  `session.WithReopened`, so `Kit.Session` is the session the store
+  opened again, and writes `ContinueFrom`'s leaf labels through the
+  store's `agentsession.Writer`, following a Reopen reported for one;
+  the kit's reads take the session the store holds; and `ContinueFrom`
+  takes it again before and after the rebase, before the label, and in
+  its undo. A move whose context is cancelled before it starts now
+  moves nothing, and the undo runs past a cancel, so a move cancelled
+  partway is put back in the store as well as in the agent.
 
 ## v0.0.14 - 2026-10-18
 
