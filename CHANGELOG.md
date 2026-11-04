@@ -46,9 +46,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The text the model reads when a memory write is refused because the
   memory block was left out is agentmemory's `ErrBlockDropped`, which
   no longer says the instruction budget was the reason (#95).
-- `DefaultOrder` is `product, skills, mcp, memory, agentsmd`: `PartMCP`
-  places the MCP servers' instructions (#112). An order that does not
-  name it puts them last; `WithOrder` need not change.
+- **Breaking**: the kit sends each consumed MCP server's instructions
+  to the model by default, as a part of their own while it offers the
+  server's tools (#112, see Added), so every request of a kit whose
+  servers give instructions changes, text and hash.
+  `WithoutMCPInstructions()` is the way back.
+- **Breaking**: `DefaultOrder` is `product, skills, mcp, memory,
+  agentsmd`: `PartMCP` places the MCP servers' instructions (#112). An
+  order that does not name it puts them first, before the product's own
+  parts, so a third party's text never has the last word; `WithOrder`
+  need not change.
 - Docs: `Kit.ReloadSkills` and the manual say the reload is not
   serialised with the engine's decisions, so a call claimed before it
   and run after it is decided on the old catalogue's claim; a host
@@ -80,7 +87,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Each consumed MCP server's instructions are a part of their own,
   `mcp:#<n> <what>`, the server's label as its id and source, while the
   kit holds the server and offers its tools (#112, agenttool RFC 0001,
-  the MCP `instructions` row). The part is labelled `untrusted`
+  the MCP `instructions` row): a tool of it passes `WithToolFilter`,
+  `WithToolWrap`, the duplicate check and the policy's offer under the
+  conversation's grant scope, so a server whose every tool the policy
+  denies sends none. The part is labelled `untrusted`
   (`Remote.InstructionsReads`) unless `WithTrustedMCPInstructions`
   names the server, and holds the text under a heading naming the
   server and inside a code fence longer than any backtick run in it,
@@ -88,9 +98,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the harness's structure. An added server brings its part from the
   next request, and `RemoveMCP` or `Close` takes it away. The parts are
   charged to the budget after the product's, each whole or omitted, and
-  guarded like the rest. `WithoutMCPInstructions` leaves them out. This
-  changes the instructions of a kit whose servers give instructions:
-  the model was not given them before.
+  guarded like the rest. `WithoutMCPInstructions` leaves them out.
 
 - `WithPart(id, source, render)` and `PartRender` (#111): a part of the
   product's own, rendered at `New` and for every request, with its

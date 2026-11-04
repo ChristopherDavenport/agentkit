@@ -12,7 +12,6 @@ import (
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentskill"
 	"github.com/ChristopherDavenport/agentsmd"
-	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agenttool/mcpclient"
 	"github.com/ChristopherDavenport/openresponses"
 )
@@ -52,7 +51,9 @@ const (
 	// gave instructions, with the server's label ("mcp:#<n> <what>") as
 	// its ID and its source, labelled untrusted unless
 	// [WithTrustedMCPInstructions] names it. [WithOrder] places the
-	// group by this ID, and an order that leaves it out puts it last.
+	// group by this ID, and an order that leaves it out puts it first,
+	// before the product's own parts, so a third party's text never has
+	// the last word.
 	PartMCP = "mcp"
 )
 
@@ -475,12 +476,12 @@ type mcpServer struct {
 }
 
 // mcpGroup is the MCP servers' instructions as parts, [PartMCP], one per
-// server that gave instructions and whose tools filter offers any of,
-// in the order the kit holds them, and the omissions of those the
+// server that gave instructions and that offered reports offers a tool
+// of, in the order the kit holds them, and the omissions of those the
 // budget left out. avail is what the budget leaves them, zero for no
 // budget, negative for none: a part that does not fit what is left is
 // omitted, whole, since the kit does not cut a third party's text.
-func mcpGroup(servers []mcpServer, trusted map[string]bool, filter func(string, agenttool.Tool) bool, avail int64) ([]Part, []Omission) {
+func mcpGroup(servers []mcpServer, trusted map[string]bool, offered map[string]bool, avail int64) ([]Part, []Omission) {
 	var (
 		group   []Part
 		omitted []Omission
@@ -490,14 +491,7 @@ func mcpGroup(servers []mcpServer, trusted map[string]bool, filter func(string, 
 		if strings.TrimSpace(text) == "" {
 			continue
 		}
-		offered := false
-		for _, t := range sv.remote.Tools() {
-			if filter == nil || filter(sv.label, t) {
-				offered = true
-				break
-			}
-		}
-		if !offered {
+		if !offered[sv.label] {
 			continue
 		}
 		part := Part{ID: sv.label, Text: mcpInstructionsText(sv.label, text), Source: sv.label, Trust: &agentsession.Trust{}}

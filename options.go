@@ -835,7 +835,10 @@ func WithMCPResourceTools() Option {
 // nothing, where every other server's read untrusted, since a third
 // party wrote them. Trusting a server's prose is the product's
 // decision, from its own configuration; taking a server's claims, as
-// mcpclient.WithClaims does, does not make it.
+// mcpclient.WithClaims does, does not make it. A label numbers a
+// server by its position among the servers given, so reordering
+// [WithMCP] options, or adding one ahead, can move the trust to another
+// server of the same program: name it after the servers are settled.
 func WithTrustedMCPInstructions(labels ...string) Option {
 	return func(s *settings) {
 		if s.mcpTrusted == nil {

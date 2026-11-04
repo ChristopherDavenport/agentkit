@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/ChristopherDavenport/agentkit"
+	"github.com/ChristopherDavenport/agentpolicy"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
@@ -120,5 +121,53 @@ func TestATrustedServersInstructionsReadNothing(t *testing.T) {
 	part, ok := partByID(kit.Parts(), "mcp:#1 *mcp.InMemoryTransport")
 	if !ok || part.Trust == nil || len(part.Trust.Reads) != 0 {
 		t.Fatalf("the trusted server's part = %+v, %v; want it reading nothing", part, ok)
+	}
+}
+
+// A server whose every tool the policy takes off the offer sends no
+// instructions: the kit gives the model a server's instructions only
+// while it offers the server's tools, by the same offer Kit.Tools lists,
+// the engine's bare denies included. (agenttool RFC 0001 MCP
+// instructions row, #112)
+func TestADeniedServersInstructionsAreNotSent(t *testing.T) {
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithInstructions("Be brief."),
+		agentkit.WithMCPTransport(serveInstructed(t, "lookup", "Use lookup first.")),
+		agentkit.WithPolicy(agentpolicy.Policy{Deny: policyRules(t, "lookup"), Default: agentpolicy.Allow()}, nil),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	if strings.Contains(kit.Config().Instructions, "Use lookup first.") {
+		t.Fatalf("a denied server's instructions are in New's instructions:\n%s", kit.Config().Instructions)
+	}
+	req := openresponses.Request{Instructions: kit.Config().Instructions}
+	if err := kit.Config().BeforeModelCall(t.Context(), &req); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(req.Instructions, "Use lookup first.") {
+		t.Fatalf("a denied server's instructions are sent:\n%s", req.Instructions)
+	}
+}
+
+// An order that does not name mcp puts the servers' instructions first,
+// before the product's own parts, so every part after them has the last
+// word over a third party's text; last would give it the last word.
+func TestAnOrderThatOmitsMCPPutsTheServersFirst(t *testing.T) {
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithInstructions("Be brief."),
+		agentkit.WithMCPTransport(serveInstructed(t, "lookup", "Use lookup first.")),
+		agentkit.WithOrder(agentkit.PartProduct),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	parts := kit.Parts()
+	if len(parts) != 2 || !strings.HasPrefix(parts[0].ID, "mcp:") || parts[1].ID != agentkit.PartProduct {
+		t.Fatalf("parts = %+v, want the server's part before the product's", parts)
 	}
 }

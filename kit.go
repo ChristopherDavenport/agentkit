@@ -206,6 +206,7 @@ type Kit struct {
 	mcpParts   bool
 	mcpTrusted map[string]bool
 	toolFilter func(string, agenttool.Tool) bool
+	toolWrap   func(string, agenttool.Tool) agenttool.Tool
 	// firstOmitted is the memory omissions of New's render, which go
 	// with first.
 	firstOmitted []Omission
@@ -543,7 +544,7 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 		configured[pp.id] = true
 	}
 	k.partOmitted, k.firstPartOmitted = partOm, partOm
-	k.mcpParts, k.mcpTrusted, k.toolFilter = !s.mcpNoInstructions, s.mcpTrusted, s.toolFilter
+	k.mcpParts, k.mcpTrusted, k.toolFilter, k.toolWrap = !s.mcpNoInstructions, s.mcpTrusted, s.toolFilter, s.toolWrap
 
 	order := s.order
 	if order == nil {
@@ -554,8 +555,9 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 	}
 	if !slices.Contains(order, PartMCP) {
 		// The servers' instructions have a place whatever order the
-		// product gave: last, the group it did not name.
-		order = append(slices.Clone(order), PartMCP)
+		// product gave: first, before the product's own parts, so every
+		// part it named has the last word over a third party's text.
+		order = append([]string{PartMCP}, order...)
 	}
 	if s.memStore != nil {
 		configured[PartMemory] = true
@@ -590,7 +592,8 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 	// The servers' instructions after the parts the kit cannot bound,
 	// each whole or omitted, ahead of the two bounded layers.
 	if k.mcpParts {
-		g, om := mcpGroup(k.mcpServers(), k.mcpTrusted, k.toolFilter, share(s.budget, avail))
+		servers := k.mcpServers()
+		g, om := mcpGroup(servers, k.mcpTrusted, k.offeredServers(ctx, servers), share(s.budget, avail))
 		parts[PartMCP] = g
 		k.mcpOmitted, k.firstMCPOmitted = om, om
 		if s.budget > 0 {
@@ -1562,7 +1565,8 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 		// added server's join, a removed or closed one's leave.
 		if k.mcpParts {
 			var g []Part
-			g, mcpOm = mcpGroup(k.mcpServers(), k.mcpTrusted, k.toolFilter, mcpShare(s.budget, base))
+			servers := k.mcpServers()
+			g, mcpOm = mcpGroup(servers, k.mcpTrusted, k.offeredServers(ctx, servers), mcpShare(s.budget, base))
 			base = withGroup(base, PartMCP, g, k.order)
 		}
 		if render {
@@ -2434,6 +2438,57 @@ func mcpShare(budget int64, base []Part) int64 {
 		}
 	}
 	return share(budget, budget-other)
+}
+
+// offeredServers reports, by label, the servers whose tools the
+// conversation on ctx is offered any of: through WithToolFilter and
+// WithToolWrap, the duplicate check once the tool set is built, and the
+// engine's offer filter under the conversation's grant scope, the pass
+// Kit.Tools and the ToolProvider make, resource tools included under
+// WithMCPResourceTools.
+func (k *Kit) offeredServers(ctx context.Context, servers []mcpServer) map[string]bool {
+	var (
+		tools   []agenttool.Tool
+		origins []ToolOrigin
+	)
+	if k.tools != nil {
+		tools, origins, _ = k.tools.resolveSources(ctx, k.tools.beforeProviders())
+	} else {
+		// At New, before the tool set: each server's tools alone,
+		// through the product's filter and wrapper.
+		for _, sv := range servers {
+			list := sv.remote.Tools()
+			if k.mcpResources {
+				list = slices.Concat(list, sv.remote.ResourceTools())
+			}
+			for _, t := range list {
+				if k.toolFilter != nil && !k.toolFilter(sv.label, t) {
+					continue
+				}
+				if k.toolWrap != nil {
+					if t = k.toolWrap(sv.label, t); t == nil {
+						continue
+					}
+				}
+				tools = append(tools, t)
+				origins = append(origins, ToolOrigin{Name: t.Name(), Source: sv.label})
+			}
+		}
+	}
+	kept := map[string]bool{}
+	if k.engine != nil {
+		offered := k.engine.ToolProvider(func(context.Context) []agenttool.Tool { return tools })(agentpolicy.ContextWithGrantScope(ctx, k.GrantScope(ctx)))
+		for _, t := range offered {
+			kept[t.Name()] = true
+		}
+	}
+	out := map[string]bool{}
+	for _, o := range origins {
+		if k.engine == nil || kept[o.Name] {
+			out[o.Source] = true
+		}
+	}
+	return out
 }
 
 // mcpServers is the servers the kit holds, New's and then the added
