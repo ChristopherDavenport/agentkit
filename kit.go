@@ -967,12 +967,14 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 		return tools
 	}
 	if k.engine != nil {
+		// The engine's filter reads the grant scope of the context it is
+		// consulted with, as its decisions do, so the offer is made under
+		// the scope every call is decided under, Kit.GrantScope, with
+		// skill grants or without: a bare deny a front activates under it
+		// takes the tool off the offer as it blocks the call.
 		offered := k.engine.ToolProvider(provider)
-		provider = offered
-		if k.grants != nil {
-			// The engine's filter reads the grant scope of the context it
-			// is consulted with, as its decisions do.
-			provider = func(ctx context.Context) []agenttool.Tool { return offered(k.grants.scopedCtx(ctx)) }
+		provider = func(ctx context.Context) []agenttool.Tool {
+			return offered(agentpolicy.ContextWithGrantScope(ctx, k.GrantScope(ctx)))
 		}
 	}
 	k.cfg.ToolProvider = provider

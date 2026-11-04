@@ -1,6 +1,7 @@
 package agentkit_test
 
 import (
+	"slices"
 	"sync/atomic"
 	"testing"
 
@@ -57,5 +58,33 @@ func TestASetGrantedUnderTheKitsScopeDecidesWithoutSkills(t *testing.T) {
 	}
 	if end.Reason == agentturn.ReasonInputRequired || ran.Load() != 2 {
 		t.Fatalf("second call: reason %q, bash ran %d times; want it allowed by the session's grant", end.Reason, ran.Load())
+	}
+}
+
+// The offer reads the sets a decision under the same scope reads, with
+// skill grants or without: a front's "never, for this session", a bare
+// deny activated under Kit.GrantScope, takes the tool off what the
+// conversation is offered, as it blocks the call. Without skills the
+// offer was filtered unscoped, so the model kept being offered a tool
+// every call of which was blocked. (agentpolicy RFC 0001 Grant sets, #94)
+func TestASetDeniedUnderTheKitsScopeLeavesTheOfferWithoutSkills(t *testing.T) {
+	var ran atomic.Int32
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(&scriptModel{}, "m"),
+		agentkit.WithTools(counting("bash", &ran), counting("read", &ran)),
+		agentkit.WithPolicy(agentpolicy.Policy{Default: agentpolicy.Allow()}, nil),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	ctx := agentpolicy.ContextWithGrantScope(t.Context(), kit.GrantScope(t.Context()))
+	kit.Engine().GrantSet(ctx, agentpolicy.RuleSet{
+		Source: agentpolicy.Source{Name: "session", Trusted: true},
+		Deny:   policyRules(t, "bash"),
+	})
+	offered := toolNames(kit.Config().ResolveTools(t.Context()))
+	if slices.Contains(offered, "bash") || !slices.Contains(offered, "read") {
+		t.Fatalf("offered %v; want bash off the offer under the session's deny, read still offered", offered)
 	}
 }

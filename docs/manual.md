@@ -812,11 +812,12 @@ refuseEndedGrant := func(ctx context.Context, info agentturn.ToolCallInfo) (*age
 cfg.BeforeToolCall = agentturn.ChainBeforeToolCall(keepSaveBase, decide)
 ```
 
-Without skill grants `decide` is `engine.BeforeToolCall()` itself: the
-scope is put on the context only because the kit makes grants under it,
-and the kit's `ToolProvider` is wrapped the same way, the context given
-to `engine.ToolProvider` carrying the scope, since the engine's offer
-filter reads a bare deny of a scoped set from it. A product that calls
+With skill grants or without, `decide` runs the engine under the
+conversation's scope, and the kit's `ToolProvider` is wrapped the same
+way, the context given to `engine.ToolProvider` carrying
+`kit.GrantScope(ctx)`, since the engine's offer filter reads a bare
+deny of a scoped set from it: a front's "never, for this session"
+takes the tool off the offer as it blocks the call. A product that calls
 the engine on a conversation's behalf puts the scope on the context it
 calls with, `agentpolicy.ContextWithGrantScope(ctx, kit.GrantScope(ctx))`:
 `engine.Answers` for a `Resume`, `engine.GrantsFor` to show the grants in

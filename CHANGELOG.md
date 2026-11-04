@@ -94,6 +94,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `WithSkillGrants`, so in a kit without skills a set a front activated
   under `Kit.GrantScope`, a person's "for this session", was granted
   and never decided a call, and the person was asked again each time.
+  The offer is filtered under the same scope, so a bare deny a front
+  activates under it takes the tool off the offer as well as blocking
+  its calls.
 - The skill tool's facts claim follows `ReloadSkills` (#96). The tool
   `New` offered ran the catalogue in force but answered its facts from
   the tool of the catalogue `New` discovered, so under
