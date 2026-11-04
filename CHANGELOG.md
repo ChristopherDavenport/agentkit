@@ -32,6 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   terminating result; agentmemory labels every part's trust and adds
   `memory_insert`. `openresponses.ReasoningConfig` holds a map, so it
   can no longer be compared with `==`.
+- A child agent, one `WithChildAgent` runs or one `Kit.StartChild`
+  starts, decides under a grant scope of its own whenever the kit has
+  an engine, not only under `WithSkillGrants` (#109). Since #94 the
+  engine decides every call under the conversation's scope, so without
+  skills a child decided under it, and a person's "allow for this
+  session" on the conversation let a child agent or a sleep-time pass
+  run the tool unasked. A host that wants a child to share the
+  conversation's grants puts the conversation's scope on the child's
+  run context itself.
 - **Breaking**: `PartMemoryUsage`, the usage paragraph's part, is
   `memory-usage`, where it was `memory:usage`. agentmemory reserves the
   part IDs `memory`, `memory/…` and `memory:…` to the parts its renderer

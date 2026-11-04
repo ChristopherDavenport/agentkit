@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ChristopherDavenport/agentkit"
 	"github.com/ChristopherDavenport/agentmemory"
+	"github.com/ChristopherDavenport/agentpolicy"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentsession/export"
 	"github.com/ChristopherDavenport/agentturn"
@@ -118,5 +120,41 @@ func TestAHostStartedPassIsALinkedSubsession(t *testing.T) {
 	}
 	if inserts != 2 {
 		t.Fatalf("the pass's session holds %d inserts, want both passes'", inserts)
+	}
+}
+
+// A pass the host starts decides under a grant scope of its own, with
+// skill grants or without: the person's "allow for this session" on the
+// foreground conversation does not let a sleep-time pass run the tool
+// unasked. (#109 review C1)
+func TestAHostStartedPassDoesNotTakeTheConversationsGrant(t *testing.T) {
+	var ran atomic.Int32
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(&scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("bash", `{}`)}}, "m"),
+		agentkit.WithTools(counting("bash", &ran)),
+		agentkit.WithPolicy(agentpolicy.Policy{Default: agentpolicy.Ask()}, nil),
+		agentkit.WithSession(agentsession.NewMemoryStore(), agentsession.Header{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	conversation := agentpolicy.ContextWithGrantScope(t.Context(), kit.GrantScope(t.Context()))
+	kit.Engine().GrantSet(conversation, agentpolicy.RuleSet{
+		Source: agentpolicy.Source{Name: "session", Trusted: true},
+		Allow:  policyRules(t, "bash"),
+	})
+	ctx, err := kit.StartChild(t.Context(), agentsession.NewSpawnID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := agentturn.New(kit.Config())
+	defer kit.AttachChild(child)()
+	end, err := child.Prompt(ctx, openresponses.UserText("consolidate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ran.Load() != 0 || end.Reason != agentturn.ReasonInputRequired {
+		t.Fatalf("the pass ran bash %d times, ended %q; want it asked under its own scope", ran.Load(), end.Reason)
 	}
 }

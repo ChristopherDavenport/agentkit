@@ -186,6 +186,16 @@ and grant scope the run context below adds, with the spawn ID standing
 for the call ID; `Kit.AttachChild(agent)` is the observer below as a
 subscription, `agent.Subscribe(func(ctx, ev) error { recorderFor(ctx).Observe(ctx, ev); return nil })`.
 
+A sleep-time pass is built from a kit configured for the pass, its own
+model, tools and policy, `WithRecorder(rec)` with the conversation's
+recorder: the pass's agent runs that kit's config, so its memory writes
+are decided by that kit's engine, under the pass's own grant scope, and
+refused when its own render dropped the block. A pass that should see
+what it did before is seeded from the child session,
+`session.AgentOptions(childSession, rec.ReadOptions()...)`, the session
+`session.SessionIDFromContext` of the context `ContinueChild` returns
+names; one seeded with nothing starts each pass afresh.
+
 ## `ToolProvider`
 
 ```go
@@ -208,10 +218,11 @@ tools = append(tools, childagent.New(childCfg,
 				}
 			}
 		}
-		// Under WithSkillGrants only: the child's own grant scope, under its
-		// conversation's, which the child's skill reads grant under, and a
-		// record of whose child it is, so the conversation's next message
-		// ends its grants: they are bound to the parent's user-message mark.
+		// Whenever there is an engine: the child's own grant scope, under
+		// its conversation's, so a set granted to the conversation does not
+		// decide the child's calls. Under WithSkillGrants also a record of
+		// whose child it is, so the conversation's next message ends its
+		// grants: they are bound to the parent's user-message mark.
 		return agentpolicy.ContextWithGrantScope(ctx, parent+"/"+child)
 	})))
 // The catalogue's tool as it stands: ReloadSkills puts another

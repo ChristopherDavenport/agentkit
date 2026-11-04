@@ -230,7 +230,13 @@ is recorded as a subsession of the conversation it serves:
 gives the context to prompt the child's agent with, `kit.AttachChild`
 records its runs, and `kit.ContinueChild` continues it after a
 restart; the foreground session's export and `DelegatedWork` then
-count its work.
+count its work. Build the pass from a kit of its own, configured for
+the pass and `WithRecorder` the conversation's recorder, so its policy
+decides the pass's memory writes; the pass decides under a grant scope
+of its own, so what the person allowed the conversation does not carry
+over. Seed its agent from the child session,
+`session.AgentOptions(child, rec.ReadOptions()...)`, when a pass should
+see the last one's work.
 
 `kit.MCPServers()` and `kit.MCP(label)` hand back the MCP servers the
 kit dialed, by the label `kit.Tools()` names them with, for what a

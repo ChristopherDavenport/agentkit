@@ -1397,16 +1397,18 @@ func (k *Kit) observeChild(ctx context.Context, ev agentturn.Event) {
 // puts the child's session ID on the context under the session
 // package's key, and, with memory configured, the same ID under
 // agentmemory's, since the memory journal reads its own key and neither
-// package imports the other. Under [WithSkillGrants] the child run also
-// has a grant scope of its own, under its conversation's,
+// package imports the other. When the kit has an engine the child run
+// also has a grant scope of its own, under its conversation's,
 // [agentpolicy.ContextWithGrantScope]: the child's session ID, or the
-// call's with a number of the kit's without a recording, so the skills
-// its parent read do not grant what the child's calls may do and the
-// ones the child reads are not the parent's. The context says whose
-// child it is, and which user message its grants are bound to, the
-// parent's, so the conversation's next message ends them. Without skill
-// grants the kit puts no scope on the context, and a scope the product
-// put there, with grants of its own under it, is the child's.
+// call's with a number of the kit's without a recording, so a set
+// granted under the conversation's scope, a person's "allow for this
+// session" or a skill the parent read, does not decide the child's
+// calls, and what the child is granted is not the parent's. Under
+// [WithSkillGrants] the context also says whose child it is, and which
+// user message its grants are bound to, the parent's, so the
+// conversation's next message ends them. A host that wants a child to
+// share the conversation's grants puts the conversation's scope on the
+// context the child's run is prompted with, over the kit's.
 func (k *Kit) childContext(ctx context.Context, callID string) context.Context {
 	parentCtx := ctx
 	rec := k.recorderFor(ctx)
@@ -1430,7 +1432,7 @@ func (k *Kit) childRun(parentCtx, ctx context.Context, rec *session.Recorder, na
 			ctx = agentmemory.WithSession(ctx, id)
 		}
 	}
-	if k.grants == nil {
+	if k.engine == nil {
 		return ctx
 	}
 	if child == "" {
@@ -1441,10 +1443,13 @@ func (k *Kit) childRun(parentCtx, ctx context.Context, rec *session.Recorder, na
 	}
 	parent := k.GrantScope(parentCtx)
 	scope := parent + childSep + child
+	ctx = agentpolicy.ContextWithGrantScope(ctx, scope)
+	if k.grants == nil {
+		return ctx
+	}
 	k.grants.mu.Lock()
 	k.grants.link(parent, scope)
 	k.grants.mu.Unlock()
-	ctx = agentpolicy.ContextWithGrantScope(ctx, scope)
 	if m, ok := k.markFor(parentCtx); ok {
 		ctx = context.WithValue(ctx, parentMarkKey{k}, m)
 	}
