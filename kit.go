@@ -866,20 +866,8 @@ func (k *Kit) openSession(ctx context.Context, s *settings) error {
 	// where the failures are reported, so they are read here and not in
 	// the accessors. The recorder's read options read a fork's origin, so
 	// a call the fork's prefix holds is read with its dispatch there.
-	if k.seed, err = session.Transcript(sess, rec.ReadOptions()...); err != nil {
-		return fmt.Errorf("agentkit: reading the session's context: %w", err)
-	}
-	if k.seedOps, err = session.AgentOptions(sess, rec.ReadOptions()...); err != nil {
-		return fmt.Errorf("agentkit: reading the session's pending calls: %w", err)
-	}
-	// A hold recorded before agentturn/session v0.0.23 carries neither
-	// held nor subject; the kit's verdict entry beside it does.
-	pending, err := session.Pending(sess, rec.ReadOptions()...)
-	if err != nil {
-		return fmt.Errorf("agentkit: reading the session's pending calls: %w", err)
-	}
-	if held, ok := holdsFromVerdicts(sess, pending); ok {
-		k.seedOps = append(k.seedOps, agentturn.WithPending(held))
+	if k.seed, k.seedOps, err = seedOf(ctx, sess, rec); err != nil {
+		return err
 	}
 	if s.compactSet {
 		if k.failedFold, err = session.CompactOptions(sess); err != nil {
@@ -3180,7 +3168,9 @@ func (k *Kit) Session() *agentsession.Session { return k.sess.Load() }
 // session [WithSession] started, the prefix up to the header's Base for
 // a fork WithSession started, and empty for no session at all or under
 // [WithRecorder]. [Kit.AgentOptions] carries it with the calls pending
-// at the leaf, which an agent resuming a session needs as well.
+// at the leaf, which an agent resuming a session needs as well. Like
+// AgentOptions it is New's reading; [Kit.ReadAgentOptions] reads the
+// session as it stands.
 func (k *Kit) Transcript() agentturn.Transcript {
 	return append(agentturn.Transcript(nil), k.seed...)
 }
@@ -3198,8 +3188,60 @@ func (k *Kit) Transcript() agentturn.Transcript {
 // caller need not branch:
 //
 //	agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
+//
+// They are read once, at New, for the first agent. An agent built
+// later, after the conversation moved on, is seeded with
+// [Kit.ReadAgentOptions], or moved with [Control.ContinueFrom]: one
+// seeded with these would hold what the session left out since New, an
+// item a quarantine took out of the conversation among them, and send it
+// to the model again.
 func (k *Kit) AgentOptions() []agentturn.Option {
 	return append([]agentturn.Option(nil), k.seedOps...)
+}
+
+// ReadAgentOptions are [Kit.AgentOptions] read again, from the session
+// as the store holds it now, [Kit.Session]: what an agent built after
+// the conversation moved on is seeded with. AgentOptions is New's
+// reading, for the first agent; a later agent seeded from it would hold
+// what the session left out since, a quarantine among them, which the
+// record's omit holds and New's reading does not, and would send it to
+// the model again. It is nil for no session and under [WithRecorder],
+// as AgentOptions is, and returns the error of a read that failed.
+func (k *Kit) ReadAgentOptions(ctx context.Context) ([]agentturn.Option, error) {
+	if k.rec == nil || !k.ownRec {
+		return nil, nil
+	}
+	sess := k.Session()
+	if sess == nil {
+		return nil, nil
+	}
+	_, opts, err := seedOf(ctx, sess, k.rec)
+	return opts, err
+}
+
+// seedOf reads what an agent continuing sess is seeded with, as rec
+// reads it: the transcript at the leaf and the options that carry it,
+// with the reasoning models and the calls pending there.
+func seedOf(ctx context.Context, sess *agentsession.Session, rec *session.Recorder) (agentturn.Transcript, []agentturn.Option, error) {
+	read := append(rec.ReadOptions(), session.WithContext(ctx))
+	seed, err := session.Transcript(sess, read...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("agentkit: reading the session's context: %w", err)
+	}
+	opts, err := session.AgentOptions(sess, read...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("agentkit: reading the session's pending calls: %w", err)
+	}
+	// A hold recorded before agentturn/session v0.0.23 carries neither
+	// held nor subject; the kit's verdict entry beside it does.
+	pending, err := session.Pending(sess, read...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("agentkit: reading the session's pending calls: %w", err)
+	}
+	if held, ok := holdsFromVerdicts(sess, pending); ok {
+		opts = append(opts, agentturn.WithPending(held))
+	}
+	return seed, opts, nil
 }
 
 // SessionID is the ID of the session, or "" when there is none.

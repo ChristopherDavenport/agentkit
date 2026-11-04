@@ -1219,7 +1219,11 @@ Eleven things, all outside `agentturn.Config`:
   is replaced, and anything read afterwards is read from the one it
   opened again, which the store's `Open` returns.
 - `Kit.AgentOptions()` is `session.AgentOptions(sess, rec.ReadOptions()...)`,
-  read in `New`: the transcript at the leaf, `session.Transcript`, with
+  read once, in `New`, for the first agent; `Kit.ReadAgentOptions(ctx)`
+  is the same read again of the session as it stands, which an agent
+  built after the conversation moved on is seeded with, since a
+  quarantine recorded since leaves the item out there and not in New's
+  reading: the transcript at the leaf, `session.Transcript`, with
   the items the filter kept from the model put back; the model each
   reasoning item came from, `agentturn.WithReasoningModels`; and the
   calls pending there, read through a fork's origin, for

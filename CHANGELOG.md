@@ -91,6 +91,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Kit.ReadAgentOptions(ctx)`: the options that seed an agent with the
+  session as the store holds it now. `Kit.AgentOptions` and
+  `Kit.Transcript` are New's reading, for the first agent, and say so; a
+  second agent seeded from them after a quarantine (agentturn v0.0.36's
+  `QuarantineAdded`, or a guard's in a run) held the quarantined item
+  and sent it to the model again, though the record's `omit` leaves it
+  out.
+
 - `Kit.StartChild(ctx, spawnID)`, `Kit.ContinueChild(ctx, spawnID)`,
   `Kit.AttachChild(agent)` and `ErrNoChildRecorder` (#109): a child
   the host starts itself, such as a sleep-time memory pass, is recorded

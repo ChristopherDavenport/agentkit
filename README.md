@@ -199,6 +199,12 @@ failed on the session's path:
 agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
 ```
 
+`kit.AgentOptions()` is read once, at `New`, for that first agent. An
+agent built later in the process, after the conversation moved on, is
+seeded with `kit.ReadAgentOptions(ctx)`, the session as it stands: an
+item a quarantine took out since is left out there, and New's reading
+still holds it.
+
 A front that asks a person about a held call says so when it answers,
 or the record cannot tell the approval from one a script gave. The
 release is in two phases: `Release` changes nothing, and `Resumed`,
