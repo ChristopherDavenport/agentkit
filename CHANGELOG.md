@@ -22,7 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   terminating result; agentmemory labels every part's trust and adds
   `memory_insert`. `openresponses.ReasoningConfig` holds a map, so it
   can no longer be compared with `==`.
-
 - **Breaking**: `PartMemoryUsage`, the usage paragraph's part, is
   `memory-usage`, where it was `memory:usage`. agentmemory reserves the
   part IDs `memory`, `memory/…` and `memory:…` to the parts its renderer
@@ -36,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   kit's elicitor about a nested call (`agenttool.Invoke`) the policy
   defers, and never an elicitor the invoking tool installed, as of
   agentturn v0.0.35.
+- Docs: the README and `docs/manual.md`'s `Model` row say that a model
+  that is an `openresponses.ClientAdapter` over a provider's own API is
+  built with `openresponses.WithProviderSlugs()`. The kit builds no
+  adapter, so the product does; without it an item under another
+  provider's slug reaches the provider, which refuses the request.
 
 ### Fixed
 

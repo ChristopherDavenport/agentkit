@@ -34,6 +34,17 @@ agent := agentturn.New(kit.Config())
 defer kit.Attach(agent)()
 ```
 
+The kit builds no model: `WithModel` takes the product's. A model that
+is an `openresponses.ClientAdapter` over a provider's own API, such as
+OpenAI's or OpenRouter's, is built with `openresponses.WithProviderSlugs()`,
+`client.AsAdapter(openresponses.WithProviderSlugs())`, so it leaves out
+an item another provider stamped, such as Claude's
+`anthropic.redacted_thinking` after a model switch or a handoff, which
+the loop keeps and the provider refuses (openresponses v0.0.18,
+extensions §1.6). A proxy in front of an Open Responses server over the
+Claude adapter names the slugs its upstream takes,
+`WithProviderSlugs("anthropic")`.
+
 `New` does the work that can fail — discovery, validation, opening the
 session, dialing MCP — and reports it once. The skill directories are
 optional because most repositories and most users have none;

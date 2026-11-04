@@ -31,7 +31,7 @@ and no fold is recorded.
 | field | the kit's option | what a product writes instead |
 |---|---|---|
 | `Name`, `Description` | `WithName` | assign them |
-| `Model`, `ModelName` | `WithModel` | assign them |
+| `Model`, `ModelName` | `WithModel` | assign them; the kit builds no adapter, so a model that is an `openresponses.ClientAdapter` over a provider's own API is the product's `client.AsAdapter(openresponses.WithProviderSlugs())`, which leaves out an item under another provider's slug that the loop keeps (`Config.Model`'s doc, agentturn v0.0.35) |
 | `Request`, `RequestExtra`, `Reasoning`, `Text`, `MaxTurns`, `Filter` | `WithRequest`, `WithRequestExtra`, `WithReasoning`, `WithText`, `WithMaxTurns`, `WithFilter` | assign them; the kit copies them through and owns no member of any |
 | `Retry`, `ToolExecution`, `MaxParallelTools` | `WithRetry`, `WithToolExecution`, `WithMaxParallelTools` | assign them; the kit contests none of them and reads none of them |
 | `Instructions` | `WithInstructions`, `WithSkills`, `WithMemory`, `WithAgentsMD` | `strings.Join` of the four blocks, in the order of [ordering.md](ordering.md) — see below |
