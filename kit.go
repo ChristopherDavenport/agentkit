@@ -558,8 +558,12 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 		// product gave: right after the product's own prompt, as in
 		// DefaultOrder the product's frame comes first and the parts
 		// after them have the last word over a third party's text; first
-		// when the order has no product prompt.
+		// when the order has no product prompt, or ends on it, which
+		// gives the product's prompt the last word.
 		at := slices.Index(order, PartProduct) + 1
+		if at == len(order) {
+			at = 0
+		}
 		order = slices.Insert(slices.Clone(order), at, PartMCP)
 	}
 	if s.memStore != nil {

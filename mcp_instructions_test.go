@@ -180,3 +180,29 @@ func TestAnOrderThatOmitsMCPPutsTheServersAfterTheProduct(t *testing.T) {
 		t.Fatalf("parts = %v, want the server's part right after the product's", ids)
 	}
 }
+
+// An order that puts the product's prompt last gives it the last word,
+// and one that does not name mcp then puts the servers' instructions
+// first, never after that prompt at the end.
+func TestAnOrderThatEndsOnTheProductPutsTheServersFirst(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "AGENTS.md"), "Run the tests.")
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithInstructions("Be brief."),
+		agentkit.WithAgentsMD(root, agentsmd.Options{Root: root}),
+		agentkit.WithMCPTransport(serveInstructed(t, "lookup", "Use lookup first.")),
+		agentkit.WithOrder(agentsmd.PartID, agentkit.PartProduct),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	var ids []string
+	for _, p := range kit.Parts() {
+		ids = append(ids, p.ID)
+	}
+	if len(ids) != 3 || !strings.HasPrefix(ids[0], "mcp:") || ids[2] != agentkit.PartProduct {
+		t.Fatalf("parts = %v, want the server's part first and the product's prompt last", ids)
+	}
+}

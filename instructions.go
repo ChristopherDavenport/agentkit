@@ -52,9 +52,9 @@ const (
 	// its ID and its source, labelled untrusted unless
 	// [WithTrustedMCPInstructions] names it. [WithOrder] places the
 	// group by this ID, and an order that leaves it out puts it right
-	// after [PartProduct], or first without it, so the parts after it
-	// have the last word over a third party's text; an order that puts
-	// the product's prompt last names PartMCP to keep it from the end.
+	// after [PartProduct], or first when the order names no product
+	// prompt or ends on it, so a third party's text never ends the
+	// instructions after the product's last word.
 	PartMCP = "mcp"
 )
 
