@@ -14,8 +14,22 @@ None of them is a default chosen because it was convenient.
 |---|---|---|---|
 | 1 | `product` | the product's own prompt | the frame everything else refines |
 | 2 | `skills` | `agentskill` | a catalogue, not an instruction |
-| 3 | `memory` | `agentmemory` | what the agent knows, before what the repo says |
-| 4 | `agentsmd` | `agentsmd` | the repository has the last word |
+| 3 | `mcp` | each MCP server's label | a server's account of its own tools, written by a third party |
+| 4 | `memory` | `agentmemory` | what the agent knows, before what the repo says |
+| 5 | `agentsmd` | `agentsmd` | the repository has the last word |
+
+A product's own parts, `WithPart`, follow the kit's in the order they
+were added, unless `WithOrder` places them.
+
+**`mcp` is third, after the catalogue and before everything the product
+or the repository says about the work.** Each consumed MCP server's
+instructions are a part of their own while its tools are offered
+(agenttool RFC 0001, the MCP `instructions` row): the server's author
+wrote them, about the server's tools, so they sit with the skill
+catalogue, the other text about what the agent can reach, and early,
+where every later layer overrides them. They are labelled untrusted,
+fenced so nothing in them reads as the harness's own structure, and
+an order that does not name `mcp` puts them last.
 
 ## The argument
 
@@ -91,6 +105,10 @@ order the parts are joined in:
    to do. If the two of them plus the separators already exceed `n`,
    `New` fails and says so, rather than sending a prompt the caller
    asked not to send.
+   A `WithPart` part is charged with them, whole, at each render.
+   **The MCP servers' instructions come next**, each server's whole or
+   omitted and reported, since the kit does not cut a third party's
+   text.
 2. **`agents.md` gets the whole remainder.** It is the repository's
    instruction for this exact tree, the text with the last word, and it
    is bounded in practice by what people are willing to write into

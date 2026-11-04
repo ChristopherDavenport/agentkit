@@ -89,9 +89,13 @@ type settings struct {
 	mcpStderr  io.Writer
 	// mcpResources is WithMCPResourceTools.
 	mcpResources bool
-	conflict     func(Conflict)
-	toolFilter   func(source string, t agenttool.Tool) bool
-	toolWrap     func(source string, t agenttool.Tool) agenttool.Tool
+	// mcpTrusted is WithTrustedMCPInstructions' labels, and
+	// mcpNoInstructions WithoutMCPInstructions.
+	mcpTrusted        map[string]bool
+	mcpNoInstructions bool
+	conflict          func(Conflict)
+	toolFilter        func(source string, t agenttool.Tool) bool
+	toolWrap          func(source string, t agenttool.Tool) agenttool.Tool
 
 	engine      *agentpolicy.Engine
 	policy      agentpolicy.Policy
@@ -794,6 +798,32 @@ func WithMCPTransport(t sdk.Transport, opts ...mcpclient.Option) Option {
 // repeated name.
 func WithMCPResourceTools() Option {
 	return func(s *settings) { s.mcpResources = true }
+}
+
+// WithTrustedMCPInstructions names, by the labels [Kit.Tools] and
+// [Kit.MCPServers] give them ("mcp:#<n> <what>"), the MCP servers whose
+// instructions the product trusts: their parts are recorded reading
+// nothing, where every other server's read untrusted, since a third
+// party wrote them. Trusting a server's prose is the product's
+// decision, from its own configuration; taking a server's claims, as
+// mcpclient.WithClaims does, does not make it.
+func WithTrustedMCPInstructions(labels ...string) Option {
+	return func(s *settings) {
+		if s.mcpTrusted == nil {
+			s.mcpTrusted = map[string]bool{}
+		}
+		for _, l := range labels {
+			s.mcpTrusted[l] = true
+		}
+	}
+}
+
+// WithoutMCPInstructions keeps the MCP servers' instructions out of the
+// instructions: the kit gives the model none, and records no part for
+// them. Without it each server's instructions are a part of their own
+// while its tools are offered; see [PartMCP].
+func WithoutMCPInstructions() Option {
+	return func(s *settings) { s.mcpNoInstructions = true }
 }
 
 // WithMCPStderr sends the stderr of every server [WithMCP] starts to w,

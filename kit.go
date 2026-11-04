@@ -194,8 +194,18 @@ type Kit struct {
 	budget        int64
 	guards        []guard.Guard
 	// partOmitted is the omissions of the last render of the WithPart
-	// parts, and firstPartOmitted those of New's, as for memory below.
+	// parts, and firstPartOmitted those of New's, as for memory below;
+	// mcpOmitted and firstMCPOmitted the MCP servers' instructions the
+	// budget left out.
 	partOmitted, firstPartOmitted []Omission
+	mcpOmitted, firstMCPOmitted   []Omission
+	// mcpParts is true when the servers' instructions are parts, unless
+	// WithoutMCPInstructions; mcpTrusted is WithTrustedMCPInstructions'
+	// labels; toolFilter is WithToolFilter's, which decides whether a
+	// server's tools, and so its instructions, are offered.
+	mcpParts   bool
+	mcpTrusted map[string]bool
+	toolFilter func(string, agenttool.Tool) bool
 	// firstOmitted is the memory omissions of New's render, which go
 	// with first.
 	firstOmitted []Omission
@@ -379,10 +389,12 @@ func New(ctx context.Context, opts ...Option) (*Kit, error) {
 	}
 	k.engine = engine
 
-	if err := k.assemble(ctx, &s); err != nil {
+	// The servers first: their instructions are parts of the
+	// instructions assemble composes.
+	if err := k.dial(ctx, &s); err != nil {
 		return fail(err)
 	}
-	if err := k.dial(ctx, &s); err != nil {
+	if err := k.assemble(ctx, &s); err != nil {
 		return fail(err)
 	}
 	if err := k.openSession(ctx, &s); err != nil {
@@ -531,6 +543,7 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 		configured[pp.id] = true
 	}
 	k.partOmitted, k.firstPartOmitted = partOm, partOm
+	k.mcpParts, k.mcpTrusted, k.toolFilter = !s.mcpNoInstructions, s.mcpTrusted, s.toolFilter
 
 	order := s.order
 	if order == nil {
@@ -538,6 +551,11 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 		for _, pp := range s.parts {
 			order = append(order, pp.id)
 		}
+	}
+	if !slices.Contains(order, PartMCP) {
+		// The servers' instructions have a place whatever order the
+		// product gave: last, the group it did not name.
+		order = append(slices.Clone(order), PartMCP)
 	}
 	if s.memStore != nil {
 		configured[PartMemory] = true
@@ -566,6 +584,19 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 			return fmt.Errorf(
 				"agentkit: the instruction budget of %d bytes is under the %d bytes of the parts the kit cannot bound (the product prompt, the skill catalogue and the WithPart parts) plus %d of separators",
 				s.budget, fixed, seps)
+		}
+	}
+
+	// The servers' instructions after the parts the kit cannot bound,
+	// each whole or omitted, ahead of the two bounded layers.
+	if k.mcpParts {
+		g, om := mcpGroup(k.mcpServers(), k.mcpTrusted, k.toolFilter, share(s.budget, avail))
+		parts[PartMCP] = g
+		k.mcpOmitted, k.firstMCPOmitted = om, om
+		if s.budget > 0 {
+			for _, p := range g {
+				avail -= int64(len(p.Text) + len(Separator))
+			}
 		}
 	}
 
@@ -1306,7 +1337,7 @@ func (k *Kit) buildHooks(s *settings) {
 	// part guarded, then the guards over the whole request, then the
 	// product's own.
 	var before []func(context.Context, *openresponses.Request) error
-	if s.memStore != nil || len(s.parts) > 0 || (len(s.guards) > 0 && len(k.base) > 0) {
+	if s.memStore != nil || len(s.parts) > 0 || (k.mcpParts && k.tools != nil) || (len(s.guards) > 0 && len(k.base) > 0) {
 		before = append(before, k.instructions(s, guards))
 	}
 	if len(s.guards) > 0 {
@@ -1508,6 +1539,7 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 			man     agentmemory.Manifest
 			memOm   []Omission
 			partOm  []Omission
+			mcpOm   []Omission
 			dropped bool
 			render  = s.memStore != nil
 		)
@@ -1520,6 +1552,13 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 			}
 			base = withGroup(base, pp.id, g, k.order)
 			partOm = append(partOm, om...)
+		}
+		// The servers' instructions as the kit holds the servers now: an
+		// added server's join, a removed or closed one's leave.
+		if k.mcpParts {
+			var g []Part
+			g, mcpOm = mcpGroup(k.mcpServers(), k.mcpTrusted, k.toolFilter, mcpShare(s.budget, base))
+			base = withGroup(base, PartMCP, g, k.order)
 		}
 		if render {
 			// The same render, the same bound and the same drop as the
@@ -1551,6 +1590,9 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 		k.base, k.parts = base, sent
 		if len(s.parts) > 0 {
 			k.partOmitted = partOm
+		}
+		if k.mcpParts {
+			k.mcpOmitted = mcpOm
 		}
 		if render {
 			k.manifest, k.memOmitted, k.memDropped = man, memOm, dropped
@@ -2369,6 +2411,41 @@ func newUserMessage(tr agentturn.Transcript) bool {
 // or a WithPart render, so this is the same number every turn otherwise,
 // and nothing when the caller's budget is zero, in which case there is
 // no bound and the layer keeps its own.
+// mcpShare is what is left of the budget for the MCP servers'
+// instructions this turn: the budget less every part but memory's and
+// theirs, and a separator each, so the servers are charged ahead of the
+// memory block, as at New.
+func mcpShare(budget int64, base []Part) int64 {
+	if budget <= 0 {
+		return 0
+	}
+	var other int64
+	for _, p := range base {
+		if g := group(p.ID); g != PartMemory && g != PartMCP {
+			other += int64(len(p.Text)) + int64(len(Separator))
+		}
+	}
+	return share(budget, budget-other)
+}
+
+// mcpServers is the servers the kit holds, New's and then the added
+// ones, and none once it has closed.
+func (k *Kit) mcpServers() []mcpServer {
+	if k.closed.Load() {
+		return nil
+	}
+	k.mcpMu.Lock()
+	defer k.mcpMu.Unlock()
+	out := make([]mcpServer, 0, len(k.remotes)+len(k.added))
+	for i, r := range k.remotes {
+		out = append(out, mcpServer{label: k.remoteLabels[i], remote: r})
+	}
+	for _, a := range k.added {
+		out = append(out, mcpServer{label: a.label, remote: a.remote})
+	}
+	return out
+}
+
 func memoryShare(budget int64, base []Part) int64 {
 	if budget <= 0 {
 		return 0
@@ -2457,7 +2534,7 @@ func (k *Kit) PartsFor(_ context.Context, req openresponses.Request) ([]agentses
 		return nil, nil
 	}
 	k.mu.Lock()
-	parts, memOmitted, partOmitted := k.parts, k.memOmitted, k.partOmitted
+	parts, memOmitted, partOmitted, mcpOmitted := k.parts, k.memOmitted, k.partOmitted, k.mcpOmitted
 	if agentsession.JoinInstructions(parts) != req.Instructions {
 		// The configuration's own instructions, which the recorder
 		// settles at a run's start before any hook has run, are New's
@@ -2467,7 +2544,7 @@ func (k *Kit) PartsFor(_ context.Context, req openresponses.Request) ([]agentses
 			k.mu.Unlock()
 			return nil, nil
 		}
-		memOmitted, partOmitted = k.firstOmitted, k.firstPartOmitted
+		memOmitted, partOmitted, mcpOmitted = k.firstOmitted, k.firstPartOmitted, k.firstMCPOmitted
 	}
 	out := make([]Part, len(parts))
 	copy(out, parts)
@@ -2477,6 +2554,9 @@ func (k *Kit) PartsFor(_ context.Context, req openresponses.Request) ([]agentses
 		omitted = append(omitted, o.OmittedPart())
 	}
 	for _, o := range partOmitted {
+		omitted = append(omitted, o.OmittedPart())
+	}
+	for _, o := range mcpOmitted {
 		omitted = append(omitted, o.OmittedPart())
 	}
 	for _, o := range memOmitted {
@@ -2523,6 +2603,7 @@ func (k *Kit) Omitted() []Omission {
 	out := make([]Omission, 0, len(k.omitted)+len(k.partOmitted)+len(k.memOmitted))
 	out = append(out, k.omitted...)
 	out = append(out, k.partOmitted...)
+	out = append(out, k.mcpOmitted...)
 	return append(out, k.memOmitted...)
 }
 
