@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -1148,7 +1149,7 @@ func groupIDs(parts []agentkit.Part) []string {
 }
 
 func isMemoryPart(id string) bool {
-	return id == agentkit.PartMemory || strings.HasPrefix(id, "memory/") || strings.HasPrefix(id, "memory:")
+	return id == agentkit.PartMemory || id == agentkit.PartMemoryUsage || strings.HasPrefix(id, "memory/") || strings.HasPrefix(id, "memory:")
 }
 
 func toolNames(ts []agenttool.Tool) []string {
@@ -1905,7 +1906,7 @@ func TestTheSummaryRequestsReasoningFollowsTheModelAsked(t *testing.T) {
 				t.Fatal("no summary was asked for")
 			}
 			for _, req := range reqs {
-				if req.Reasoning != tc.want {
+				if !reflect.DeepEqual(req.Reasoning, tc.want) {
 					t.Fatalf("a summary request's reasoning = %+v, want %+v", req.Reasoning, tc.want)
 				}
 			}
@@ -1962,7 +1963,7 @@ func TestAResumedKitBacksOffFromAFoldThatFailed(t *testing.T) {
 // A memory block the budget drops takes the tools that write memory out
 // of the request, and a write the model makes anyway is refused: shown
 // no block and no word on the tools, it saved over entries it was never
-// shown. (#53)
+// shown. (#53) memory_insert is a writer too, agentmemory.WriteTools.
 func TestADroppedMemoryBlockWithholdsTheWrites(t *testing.T) {
 	const prompt = "be brief"
 	store := memStore(t, agentmemory.Entry{Scope: "user", Name: "go-version", Content: "This project pins Go 1.25. " + strings.Repeat("c", 4000)})
@@ -1973,12 +1974,16 @@ func TestADroppedMemoryBlockWithholdsTheWrites(t *testing.T) {
 		agentkit.WithModel(model, "m"),
 		agentkit.WithInstructions(prompt),
 		agentkit.WithMemory(store, "user"),
+		agentkit.WithMemoryTools(agentmemory.WithInsert("user")),
 		agentkit.WithInstructionBudget(int64(len(prompt)+len(agentkit.Separator)+40)),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer kit.Close()
+	if _, ok := kit.LookupTool(agentmemory.InsertTool); !ok {
+		t.Fatalf("%s is not in the kit's tools", agentmemory.InsertTool)
+	}
 	if got := kit.Config().Instructions; got != prompt {
 		t.Fatalf("instructions = %q, want the block dropped", got)
 	}
@@ -1992,7 +1997,7 @@ func TestADroppedMemoryBlockWithholdsTheWrites(t *testing.T) {
 			offered = append(offered, f.Name)
 		}
 	}
-	for _, name := range []string{agentmemory.SaveTool, agentmemory.PatchTool, agentmemory.ForgetTool} {
+	for _, name := range agentmemory.WriteTools() {
 		if slices.Contains(offered, name) {
 			t.Errorf("%s was offered with the block dropped: %v", name, offered)
 		}

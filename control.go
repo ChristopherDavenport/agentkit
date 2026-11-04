@@ -187,11 +187,22 @@ func (c *Control) Elicitor() agenttool.Elicitor {
 // so each question is an [agentturn.Question] event to a's subscribers
 // answered with Reply, recorded by the run's recorder, the one on the
 // call's context or the kit's, as answered by a person
-// ([agentsession.ByHuman]). It is what [Control.Elicitor] returns, for
+// ([agentsession.ByHuman]). The answer the asking tool gets names that
+// decider too, [agenttool.Answer.By] [agenttool.ByHuman], when the
+// reply names none, so a tool that passes it on, through MCP or to a
+// child agent, does not hand on an answer that names nobody; a reply
+// naming its decider keeps it. It is what [Control.Elicitor] returns, for
 // a product that drives a by hand: it names it on each run's context
 // with [ContextWithQuestions], as [Control.RunContext] does.
 func (k *Kit) QuestionsFor(a *agentturn.Agent) agenttool.Elicitor {
-	ask := a.QuestionElicitor()
+	reply := a.QuestionElicitor()
+	ask := func(ctx context.Context, q agenttool.Elicitation) (agenttool.Answer, error) {
+		ans, err := reply(ctx, q)
+		if err == nil && ans.By == "" {
+			ans.By = agenttool.ByHuman
+		}
+		return ans, err
+	}
 	return func(ctx context.Context, q agenttool.Elicitation) (agenttool.Answer, error) {
 		rec := RecorderFromContext(ctx)
 		if rec == nil {
@@ -350,13 +361,64 @@ func checkAnswers(pending []agentturn.PendingCall, answers []agentturn.Answer) e
 	return nil
 }
 
+// ErrNoCompaction is the error [Control.Compact] returns for a kit
+// configured without [WithCompaction], [WithCompactionModel] or
+// [WithCompactor]: there is no transform to fold with.
+var ErrNoCompaction = errors.New("agentkit: no compaction is configured, so there is nothing to fold with")
+
+// Compact asks the kit's compaction transform to fold on the next
+// request, whatever its budget, with instructions, when not empty, for
+// that fold alone ([compact.Transform.FoldNext]): a product's /compact.
+// The fold is the one a request over budget makes, kept tail and pins
+// included, reported to [WithFoldObserver] and recorded as an automatic
+// fold is, and [compact.WithMinFold] still guards it. The next request
+// is the agent's next model call: the run in flight's, or the next
+// run's, so a host that wants the conversation folded now prompts it.
+// A later Compact before that request replaces the instructions. It
+// returns [ErrNoCompaction] without a compaction transform. The kit
+// holds one transform for every agent it configures, so the next
+// request of any of them takes the fold.
+func (c *Control) Compact(ctx context.Context, instructions string) error {
+	return c.kit.compactNext(instructions)
+}
+
+var _ agentturn.Deliverer = (*Control)(nil)
+
+// Deliver implements [agentturn.Deliverer]: the agent's Deliver under
+// RunContext. The items join the run in flight, or, when no run would
+// take them, such as one past its last drain, start a run that does
+// once that run has ended, unless calls are pending, and Deliver
+// returns its end. With a recorder, each item is written as a queued
+// entry carrying deliver before the agent takes it
+// ([session.Recorder.Deliver]), so a delivery is on the record even if
+// the process ends before a run takes it. After a run that ended on a
+// terminating result it starts none and returns
+// [agentturn.ErrTerminated] with that run's end, unchanged: the items
+// wait for the host's next run. While calls are pending it starts none
+// either, [agentturn.ErrInputRequired], and the Resume that answers them
+// takes the items, so unlike [Control.Prompt] it never starts a run
+// that settles what the kit's engine held.
+//
+// The recorder is the kit's, or, for a kit with no session of its own
+// that serves several conversations, the conversation's on ctx
+// ([ContextWithRecorder]), as RunContext puts the kit's there.
+func (c *Control) Deliver(ctx context.Context, items ...openresponses.Item) (bool, *agentturn.RunEnd, error) {
+	ctx = c.RunContext(ctx)
+	if rec := RecorderFromContext(ctx); rec != nil {
+		return rec.Deliver(ctx, c.agent, items...)
+	}
+	return c.agent.Deliver(ctx, items...)
+}
+
 // Queue implements [agentturn.Control]: with a recorder, each item is
 // written as a queued entry before the agent takes it
 // ([session.Recorder.Queue]) rather than at the agent's queued event,
 // which the run's next event delivers and a quiet tool can hold off.
+// The recorder is the kit's, or the conversation's on ctx, as for
+// [Control.Deliver].
 func (c *Control) Queue(ctx context.Context, mode agentturn.QueueMode, items ...openresponses.Item) error {
 	ctx = c.RunContext(ctx)
-	if rec := c.kit.Recorder(); rec != nil {
+	if rec := RecorderFromContext(ctx); rec != nil {
 		return rec.Queue(ctx, c.agent, mode, items...)
 	}
 	return c.agent.Queue(ctx, mode, items...)
@@ -582,7 +644,8 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 	if err := rehold(); err != nil {
 		return fail(err)
 	}
-	items, models, err := session.TranscriptModels(s)
+	// The recorder's read options resolve a sidecar session's media.
+	items, models, err := session.TranscriptModels(s, append(rec.ReadOptions(), session.WithContext(ctx))...)
 	if err != nil {
 		return fail(err)
 	}
@@ -599,7 +662,7 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 	// The notes the branch owes after outputs already on it, which a
 	// failed run there could not append; with calls pending, Pending
 	// put them on the last call instead.
-	owed, err := session.OwedNotes(s)
+	owed, err := session.OwedNotes(s, append(rec.ReadOptions(), session.WithContext(ctx))...)
 	if err != nil {
 		return fail(err)
 	}

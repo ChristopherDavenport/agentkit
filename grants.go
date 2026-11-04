@@ -17,6 +17,7 @@ import (
 	"github.com/ChristopherDavenport/agentskill"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
 
@@ -571,7 +572,9 @@ func (g *skillGrants) grant(ctx context.Context, sk *agentskill.Skill, out Skill
 // A restart may narrow a grant and never widen it. When the kit built
 // the engine, and so recorded its verdicts, what is granted again is
 // the rules the path says the engine granted for the read, the
-// "granted <rule> by <source>" verdicts written just before its record,
+// grant_set verdicts written just before its record (by their grant,
+// source and scope members, or, for a record from before agentpolicy
+// v0.0.19, their "granted <rule> by <source>" reason),
 // that the catalogue still gives the skill: a skill whose allowed-tools
 // were widened, or whose source turned trusted, since the read gets
 // nothing it did not have. A read the session records no verdict for,
@@ -591,7 +594,7 @@ func (g *skillGrants) grant(ctx context.Context, sk *agentskill.Skill, out Skill
 // verdict whose write failed. The journal matches a revocation to a
 // read by the source name the product's source function gives now; a
 // function that renames its sources between releases loses the match.
-func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, scoped bool) {
+func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, scoped bool, opts ...session.ReadOption) {
 	path := sess.Path(sess.Leaf())
 	// A replayed grant is bound to the user message the transcript an
 	// agent is seeded with ends under, session.Transcript, the same items
@@ -600,13 +603,14 @@ func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, s
 	// stands in for the messages it folded there, a user-role message of
 	// its own, and a restart after a fold past the last prompt would read
 	// the prompt's digest as stale.
-	if mark, ok := seededMark(sess); ok {
+	if mark, ok := seededMark(sess, opts...); ok {
 		ctx = context.WithValue(ctx, markKey{}, mark)
 	}
 	// The grants are the session's, made under the grant scope of its
 	// conversation.
 	ctx = g.scopedCtx(ctx)
 	scope := agentpolicy.GrantScopeFromContext(ctx)
+	ours := pathGrantScopes(path, scope)
 	from := 0
 	if scoped {
 		for i := len(path) - 1; i >= 0; i-- {
@@ -683,10 +687,43 @@ func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, s
 				Rule   string `json:"rule"`
 				Source string `json:"source"`
 				Reason string `json:"reason"`
+				Grant  string `json:"grant"`
+				Scope  string `json:"scope"`
 			}
 			if json.Unmarshal(c.Data, &v) != nil {
 				continue
 			}
+			if v.Grant != "" {
+				// agentpolicy v0.0.19 and later record what a grant or a
+				// revocation did as members, which a reader takes and
+				// never the reason (agentpolicy RFC 0001, The record): a
+				// change counts here under a scope this path's own grants
+				// were made under, and under no other conversation's.
+				if !ours[v.Scope] {
+					continue
+				}
+				if v.Source != "" {
+					seen[v.Source] = true
+				}
+				switch agentpolicy.GrantKind(v.Grant) {
+				case agentpolicy.KindRevokeScope:
+					granted, pending, seen = nil, map[string]map[string]bool{}, map[string]bool{}
+				case agentpolicy.KindRevoke:
+					drop(v.Source)
+					delete(pending, v.Source)
+					delete(seen, v.Source)
+				case agentpolicy.KindGrantSet:
+					if v.Action == "allow" && v.Rule != "" {
+						if pending[v.Source] == nil {
+							pending[v.Source] = map[string]bool{}
+						}
+						pending[v.Source][v.Rule] = true
+					}
+				}
+				continue
+			}
+			// A record written before the members: the reason texts
+			// the RFC fixes.
 			if v.Source != "" {
 				seen[v.Source] = true
 			}
@@ -860,6 +897,43 @@ func replaying(ctx context.Context) bool {
 	return v
 }
 
+// pathGrantScopes is the scopes a replay of path reads member records
+// under: target, the scope the grants are made again under, and every
+// scope a grant set was activated or granted under on the path, which
+// are the conversation's own, its origin's on a fork's prefix among
+// them, less any scope under another of them, a child agent's, whose
+// grants were never the conversation's.
+func pathGrantScopes(path []agentsession.Entry, target string) map[string]bool {
+	scopes := map[string]bool{target: true}
+	for _, e := range path {
+		c, ok := e.(*agentsession.CustomEntry)
+		if !ok || c.NS != agentpolicy.VerdictNS {
+			continue
+		}
+		var v struct {
+			Grant string `json:"grant"`
+			Scope string `json:"scope"`
+		}
+		if json.Unmarshal(c.Data, &v) != nil || v.Scope == "" {
+			continue
+		}
+		switch agentpolicy.GrantKind(v.Grant) {
+		case agentpolicy.KindActivate, agentpolicy.KindGrantSet:
+			scopes[v.Scope] = true
+		}
+	}
+	for s := range scopes {
+		for other := range scopes {
+			if s != other && strings.HasPrefix(s, other+"/") {
+				delete(scopes, s)
+				break
+			}
+		}
+	}
+	scopes[target] = true
+	return scopes
+}
+
 // revokedPrefix opens the reason of the verdict agentpolicy's
 // Engine.Revoke records, which names the source after it.
 const revokedPrefix = "revoked the rules granted by "
@@ -927,7 +1001,11 @@ func (g *skillGrants) revokeLive(ctx context.Context, drop bool) (int, []liveGra
 			// A skill's set held none, untrusted or refused, and a restart
 			// that replays the journal must still see it end, or a rule the
 			// skill gains by then is granted for a read the scope ended.
-			g.observe(ctx, agentpolicy.Verdict{Action: agentturn.Block, Reason: revokedPrefix + name, By: agentpolicy.ByPolicy})
+			// It is recorded as the engine records one, with the kind,
+			// the source and the grant scope as members (agentpolicy
+			// v0.0.19), which a reader takes before the reason's text.
+			g.observe(ctx, agentpolicy.Verdict{Action: agentturn.Block, Reason: revokedPrefix + name, By: agentpolicy.ByPolicy,
+				Grant: agentpolicy.KindRevoke, Source: name, Scope: agentpolicy.GrantScopeFromContext(ctx)})
 		}
 		n += removed
 	}

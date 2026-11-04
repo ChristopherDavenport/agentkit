@@ -54,8 +54,10 @@ type settings struct {
 	maxParallel  int
 
 	instructions string
-	budget       int64
-	order        []string
+	// parts are WithPart's, in the order they were added.
+	parts  []productPart
+	budget int64
+	order  []string
 
 	agentsMDPath string
 	agentsMD     agentsmd.Options
@@ -75,19 +77,26 @@ type settings struct {
 	skillSource      func(*agentskill.Skill) agentpolicy.Source
 	skillGrant       func(SkillGrant)
 
-	memStore  agentmemory.Store
-	memScopes []agentmemory.Scope
-	memRead   []agentmemory.Scope
-	memRender []agentmemory.RenderOption
-	memTools  []agentmemory.ToolOption
+	memStore   agentmemory.Store
+	memScopes  []agentmemory.Scope
+	memRead    []agentmemory.Scope
+	memArchive []agentmemory.Scope
+	memRender  []agentmemory.RenderOption
+	memTools   []agentmemory.ToolOption
 
 	tools      []agenttool.Tool
 	deferTools []deferred
 	mcp        []mcpDial
 	mcpStderr  io.Writer
-	conflict   func(Conflict)
-	toolFilter func(source string, t agenttool.Tool) bool
-	toolWrap   func(source string, t agenttool.Tool) agenttool.Tool
+	// mcpResources is WithMCPResourceTools.
+	mcpResources bool
+	// mcpTrusted is WithTrustedMCPInstructions' labels, and
+	// mcpNoInstructions WithoutMCPInstructions.
+	mcpTrusted        map[string]bool
+	mcpNoInstructions bool
+	conflict          func(Conflict)
+	toolFilter        func(source string, t agenttool.Tool) bool
+	toolWrap          func(source string, t agenttool.Tool) agenttool.Tool
 
 	engine      *agentpolicy.Engine
 	policy      agentpolicy.Policy
@@ -235,6 +244,64 @@ func WithMaxParallelTools(n int) Option {
 // instructions part, [PartProduct], the frame every other part refines.
 func WithInstructions(text string) Option {
 	return func(s *settings) { s.instructions = text }
+}
+
+// PartRender is one render of a part [WithPart] adds to the
+// instructions.
+type PartRender struct {
+	// Text is the part's text. Empty leaves the part out of this
+	// request, as an empty layer is left out.
+	Text string
+	// Trust is what the product knows of where the text came from,
+	// agentsession's member, recorded on the part: a rule file a
+	// repository holds is not text the product wrote. nil says nothing.
+	Trust *agentsession.Trust
+	// Omitted is what the product considered for the part and left
+	// out, reported in [Kit.Omitted] and recorded as the session's
+	// instructions_omitted. An omission's Part is the part's id when
+	// left empty.
+	Omitted []Omission
+}
+
+// productPart is a part [WithPart] adds.
+type productPart struct {
+	id, source string
+	render     func(context.Context) (PartRender, error)
+}
+
+// WithPart adds a part of the product's own to the instructions, id
+// naming it and source the layer that produced it, in the harness's
+// terms (agentsession's well-known values where one fits, agentsmd for
+// a rule file). render is called at New and for every request, so the
+// part may change mid-session: a rule file loaded when the model opens
+// a file, a /memory reload, a path-scoped rule. The kit then records
+// the new text as that part in the session's next config delta, with
+// the part's source and trust, and every other part stays a part. A
+// BeforeModelCall that rewrites the instructions after the kit's, by
+// [WithBeforeModelCall] or a product's own chain, still leaves the
+// record one flattened string for that request, as it did before
+// WithPart: the kit's parts no longer join to what was sent, so
+// [Kit.PartsFor] gives none. A part that should change mid-session is
+// a WithPart, not such a hook.
+//
+// The part is placed by [WithOrder], after the kit's own parts in
+// [DefaultOrder] when no order is given, in the order the parts were
+// added. It is charged to [WithInstructionBudget] as the product's
+// prompt is, whole, since its text is the product's: the bounded layers
+// share what is left, at New and at each request, and New fails when
+// the first render leaves the budget short. A later render that grows
+// past the budget is neither refused nor cut: the bounded layers shrink
+// to nothing, the memory block is dropped, and the request is sent over
+// the budget by what the part added. The input guards run over
+// it as over every part, and [Kit.PartsFor] gives it with the rest. An
+// id the kit composes ([PartProduct], [PartSkills], agentsmd.PartID,
+// [PartMemoryUsage]), one in agentmemory's reserved space (memory,
+// memory/…, memory:…), an empty one, or one added twice is refused by
+// New. An error from render fails New, or the request.
+func WithPart(id, source string, render func(context.Context) (PartRender, error)) Option {
+	return func(s *settings) {
+		s.parts = append(s.parts, productPart{id: id, source: source, render: render})
+	}
 }
 
 // WithAgentsMD reads the AGENTS.md chain that applies at path and
@@ -521,13 +588,14 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 //
 // A render [WithInstructionBudget] leaves no room for drops the block
 // and the paragraph, and that request is not offered memory_save,
-// memory_patch or memory_forget: the model would be writing over
+// memory_patch, memory_forget or memory_insert: the model would be writing over
 // entries it was never shown, with no word on the tools. A write the
-// model makes anyway in that run is refused, and so is one a policy
-// held and a person approved, which runs in a Resume: the render kept
-// for the call says the block was dropped, and after a restart the
-// manifest recorded at the call does, where it shows no entry and lists
-// one the block held among the omitted. memory_search stays
+// model makes anyway in that run is refused where it is decided, by the
+// kit's first BeforeToolCall hook, so no policy asks a person about a
+// call no answer could let through. One decided before the drop is
+// refused when it runs, which may be in a Resume: the render kept for
+// the call says the block was dropped, and after a restart the manifest
+// recorded at the call does ([agentmemory.Manifest.Dropped]). memory_search stays
 // offered, and [Kit.Omitted] lists every entry the drop left out. The
 // block, and the writes, come back on the first render that fits.
 //
@@ -575,6 +643,33 @@ func WithMemoryReadScopes(scopes ...agentmemory.Scope) Option {
 	return func(s *settings) { s.memRead = append(s.memRead, scopes...) }
 }
 
+// WithMemoryArchive adds scopes the memory tools write and search and
+// the block never renders: an archive, Letta's archival memory, whose
+// passages the model adds with memory_insert or memory_save and finds
+// with memory_search, and which never reaches a request's instructions
+// however many it holds. The usage paragraph names them as searchable
+// and not shown. memory_insert into them needs
+// WithMemoryTools(agentmemory.WithInsert(scopes...)). memory_save is
+// based on the block, which never shows an archived entry, so an
+// archive is added to with memory_insert rather than saved over. A scope
+// [WithMemory] or [WithMemoryReadScopes] names cannot be an archive too;
+// [New] fails. It has no effect without [WithMemory]. Several calls
+// accumulate.
+func WithMemoryArchive(scopes ...agentmemory.Scope) Option {
+	return func(s *settings) { s.memArchive = append(s.memArchive, scopes...) }
+}
+
+// archiveScopes is the archive scopes, each once.
+func (s *settings) archiveScopes() []agentmemory.Scope {
+	var out []agentmemory.Scope
+	for _, a := range s.memArchive {
+		if !slices.Contains(out, a) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // renderScopes is every scope the block renders: WithMemory's, in
 // order, then the read scopes it does not name, each once.
 func (s *settings) renderScopes() []agentmemory.Scope {
@@ -587,7 +682,8 @@ func (s *settings) renderScopes() []agentmemory.Scope {
 	return out
 }
 
-// writableScopes is WithMemory's scopes less the read-only ones.
+// writableScopes is WithMemory's scopes less the read-only ones, then
+// the archive scopes.
 func (s *settings) writableScopes() []agentmemory.Scope {
 	var out []agentmemory.Scope
 	for _, sc := range s.memScopes {
@@ -595,7 +691,7 @@ func (s *settings) writableScopes() []agentmemory.Scope {
 			out = append(out, sc)
 		}
 	}
-	return out
+	return append(out, s.archiveScopes()...)
 }
 
 // readScopes is the read-only scopes, each once.
@@ -721,6 +817,52 @@ func WithMCPTransport(t sdk.Transport, opts ...mcpclient.Option) Option {
 	return func(s *settings) {
 		s.mcp = append(s.mcp, mcpDial{transport: t, opts: opts})
 	}
+}
+
+// WithMCPResourceTools offers, beside each MCP server's tools, the two
+// tools [mcpclient.Remote.ResourceTools] builds for a server that
+// advertises resources, list_resources and read_resource, under the
+// server's prefix, so the model can list the server's resources and
+// follow a resource_link a tool of it returned. A server that
+// advertises none adds nothing, and a tool of the server's own by
+// either name wins. They are the server's tools in every other way: its
+// label in [Kit.Tools] and a [Conflict], [WithToolFilter], the policy's
+// offer and the record, for New's servers and those [Kit.AddMCP]
+// connects, and they leave with [Kit.RemoveMCP]. Two servers with
+// resources both offer the two names, so each takes a prefix,
+// [mcpclient.WithPrefix], or New refuses the second as it refuses any
+// repeated name.
+func WithMCPResourceTools() Option {
+	return func(s *settings) { s.mcpResources = true }
+}
+
+// WithTrustedMCPInstructions names, by the labels [Kit.Tools] and
+// [Kit.MCPServers] give them ("mcp:#<n> <what>"), the MCP servers whose
+// instructions the product trusts: their parts are recorded reading
+// nothing, where every other server's read untrusted, since a third
+// party wrote them. Trusting a server's prose is the product's
+// decision, from its own configuration; taking a server's claims, as
+// mcpclient.WithClaims does, does not make it. A label numbers a
+// server by its position among the servers given, so reordering
+// [WithMCP] options, or adding one ahead, can move the trust to another
+// server of the same program: name it after the servers are settled.
+func WithTrustedMCPInstructions(labels ...string) Option {
+	return func(s *settings) {
+		if s.mcpTrusted == nil {
+			s.mcpTrusted = map[string]bool{}
+		}
+		for _, l := range labels {
+			s.mcpTrusted[l] = true
+		}
+	}
+}
+
+// WithoutMCPInstructions keeps the MCP servers' instructions out of the
+// instructions: the kit gives the model none, and records no part for
+// them. Without it each server's instructions are a part of their own
+// while its tools are offered; see [PartMCP].
+func WithoutMCPInstructions() Option {
+	return func(s *settings) { s.mcpNoInstructions = true }
 }
 
 // WithMCPStderr sends the stderr of every server [WithMCP] starts to w,
@@ -1255,22 +1397,34 @@ func (k *Kit) observeChild(ctx context.Context, ev agentturn.Event) {
 // puts the child's session ID on the context under the session
 // package's key, and, with memory configured, the same ID under
 // agentmemory's, since the memory journal reads its own key and neither
-// package imports the other. Under [WithSkillGrants] the child run also
-// has a grant scope of its own, under its conversation's,
+// package imports the other. When the kit has an engine the child run
+// also has a grant scope of its own, under its conversation's,
 // [agentpolicy.ContextWithGrantScope]: the child's session ID, or the
-// call's with a number of the kit's without a recording, so the skills
-// its parent read do not grant what the child's calls may do and the
-// ones the child reads are not the parent's. The context says whose
-// child it is, and which user message its grants are bound to, the
-// parent's, so the conversation's next message ends them. Without skill
-// grants the kit puts no scope on the context, and a scope the product
-// put there, with grants of its own under it, is the child's.
+// call's with a number of the kit's without a recording, so a set
+// granted under the conversation's scope, a person's "allow for this
+// session" or a skill the parent read, does not decide the child's
+// calls, and what the child is granted is not the parent's. Under
+// [WithSkillGrants] the context also says whose child it is, and which
+// user message its grants are bound to, the parent's, so the
+// conversation's next message ends them. A host that wants a child to
+// share the conversation's grants puts the conversation's scope on the
+// context the child's run is prompted with, over the kit's.
 func (k *Kit) childContext(ctx context.Context, callID string) context.Context {
 	parentCtx := ctx
 	rec := k.recorderFor(ctx)
 	if rec != nil {
 		ctx = rec.ChildContext(ctx, callID)
 	}
+	return k.childRun(parentCtx, ctx, rec, callID)
+}
+
+// childRun is what the kit adds to a child's run context ctx, made from
+// parentCtx by rec, or by no recorder: the child's session ID under
+// agentmemory's key, and under skill grants a grant scope of its own,
+// as [Kit.childContext] says. name stands for the child in the scope
+// when no session names it.
+func (k *Kit) childRun(parentCtx, ctx context.Context, rec *session.Recorder, name string) context.Context {
+	callID := name
 	child := ""
 	if id := session.SessionIDFromContext(ctx); rec != nil && id != "" {
 		child = id
@@ -1278,7 +1432,7 @@ func (k *Kit) childContext(ctx context.Context, callID string) context.Context {
 			ctx = agentmemory.WithSession(ctx, id)
 		}
 	}
-	if k.grants == nil {
+	if k.engine == nil {
 		return ctx
 	}
 	if child == "" {
@@ -1289,10 +1443,13 @@ func (k *Kit) childContext(ctx context.Context, callID string) context.Context {
 	}
 	parent := k.GrantScope(parentCtx)
 	scope := parent + childSep + child
+	ctx = agentpolicy.ContextWithGrantScope(ctx, scope)
+	if k.grants == nil {
+		return ctx
+	}
 	k.grants.mu.Lock()
 	k.grants.link(parent, scope)
 	k.grants.mu.Unlock()
-	ctx = agentpolicy.ContextWithGrantScope(ctx, scope)
 	if m, ok := k.markFor(parentCtx); ok {
 		ctx = context.WithValue(ctx, parentMarkKey{k}, m)
 	}

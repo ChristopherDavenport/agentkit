@@ -31,21 +31,21 @@ and no fold is recorded.
 | field | the kit's option | what a product writes instead |
 |---|---|---|
 | `Name`, `Description` | `WithName` | assign them |
-| `Model`, `ModelName` | `WithModel` | assign them |
+| `Model`, `ModelName` | `WithModel` | assign them; the kit builds no adapter, so a model that is an `openresponses.ClientAdapter` over a provider's own API is the product's `client.AsAdapter(openresponses.WithProviderSlugs())`, which leaves out an item under another provider's slug that the loop keeps (`Config.Model`'s doc, agentturn v0.0.35) |
 | `Request`, `RequestExtra`, `Reasoning`, `Text`, `MaxTurns`, `Filter` | `WithRequest`, `WithRequestExtra`, `WithReasoning`, `WithText`, `WithMaxTurns`, `WithFilter` | assign them; the kit copies them through and owns no member of any |
 | `Retry`, `ToolExecution`, `MaxParallelTools` | `WithRetry`, `WithToolExecution`, `WithMaxParallelTools` | assign them; the kit contests none of them and reads none of them |
-| `Instructions` | `WithInstructions`, `WithSkills`, `WithMemory`, `WithAgentsMD` | `strings.Join` of the four blocks, in the order of [ordering.md](ordering.md) — see below |
+| `Instructions` | `WithInstructions`, `WithSkills`, `WithMemory`, `WithMemoryArchive`, `WithAgentsMD`, `WithPart`, `WithMCP`, `WithTrustedMCPInstructions` | `strings.Join` of the four blocks, each MCP server's instructions part and each `WithPart` part's first render, in the order of [ordering.md](ordering.md) — see below |
 | `Tools` | — | the kit never sets it; it sets `ToolProvider`, which the loop reads in its place |
-| `ToolProvider` | `WithTools`, `WithSkills`, `WithMemory`, `WithMCP`, `WithChildAgent`, `WithDeferredTools`, `WithToolProvider`, `WithToolFilter`, `WithToolWrap`, `WithPolicy` | `append` the slices, wrap each tool, and wrap the list in `engine.ToolProvider` — see below |
+| `ToolProvider` | `WithTools`, `WithSkills`, `WithMemory`, `WithMemoryArchive`, `WithMCP`, `WithMCPResourceTools`, `WithChildAgent`, `WithDeferredTools`, `WithToolProvider`, `WithToolFilter`, `WithToolWrap`, `WithPolicy` | `append` the slices, wrap each tool, and wrap the list in `engine.ToolProvider` — see below |
 | `BeforeTurn` | `WithSkillGrantScope`, `WithBeforeTurn` | `agentturn.ChainBeforeTurn(revokeOnUserMessage, yours...)` — see below |
-| `BeforeModelCall` | `WithMemory`, `WithGuards`, `WithVerdictObserver`, `WithBeforeModelCall` | `agentturn.ChainBeforeModelCall(instructions, chain.BeforeModelCall(), yours...)` — see below |
+| `BeforeModelCall` | `WithMemory`, `WithPart`, `WithGuards`, `WithPolicy`, `WithSkillGrants`, `WithVerdictObserver`, `WithBeforeModelCall` | `agentturn.ChainBeforeModelCall(instructions, chain.BeforeModelCall(), yours...)` — see below |
 | `BeforeToolCall` | `WithPolicy`, `WithMemory`, `WithSkillGrants`, `WithSkillGrantScope`, `WithBeforeToolCall` | `agentturn.ChainBeforeToolCall(keepSaveBase, decide)`, `decide` being `engine.BeforeToolCall()` under the call's grant scope, the engine built with `agentpolicy.WithHooks(refuseEndedGrant, yours...)`; with `WithEngine` or no policy, `yours...` after the engine and no `refuseEndedGrant` — see below |
 | `AfterToolCall` | `WithAfterToolCall` | assign it; the kit contests nothing here |
 | `OutputGuard` | `WithGuards`, `WithOutputGuard` | `agentturn.ChainOutputGuard(chain.OutputGuard(), yours...)` |
 | `ShouldStopAfterTurn` | `WithGuards`, `WithShouldStopAfterTurn` | `agentturn.ChainShouldStopAfterTurn(chain.ShouldStopAfterTurn(), yours...)` |
-| `Transform` | `WithCompaction`, `WithCompactionModel`, `WithCompactor`, `WithTransform`, `WithFoldObserver` | `agentturn.ChainTransform(yours, compact.NewLocal(model, compact.WithModel(name), compact.WithOnFold(fold), compact.WithBudget(n), theirs...).Transform)`, or `compact.New(compactor, ...)` with the same options for `WithCompactor`, where `fold` is `rec.Fold` and then the observer — see below |
+| `Transform` | `WithCompaction`, `WithCompactionModel`, `WithCompactor`, `WithTransform`, `WithFoldObserver` | `agentturn.ChainTransform(yours, compact.NewLocal(model, compact.WithModel(name), compact.WithOnFold(fold), compact.WithBudget(n), theirs...).Transform)`, or `compact.New(compactor, ...)` with the same options for `WithCompactor`, where `fold` is `rec.Fold` and then the observer; `Control.Compact(ctx, instructions)` is `t.FoldNext(instructions)` on that transform, kept beside the config, so the next request folds whatever its budget — see below |
 | `ToolRecorder` | `WithSession`, `WithResumedSession`, `WithRecorder` | `rec.RecordFunc()`; without a session the kit leaves it nil, and the loop honours a recorder the product installs with `agenttool.ContextWithRecorder` on the prompt's context |
-| `ToolElicitor` | `WithToolElicitor`, `WithQuestionEvents` | under `WithToolElicitor`, a function that calls `rec.Elicitor(by, fn)` for the run's recorder, `recorderFor(ctx)` below, and `fn` without one; under `WithQuestionEvents`, a function that asks the elicitor the run's context names, `ask, ok := agentkit.QuestionsFromContext(ctx)` then `ask(ctx, q)`, else the Control on it, `c, ok := agentkit.ControlFromContext(ctx)` then `c.Elicitor()(ctx, q)` (both `kit.QuestionsFor(agent)`: a function over `agent.QuestionElicitor()` by `agentsession.ByHuman`, so questions are events the front answers with `agent.Reply`), and with neither answers `agenttool.ActionCancel` through `rec.Elicitor(agentsession.ByPolicy, …)`; it also dials the MCP servers as `WithToolElicitor` does, with `mcpclient.WithElicitation()`. Without either the kit leaves it nil: an elicitor on the prompt's context applies, and with none a tool's question goes unasked. `Kit.Control(agent)` gives an agent whose config has none the kit's |
+| `ToolElicitor` | `WithToolElicitor`, `WithQuestionEvents` | under `WithToolElicitor`, a function that calls `rec.Elicitor(by, fn)` for the run's recorder, `recorderFor(ctx)` below, and `fn` without one; under `WithQuestionEvents`, a function that asks the elicitor the run's context names, `ask, ok := agentkit.QuestionsFromContext(ctx)` then `ask(ctx, q)`, else the Control on it, `c, ok := agentkit.ControlFromContext(ctx)` then `c.Elicitor()(ctx, q)` (both `kit.QuestionsFor(agent)`: a function over `agent.QuestionElicitor()` by `agentsession.ByHuman`, whose answer sets `Answer.By` to `agenttool.ByHuman` when the reply names no decider, so questions are events the front answers with `agent.Reply`), and with neither answers `agenttool.ActionCancel` through `rec.Elicitor(agentsession.ByPolicy, …)`; it also dials the MCP servers as `WithToolElicitor` does, with `mcpclient.WithElicitation()`. Without either the kit leaves it nil: an elicitor on the prompt's context applies, and with none a tool's question goes unasked. The loop asks the same elicitor about a nested call a tool makes with `agenttool.Invoke` that the policy defers (agentturn v0.0.35, RFC 0001 Nested calls), and never one the invoking tool put on its own context, so a nested call's approval reaches the product only through this field or an elicitor on the prompt's context. `Kit.Control(agent)` gives an agent whose config has none the kit's |
 
 `chain` in the rows above is one `guard.Chain{Guards: gs, Observer:
 observe}`, where `observe` is the verdict observer described under
@@ -102,7 +102,7 @@ each of its parts, the same pass each turn's hook makes
 layers := []agentsession.InstructionPart{
 	{ID: "product", Text: prompt},
 	{ID: "skills", Text: cat.Prompt() + "\n\n" + cat.Usage()},
-	// one part per agentmemory.RenderParts piece, then memory:usage
+	// one part per agentmemory.RenderParts piece, then memory-usage
 	{ID: "agentsmd", Text: agentsmd.Render(chain.Files)},
 }
 first, err := guardParts(ctx, guard.Chain{Guards: guards}, layers)
@@ -126,12 +126,20 @@ the session format's own, so the joined text of `Kit.Parts()` is what
 the request carried and what its hash covers.
 
 The kit holds the memory block as parts, `agentmemory.RenderParts`, one
-part per piece and `agentmemory.Usage()` as `memory:usage` after them.
+part per piece, each with the piece's trust as
+`&agentsession.Trust{Reads: labels}` (the labels as strings), and
+`agentmemory.Usage()`, with an empty trust, as `memory-usage`
+(`agentkit.PartMemoryUsage`) after them, an ID outside the `memory`,
+`memory/…` and `memory:…` space agentmemory reserves to its renderer.
 `agentmemory.Render` is `RenderParts` joined with the same separator, so
 the text above is unchanged; the parts are what `Kit.Parts` and the
 recorder see, so a write to one entry is recorded as that entry's part
 and the summary. The scopes rendered are `WithMemory`'s and then any
-`WithMemoryReadScopes` it does not name.
+`WithMemoryReadScopes` it does not name. `WithMemoryArchive`'s
+scopes are never rendered: they join the writable scopes
+`agentmemory.Tools` is built over, so `memory_search` finds them and
+the writers reach them, and the usage paragraph ends with a sentence
+naming them as an archive the block never shows.
 
 `cwd` and `opts` are `WithAgentsMD`'s, and `opts` is passed to
 `agentsmd.Chain` verbatim. A product whose project is not on the host's
@@ -158,8 +166,10 @@ tells the model to reach the listed skills through that tool.
 to a memory block that is sent, since `WithMemory` offers
 `agentmemory.Tools`; a block the budget drops takes it along, and the
 writes with it: the request that block was dropped from is not offered
-`memory_save`, `memory_patch` or `memory_forget`, and the run refuses
-them, outright or when a held one is approved (below).
+`memory_save`, `memory_patch`, `memory_forget` or `memory_insert`
+(`agentmemory.WriteTools()`), and the run refuses a call of one where
+it is decided, before any policy asks a person, and again when a call
+decided before the drop runs (below).
 
 Under `WithInstructionBudget`, the layers that take a bound are given
 one: `agentsmd.Options.Budget` and `agentmemory.WithMaxTotalBytes`, in
@@ -167,6 +177,24 @@ the allocation [ordering.md](ordering.md) argues for, the memory
 block's bound less the usage paragraph, which cannot be bounded. Both are
 exported, and a product that wants to spend the budget differently sets
 them itself and leaves the kit's budget at zero.
+
+A child the host starts itself, a memory pass after a turn, is no
+tool: `Kit.StartChild(ctx, spawnID)` is `rec.StartChild(ctx, spawnID)`
+of `recorderFor(ctx)`, `Kit.ContinueChild` is `rec.ContinueChild`, each
+followed by `agentkit.ContextWithRecorder` and the same memory session
+and grant scope the run context below adds, with the spawn ID standing
+for the call ID; `Kit.AttachChild(agent)` is the observer below as a
+subscription, `agent.Subscribe(func(ctx, ev) error { recorderFor(ctx).Observe(ctx, ev); return nil })`.
+
+A sleep-time pass is built from a kit configured for the pass, its own
+model, tools and policy, `WithRecorder(rec)` with the conversation's
+recorder: the pass's agent runs that kit's config, so its memory writes
+are decided by that kit's engine, under the pass's own grant scope, and
+refused when its own render dropped the block. A pass that should see
+what it did before is seeded from the child session,
+`session.AgentOptions(childSession, rec.ReadOptions()...)`, the session
+`session.SessionIDFromContext` of the context `ContinueChild` returns
+names; one seeded with nothing starts each pass afresh.
 
 ## `ToolProvider`
 
@@ -190,16 +218,20 @@ tools = append(tools, childagent.New(childCfg,
 				}
 			}
 		}
-		// Under WithSkillGrants only: the child's own grant scope, under its
-		// conversation's, which the child's skill reads grant under, and a
-		// record of whose child it is, so the conversation's next message
-		// ends its grants: they are bound to the parent's user-message mark.
+		// Whenever there is an engine: the child's own grant scope, under
+		// its conversation's, so a set granted to the conversation does not
+		// decide the child's calls. Under WithSkillGrants also a record of
+		// whose child it is, so the conversation's next message ends its
+		// grants: they are bound to the parent's user-message mark.
 		return agentpolicy.ContextWithGrantScope(ctx, parent+"/"+child)
 	})))
 // The catalogue's tool as it stands: ReloadSkills puts another
 // catalogue's in its place, and every run sees it from its next call.
-tools = append(tools, agenttool.Wrap(cat.Tool(), func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
-	return currentCat().Tool().Execute(ctx, call) // under a lock in real code
+// agenttool.Follow answers the facts claim, and every other property,
+// from the tool in force as well as the call, so a WithFileClaim claim
+// is the reloaded catalogue's (agenttool v0.0.29).
+tools = append(tools, agenttool.Follow(func() agenttool.Tool {
+	return currentTool() // currentCat().Tool(skillToolOpts...), kept beside the catalogue, under a lock
 }))
 
 // memory_save is based on the render its call was composed from:
@@ -264,6 +296,7 @@ for i, t := range tools {
 
 offered := engine.ToolProvider(func(ctx context.Context) []agenttool.Tool {
 	list := append(tools, remote.Tools()...) // the MCP list per turn
+	list = append(list, remote.ResourceTools()...) // WithMCPResourceTools: none for a server without resources
 	if run := agentturn.RunIDFromContext(ctx); run != "" {
 		unions[run] = byName(list) // for lookup, below
 	} else {
@@ -378,6 +411,10 @@ error `New` returns when the server fails to start. With
 `WithToolElicitor` set, `mcpclient.WithElicitation()` goes ahead of
 `opts`, since a client offers elicitation only when asked.
 
+`Kit.MCPServers()` and `Kit.MCP(label)` hand back those remotes by
+label, which by hand are the ones the product dialed and holds, for a
+server's resources, prompts and instructions: the kit's to close.
+
 `Kit.AddMCP` and `Kit.AddMCPTransport` connect a server after `New`,
 the same way, and `Kit.RemoveMCP` closes one. By hand they are a list
 of remotes the provider reads each turn, after `New`'s servers and
@@ -454,7 +491,12 @@ Two things the kit adds that the `append` above does not:
   adds to both is the source label, which it has because it did the
   union and the libraries the tools came from did not. `Kit.Tools()`
   returns the same labels once, beside each tool's name, for a product
-  naming the libraries' tools to its policy.
+  naming the libraries' tools to its policy: the union through the
+  filter, the wrappers and the duplicate check, run again on each call,
+  each MCP server's `remote.Tools()` as it lists now, a provider's tools
+  as they were at `New`, and through `engine.ToolProvider`'s filter
+  under `kit.GrantScope` of a bare context, so a tool a bare deny takes
+  off the offer is not listed.
 
 ## `BeforeModelCall`, in full
 
@@ -462,11 +504,28 @@ Two things the kit adds that the `append` above does not:
 observe := func(ctx context.Context, v agentpolicy.Verdict) {
 	if r := recorderFor(ctx); r != nil && (v.Guard == "" || v.Action != agentturn.Allow || v.Reason != "") {
 		ns, data := v.Record()
-		r.Annotate(ctx, ns, json.RawMessage(data))
+		if _, err := r.Annotate(ctx, ns, json.RawMessage(data)); err != nil {
+			// An observer cannot fail the decision; the run's next hook
+			// does. The first lost write per run.
+			if run := agentturn.RunIDFromContext(ctx); run != "" && lost[run] == nil {
+				lost[run] = fmt.Errorf("agentkit: recording the policy verdict on %s: %w", v.Subject, err)
+			}
+		}
 	}
 	productObserver(ctx, v) // WithVerdictObserver
 }
 chain := guard.Chain{Guards: guards, Observer: observe}
+
+// failOnLost fails the run with the verdict write it lost, once: after
+// the guards in BeforeModelCall, and after the engine decides a call.
+failOnLost := func(ctx context.Context, run string) error {
+	if run == "" {
+		run = agentturn.RunIDFromContext(ctx)
+	}
+	err := lost[run]
+	delete(lost, run)
+	return err
+}
 
 // guardParts runs the input guards over each part alone. A refusal
 // names its part, and so does each verdict's Subject, since the chain
@@ -495,12 +554,28 @@ guardParts := func(ctx context.Context, c guard.Chain, parts []agentsession.Inst
 }
 
 instructions := func(ctx context.Context, req *openresponses.Request) error {
+	// Each WithPart part rendered again, in its place, {id, text, source,
+	// trust}; an empty text leaves it out of this request. The memory
+	// share is the budget less every part but memory's.
+	for _, p := range productParts {
+		r, err := p.render(ctx)
+		if err != nil {
+			return err
+		}
+		layers = withGroup(layers, p.id, []agentsession.InstructionPart{{ID: p.id, Text: r.Text, Source: p.source, Trust: r.Trust}})
+	}
+	// Each server the provider offers tools of and that gave
+	// instructions, as a part of their own: {ID: label, Source: label,
+	// Text: heading + note + remote.Instructions() in a fence longer than
+	// any backtick run in it, Trust: remote.InstructionsReads() unless
+	// the product trusts the server}; gone with the server.
+	layers = withGroup(layers, "mcp", serverParts(remotes))
 	pieces, m, dropped, err := renderUnder(ctx, store, scopes, share) // RenderParts under the budget; see Instructions
 	if err != nil {
 		return err
 	}
 	// The memory group's parts replaced by one part per piece and then
-	// memory:usage, in the position the first of them held.
+	// memory-usage, in the position the first of them held.
 	layers = withMemoryGroup(layers, pieces)
 	if r := recorderFor(ctx); r != nil {
 		if err := record(ctx, r, m); err != nil { // below
@@ -515,7 +590,7 @@ instructions := func(ctx context.Context, req *openresponses.Request) error {
 	if dropped {
 		req.Tools = slices.DeleteFunc(slices.Clone(req.Tools), func(t openresponses.Tool) bool {
 			f, ok := t.(*openresponses.FunctionTool)
-			return ok && (f.Name == agentmemory.SaveTool || f.Name == agentmemory.PatchTool || f.Name == agentmemory.ForgetTool)
+			return ok && slices.Contains(agentmemory.WriteTools(), f.Name)
 		})
 	}
 	return nil
@@ -523,6 +598,7 @@ instructions := func(ctx context.Context, req *openresponses.Request) error {
 cfg.BeforeModelCall = agentturn.ChainBeforeModelCall(
 	instructions,
 	chain.BeforeModelCall(),
+	func(ctx context.Context, _ *openresponses.Request) error { return failOnLost(ctx, "") },
 	productHook,
 )
 ```
@@ -668,14 +744,22 @@ engine, err := agentpolicy.Build(policy, matchers,
 
 // keepSaveBase keeps a memory write's render, the manifest and whether
 // the budget dropped the block, for the Resume that may run it, and
-// decides nothing (WithMemory).
+// decides nothing (WithMemory), unless the render dropped the block:
+// then it blocks the write, so the chain ends before the engine asks
+// anyone about a call no answer could let through (agentmemory RFC 0001
+// §6.8).
 keepSaveBase := func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
-	switch info.Call.Name {
-	case agentmemory.SaveTool, agentmemory.PatchTool, agentmemory.ForgetTool:
-		if r, ok := rendered[info.RunID]; ok {
-			saveBase[sessionID(ctx)+"\x00"+info.Call.CallID] = r
-		}
+	if !slices.Contains(agentmemory.WriteTools(), info.Call.Name) {
+		return nil, nil
 	}
+	r, ok := rendered[info.RunID]
+	if !ok {
+		return nil, nil
+	}
+	if err := agentmemory.CheckWrite(r.man, info.Call.Name); err != nil { // the render left the block out
+		return &agentturn.ToolDecision{Action: agentturn.Block, Reason: err.Error(), By: agentsession.ByPolicy}, nil
+	}
+	saveBase[sessionID(ctx)+"\x00"+info.Call.CallID] = r
 	return nil, nil
 }
 
@@ -690,10 +774,18 @@ scopeOf := func(ctx context.Context) string {
 }
 
 // decide is the engine's hook under the grant scope of the call's
-// conversation (WithSkillGrants): the sets the engine consults are the
-// policy's, the unscoped ones and those of this scope.
+// conversation, Kit.GrantScope, with skill grants or without (#94): the
+// sets the engine consults are the policy's, the unscoped ones and those
+// of this scope, so a set a front activates under kit.GrantScope(ctx)
+// decides the conversation's calls.
 decide := func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
-	return engine.BeforeToolCall()(agentpolicy.ContextWithGrantScope(ctx, scopeOf(ctx)), info)
+	d, err := engine.BeforeToolCall()(agentpolicy.ContextWithGrantScope(ctx, scopeOf(ctx)), info)
+	if err == nil {
+		if lostErr := failOnLost(ctx, info.RunID); lostErr != nil { // the call's own verdict, written above
+			return nil, lostErr
+		}
+	}
+	return d, err
 }
 
 // refuseEndedGrant blocks, inside the engine, a call that only a grant
@@ -764,17 +856,19 @@ refuseEndedGrant := func(ctx context.Context, info agentturn.ToolCallInfo) (*age
 cfg.BeforeToolCall = agentturn.ChainBeforeToolCall(keepSaveBase, decide)
 ```
 
-Without skill grants `decide` is `engine.BeforeToolCall()` itself: the
-scope is put on the context only because the kit makes grants under it,
-and the kit's `ToolProvider` is wrapped the same way, the context given
-to `engine.ToolProvider` carrying the scope, since the engine's offer
-filter reads a bare deny of a scoped set from it. A product that calls
+With skill grants or without, `decide` runs the engine under the
+conversation's scope, and the kit's `ToolProvider` is wrapped the same
+way, the context given to `engine.ToolProvider` carrying
+`kit.GrantScope(ctx)`, since the engine's offer filter reads a bare
+deny of a scoped set from it: a front's "never, for this session"
+takes the tool off the offer as it blocks the call. A product that calls
 the engine on a conversation's behalf puts the scope on the context it
 calls with, `agentpolicy.ContextWithGrantScope(ctx, kit.GrantScope(ctx))`:
 `engine.Answers` for a `Resume`, `engine.GrantsFor` to show the grants in
 force, `engine.RevokeScope` when the conversation ends. `keepSaveBase`
-decides nothing and goes first, ahead of whatever may hold or allow the
-call: it keeps the render for any holder.
+goes first, ahead of whatever may hold or allow the call: it keeps the
+render for any holder, and blocks a memory write in a run whose render
+dropped the block, so no holder asks about it.
 
 `refuseEndedGrant` is the one decision the kit makes, and it makes it
 inside the engine, as the first of the hooks `agentpolicy.WithHooks`
@@ -1022,8 +1116,12 @@ under: marks[agentturn.RunIDFromContext(ctx)], bound: ok}`: the mark
 the hook kept for the run the read was made in, which is the same ID
 `TurnStartInfo.RunID` carries, and no mark for a read made in no run,
 which the tail test alone then ends. A replayed grant, `New`'s or
-`Kit.RegrantSkills`', is bound to `userMarkOf(session.Transcript(sess))`,
-the items `Kit.AgentOptions` seeds the agent with, so the first turn
+`Kit.RegrantSkills`', is bound to
+`userMarkOf(session.Transcript(sess, rec.ReadOptions()...))`, the items
+`Kit.AgentOptions` seeds the agent with, read with the recorder's blob
+reader so a sidecar session's images are the data URLs the agent holds
+and not a read refused with `session.ErrNoBlobReader`, which left the
+grant bound to no message; so the first turn
 after a restart does not end what the restart granted again. Not the
 path's `ItemEntry` items: a fold's summary stands in for the messages
 it folded in the seeded transcript, a user-role message of its own, and
@@ -1061,7 +1159,11 @@ Eleven things, all outside `agentturn.Config`:
 - `Kit.Omitted()` collects what each layer reported it left out —
   `agentsmd.Result.Omitted`, `agentmemory.Manifest.Omitted`, the skills
   `agentskill.Catalog.Listed` does not offer — into one list. A product
-  reads the three itself if it would rather.
+  reads the three itself if it would rather. A memory entry's `Size` is
+  `len(agentmemory.EntryPart(e, store.MaxEntryBytes()).Text) + 2`, the
+  bytes its part would have added, for the entry `store.List` gives
+  under the manifest's hash, and the manifest's `Bytes` when the store
+  no longer holds it so.
 - `WithSkillGrants` calls `agentpolicy.Engine.GrantSet` with the rules
   from `agentskill.Skill.Rules()` each time the model reads a skill,
   around the catalogue's tool through `agenttool.Wrap`, and
@@ -1117,11 +1219,20 @@ Eleven things, all outside `agentturn.Config`:
   is replaced, and anything read afterwards is read from the one it
   opened again, which the store's `Open` returns.
 - `Kit.AgentOptions()` is `session.AgentOptions(sess, rec.ReadOptions()...)`,
-  read in `New`: the transcript at the leaf, `session.Transcript`, with
+  read once, in `New`, for the first agent; `Kit.ReadAgentOptions(ctx)`
+  is the same read again of the session as it stands, which an agent
+  built after the conversation moved on is seeded with, since a
+  quarantine recorded since leaves the item out there and not in New's
+  reading: the transcript at the leaf, `session.Transcript`, with
   the items the filter kept from the model put back; the model each
   reasoning item came from, `agentturn.WithReasoningModels`; and the
   calls pending there, read through a fork's origin, for
-  `agentturn.New`. `Kit.Transcript()` is `session.Transcript(sess)`.
+  `agentturn.New`. `Kit.Transcript()` is
+  `session.Transcript(sess, rec.ReadOptions()...)`. The read options
+  carry the recorder's blob reader, without which a sidecar session's
+  transcript is refused with `session.ErrNoBlobReader`;
+  `Control.ContinueFrom` reads `session.TranscriptModels`,
+  `session.Pending` and `session.OwedNotes` with them as well.
 - `Kit.LookupToolFor(ctx, name)` reads the union the provider last
   returned to the run the context belongs to, and is what the kit's
   engine is given through `agentpolicy.WithToolsFor`; `Kit.LookupTool(name)`
@@ -1183,14 +1294,32 @@ Eleven things, all outside `agentturn.Config`:
   `Engine.RevokeScope` records.
 - With `WithSkillGrants` and a session `New` opened, `New` grants
   again what the session's journal left in force, and
-  `Kit.RegrantSkills(ctx, sess)` does the same for a session a front
-  resumed itself. It replays the path forward: an `agentskill:read`
+  `Kit.RegrantSkills(ctx, sess, opts...)` does the same for a session a
+  front resumed itself, reading it with the `ReadOptions()` of the
+  recorder that writes it and then `opts`, such as
+  `session.WithBlobs(br)` for a sidecar session resumed without that
+  recorder on ctx. It replays the path forward: an `agentskill:read`
   record of a skill's own instructions makes that skill's source live,
-  and a verdict whose reason is `revoked the rules granted by <source>`
-  ends it. `agentpolicy.Engine.Revoke` records that verdict when it
+  and a revocation ends it. The replay reads a verdict's `grant`,
+  `source` and `scope` members (agentpolicy v0.0.19, RFC 0001 The
+  record): a `revoke` of the source or a `revoke_scope` ends it, and a
+  `grant_set` allow is a rule the read was granted, when the record's
+  `scope` is one the path's own grants were made under (an `activate`
+  or `grant_set` on the path, the origin's on a fork's prefix among
+  them, less a child agent's under one of them) or the target; a
+  record under any other scope is passed over. Only a record with no
+  `grant` member, written before agentpolicy v0.0.19, is read by its
+  reason, `revoked the rules granted by <source>`. The grants are made
+  again only under the target, the scope on ctx or else the
+  conversation's, `kit.GrantScope`: the scope the resumed runs decide
+  under, never one a record names, so a fork never grants into its
+  origin's conversation. `agentpolicy.Engine.Revoke` records that verdict when it
   removed a rule, and the kit records it for a source whose set held
   none, an untrusted skill's or one whose rules were all refused,
-  whether the scope or `Kit.RevokeSkillGrants` revoked it. A record
+  whether the scope or `Kit.RevokeSkillGrants` revoked it, as the
+  engine does: `agentpolicy.Verdict{Grant: agentpolicy.KindRevoke,
+  Source: name, Scope: agentpolicy.GrantScopeFromContext(ctx)}` beside
+  the reason, recorded as the `grant`, `source` and `scope` members. A record
   whose name the catalogue now gives a skill at another `Location` is
   passed over. One whose `SHA256` is not the digest of
   `agentskill.Skill.Instructions()` now, which agentskill ends with the
@@ -1247,7 +1376,11 @@ Eleven things, all outside `agentturn.Config`:
 - `Kit.ReloadSkills(ctx)` discovers the skills again over the same
   sources and puts the new catalogue behind the skill tool (`currentCat`
   above) and its part in place of the old, guarded as `New` guarded the
-  first. It sets the next `Config()`'s `Instructions`; a config already
+  first. Nothing serialises the swap with the engine's decisions, as
+  `agenttool.Follow` asks of a host that swaps while calls are decided:
+  a call claimed before the reload and run after it is decided on the
+  old catalogue's claim, so a host reloads between runs
+  (`agent.WhileIdle`) to keep claim and call together. It sets the next `Config()`'s `Instructions`; a config already
   handed out keeps its own, which `partsFor` still recognises, and its
   agent takes the new one with `SetConfig` between runs, unless the
   instructions hook re-renders each request, under `WithMemory` or
@@ -1268,7 +1401,10 @@ Eleven things, all outside `agentturn.Config`:
   returned. A `Prompt` that answers pending calls with their outputs,
   and a head move that leaves them, are followed by `engine.Resumed`
   with no answers, for the calls still pending, and `engine.Forget` of
-  their run. `Queue` is `rec.Queue`. Under `WithQuestionEvents`, an
+  their run. `Queue` is `rec.Queue`, and `Deliver`, which makes the
+  Control an `agentturn.Deliverer`, is `rec.Deliver(ctx, agent, items...)`,
+  `rec` being the kit's or, without one, the conversation's on ctx
+  (`agentkit.RecorderFromContext`), or `agent.Deliver` with neither. Under `WithQuestionEvents`, an
   agent whose config has no `ToolElicitor` is given the kit's with
   `agent.SetConfig`. It hands the agent what a resumed session owes,
   `rec.Requeue(ctx, agent)`. `ContinueFrom` is

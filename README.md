@@ -34,6 +34,17 @@ agent := agentturn.New(kit.Config())
 defer kit.Attach(agent)()
 ```
 
+The kit builds no model: `WithModel` takes the product's. A model that
+is an `openresponses.ClientAdapter` over a provider's own API, such as
+OpenAI's or OpenRouter's, is built with `openresponses.WithProviderSlugs()`,
+`client.AsAdapter(openresponses.WithProviderSlugs())`, so it leaves out
+an item another provider stamped, such as Claude's
+`anthropic.redacted_thinking` after a model switch or a handoff, which
+the loop keeps and the provider refuses (openresponses v0.0.18,
+extensions §1.6). A proxy in front of an Open Responses server over the
+Claude adapter names the slugs its upstream takes,
+`WithProviderSlugs("anthropic")`.
+
 `New` does the work that can fail — discovery, validation, opening the
 session, dialing MCP — and reports it once. The skill directories are
 optional because most repositories and most users have none;
@@ -188,6 +199,12 @@ failed on the session's path:
 agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
 ```
 
+`kit.AgentOptions()` is read once, at `New`, for that first agent. An
+agent built later in the process, after the conversation moved on, is
+seeded with `kit.ReadAgentOptions(ctx)`, the session as it stands: an
+item a quarantine took out since is left out there, and New's reading
+still holds it.
+
 A front that asks a person about a held call says so when it answers,
 or the record cannot tell the approval from one a script gave. The
 release is in two phases: `Release` changes nothing, and `Resumed`,
@@ -206,7 +223,31 @@ kit.Engine().Resumed(ctx, end, answers, next)
 ```
 
 `Kit.Control(agent)` does this for a front, from the calls the agent
-has pending.
+has pending. The Control also delivers, `Control.Deliver`, which makes
+it an `agentturn.Deliverer`: a message joins the run in flight, or
+starts a run once that one has ended, and with a session is recorded
+before the agent takes it. `Control.Compact(ctx, instructions)` folds
+the next model call whatever the budget, a product's `/compact`, under
+`WithCompaction`.
+
+A child the host starts itself, such as a memory pass after a turn,
+is recorded as a subsession of the conversation it serves:
+`kit.StartChild(ctx, agentsession.NewSpawnID())` writes the link and
+gives the context to prompt the child's agent with, `kit.AttachChild`
+records its runs, and `kit.ContinueChild` continues it after a
+restart; the foreground session's export and `DelegatedWork` then
+count its work. Build the pass from a kit of its own, configured for
+the pass and `WithRecorder` the conversation's recorder, so its policy
+decides the pass's memory writes; the pass decides under a grant scope
+of its own, so what the person allowed the conversation does not carry
+over. Seed its agent from the child session,
+`session.AgentOptions(child, rec.ReadOptions()...)`, when a pass should
+see the last one's work.
+
+`kit.MCPServers()` and `kit.MCP(label)` hand back the MCP servers the
+kit dialed, by the label `kit.Tools()` names them with, for what a
+server offers beside its tools: resources, prompts, instructions. The
+remotes stay the kit's to close.
 
 A host that wants its own run's memory writes to name its session puts
 the ID on the context it prompts with,
@@ -308,14 +349,14 @@ a2a.
 
 | library | version |
 |---|---|
-| `openresponses` | v0.0.15 |
-| `agenttool`, `agenttool/mcpclient` | v0.0.24 |
-| `agentturn`, `agentturn/session` | v0.0.32 |
-| `agentsession` | v0.0.28 |
-| `agentsmd` | v0.0.3 |
+| `openresponses` | v0.0.18 |
+| `agenttool`, `agenttool/mcpclient` | v0.0.29 |
+| `agentturn`, `agentturn/session` | v0.0.36 |
+| `agentsession` | v0.0.37 |
+| `agentsmd` | v0.0.4 |
 | `agentskill` | v0.0.12 |
-| `agentmemory` | v0.0.10 |
-| `agentpolicy` | v0.0.17 |
+| `agentmemory` | v0.0.12 |
+| `agentpolicy` | v0.0.19 |
 
 Every sibling is required at a released version with no `replace`, and
 `make no-replace` enforces it: the kit is the module that proves the

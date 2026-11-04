@@ -3,6 +3,317 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- **Breaking**: requires agentturn and agentturn/session v0.0.36, up
+  from v0.0.32, agentsession v0.0.37, up from v0.0.28, agenttool and
+  agenttool/mcpclient v0.0.29, up from v0.0.24, agentpolicy v0.0.19, up
+  from v0.0.17, agentmemory v0.0.12, up from v0.0.10, agentsmd v0.0.4,
+  up from v0.0.3, and openresponses v0.0.18, up from v0.0.15, in the
+  root and in `examples/a2a` (front/a2a and tools/a2a v0.0.36 there).
+  agentturn v0.0.36 records every quarantine, `TurnStart`,
+  `ModelRetry`, `RunEnd` and `ModelBlocked` carrying `Quarantined` and
+  a new `QuarantineAdded` event for one made between runs, so a resumed
+  session no longer sends a quarantined item again (a security fix);
+  the kit forwards every event to a child's recorder unchanged and has
+  no observer that switches on event types, so nothing in it changes.
+  Sessions are written as `agentsession/0.20`, and a file the recorder
+  appends to is raised to 0.20, after which agentsession v0.0.36 and
+  earlier refuse it: upgrade every reader of a store first. A redactor
+  now keeps closed-set members as written (0.20), and
+  `ConfigFromRequestParts` keeps each part whole, its trust included,
+  and refuses a delta-form part (`Hash`, `Keep` or unresolved), which
+  the kit never passes it. Among what
+  arrives: agentpolicy's engine reads a tool's facts claim by default
+  and records a grant's kind, source and scope as members of its
+  verdict; agentturn's `Agent.Deliver` starts no run after a
+  terminating result; agentmemory labels every part's trust and adds
+  `memory_insert`. `openresponses.ReasoningConfig` holds a map, so it
+  can no longer be compared with `==`.
+- **Breaking**: a child agent, one `WithChildAgent` runs or one
+  `Kit.StartChild` starts, decides under a grant scope of its own
+  whenever the kit has an engine, not only under `WithSkillGrants`
+  (#109). Since #94 the engine decides every call under the
+  conversation's scope, so without skills a child decided under it, and
+  a person's "allow for this session" on the conversation let a child
+  agent or a sleep-time pass run the tool unasked. A product whose
+  grants under the conversation's scope reached its `WithChildAgent`
+  children without skill grants no longer has them reach the child. A
+  host that wants a `Kit.StartChild` pass to share the conversation's
+  grants puts the conversation's scope on the pass's run context
+  itself; a `WithChildAgent` child has no such path, and only a grant
+  made without a scope, or the policy's own rules, reaches it.
+- **Breaking**: `PartMemoryUsage`, the usage paragraph's part, is
+  `memory-usage`, where it was `memory:usage`. agentmemory reserves the
+  part IDs `memory`, `memory/…` and `memory:…` to the parts its renderer
+  writes, and a product's own parts take IDs outside that space
+  (agentmemory RFC 0001 §7.2). `WithOrder` still places it with the
+  block. A product that told the memory group's parts by their prefix
+  adds `PartMemoryUsage`, and a session recorded before records the
+  paragraph under the old ID, so the first config entry after the
+  upgrade carries its text again under the new one.
+- A run fails when the kit cannot record one of its policy verdicts
+  in the run's session, where it went on (see Fixed). The first lost
+  write of a run fails the kit's next hook in that run, the engine's
+  `BeforeToolCall` or `BeforeModelCall`; a verdict lost in the last
+  hook a run calls, such as an output guard's on the final answer, and
+  one lost between runs, such as a revocation outside any run, are
+  still lost, and the engine keeps what it held of a run that failed so
+  after deferring a call until `Forget`.
+- The text the model reads when a memory write is refused because the
+  memory block was left out is agentmemory's `ErrBlockDropped`, which
+  no longer says the instruction budget was the reason (#95).
+- **Breaking**: the kit sends each consumed MCP server's instructions
+  to the model by default, as a part of their own while it offers the
+  server's tools (#112, see Added), so every request of a kit whose
+  servers give instructions changes, text and hash.
+  `WithoutMCPInstructions()` is the way back.
+- **Breaking**: `DefaultOrder` is `product, skills, mcp, memory,
+  agentsmd`: `PartMCP` places the MCP servers' instructions (#112). An
+  order that does not name it puts them right after the product's
+  prompt, as the default order does, or first when it names no product
+  prompt or ends on it, so a third party's text never follows the
+  product's last word; `WithOrder` need not change.
+- Docs: `Kit.ReloadSkills` and the manual say the reload is not
+  serialised with the engine's decisions, so a call claimed before it
+  and run after it is decided on the old catalogue's claim; a host
+  reloads between runs, with `Agent.WhileIdle`.
+- Docs: the README names `Control.Deliver`, `Control.Compact`,
+  `Kit.MCPServers` and `Kit.MCP`, and `docs/manual.md` names the read
+  options `Kit.RegrantSkills` reads with.
+- Docs: `docs/manual.md`'s `ToolElicitor` row says the loop asks the
+  kit's elicitor about a nested call (`agenttool.Invoke`) the policy
+  defers, and never an elicitor the invoking tool installed, as of
+  agentturn v0.0.35.
+- Docs: the README and `docs/manual.md`'s `Model` row say that a model
+  that is an `openresponses.ClientAdapter` over a provider's own API is
+  built with `openresponses.WithProviderSlugs()`. The kit builds no
+  adapter, so the product does; without it an item under another
+  provider's slug reaches the provider, which refuses the request.
+
+### Added
+
+- `Kit.ReadAgentOptions(ctx)`: the options that seed an agent with the
+  session as the store holds it now. `Kit.AgentOptions` and
+  `Kit.Transcript` are New's reading, for the first agent, and say so; a
+  second agent seeded from them after a quarantine (agentturn v0.0.36's
+  `QuarantineAdded`, or a guard's in a run) held the quarantined item
+  and sent it to the model again, though the record's `omit` leaves it
+  out.
+
+- `Kit.StartChild(ctx, spawnID)`, `Kit.ContinueChild(ctx, spawnID)`,
+  `Kit.AttachChild(agent)` and `ErrNoChildRecorder` (#109): a child
+  the host starts itself, such as a sleep-time memory pass, is recorded
+  as a subsession of the conversation it serves, over agentturn
+  v0.0.36's `Recorder.StartChild` and `ContinueChild` (agentsession RFC
+  0001 0.19, a `subsession` link carrying `spawn_id`). The foreground
+  session's ATIF export embeds the pass's steps and writes,
+  `agentsession.DelegatedWork` counts it, and a pass after a restart
+  continues the same child session. The child's context carries the
+  recorder, its session for the memory journal and, under
+  `WithSkillGrants`, a grant scope of its own, as a `WithChildAgent`
+  child's does.
+
+- `WithMemoryArchive(scopes...)` (#107): scopes the memory tools write
+  and search and the block never renders, an archive like Letta's
+  archival memory. They join the writable scopes `agentmemory.Tools`
+  is built over, so `memory_search` finds a passage and
+  `memory_insert` (under `WithMemoryTools(agentmemory.WithInsert(...))`)
+  adds one, and the usage paragraph names them as searchable and not
+  shown; no request's instructions hold a passage. A scope also given
+  to `WithMemory` or `WithMemoryReadScopes` is refused by `New`.
+
+- Each consumed MCP server's instructions are a part of their own,
+  `mcp:#<n> <what>`, the server's label as its id and source, while the
+  kit holds the server and offers its tools (#112, agenttool RFC 0001,
+  the MCP `instructions` row): a tool of it passes `WithToolFilter`,
+  `WithToolWrap`, the duplicate check and the policy's offer under the
+  conversation's grant scope, so a server whose every tool the policy
+  denies sends none. The part is labelled `untrusted`
+  (`Remote.InstructionsReads`) unless `WithTrustedMCPInstructions`
+  names the server, and holds the text under a heading naming the
+  server and inside a code fence longer than any backtick run in it,
+  so a heading, a separator or a fence the server wrote cannot pass for
+  the harness's structure. An added server brings its part from the
+  next request, and `RemoveMCP` or `Close` takes it away. The parts are
+  charged to the budget after the product's, each whole or omitted, and
+  guarded like the rest. `WithoutMCPInstructions` leaves them out.
+
+- `WithPart(id, source, render)` and `PartRender` (#111): a part of the
+  product's own, rendered at `New` and for every request, with its
+  text, its trust and its omissions. It is placed by `WithOrder` (after
+  the kit's own parts by default), charged to `WithInstructionBudget`
+  whole as the product's prompt is, guarded like every part, and given
+  by `Kit.PartsFor`, so when its text changes mid-session the session's
+  next delta carries the new text under the part's id, source and trust
+  and every other part stays a part. The only route before was a
+  `BeforeModelCall` after the kit's, which left the record one flattened
+  string. A hook that rewrites the instructions after the kit's still
+  flattens the record for that request, and a part that grows past the
+  budget after `New` drops the bounded layers but is sent whole. An id
+  the kit composes, one in agentmemory's reserved space, an empty one
+  or a repeated one is refused by `New`.
+
+- `Control.Deliver`, so a kit's `Control` is an `agentturn.Deliverer`
+  (#106). A message that arrives after a run's last drain, between its
+  final turn and its end, starts a run once that run has ended, where
+  `Control.Queue` left it in a queue nothing drained until the next
+  input. With a recorder the items are written as queued entries
+  carrying `deliver` before the agent takes them
+  (`session.Recorder.Deliver`). After a terminating result it starts no
+  run and returns agentturn's `ErrTerminated` unchanged. A steer is
+  `Control.Queue` with `agentturn.QueueSteer`, as before.
+
+- `Control.Compact(ctx, instructions)` and `ErrNoCompaction` (#110): the
+  next request folds whatever its budget, with instructions for that
+  fold alone, through agentturn v0.0.35's `compact.Transform.FoldNext`
+  on the transform `WithCompaction` built, which a product could not
+  reach. The fold is reported to `WithFoldObserver` and recorded as an
+  automatic one; without a compaction transform Compact returns
+  `ErrNoCompaction`. It folds at the next model call, the run in
+  flight's or the next run's, not at once. The kit builds one
+  transform for every agent configured from it, so the next model call
+  of any of them takes the fold, not only the Control's own agent's.
+
+- `Kit.MCPServers()` and `Kit.MCP(label)`, with `MCPServer` (#113): the
+  remotes of the MCP servers the kit dialed, New's and those `AddMCP`
+  connected, by the label `Kit.Tools` names them with, so a kit product
+  reaches a server's resources, prompts and instructions as a product
+  that dialed it by hand does. The remotes stay the kit's to close.
+
+- `WithMCPResourceTools()` (#115): each MCP server that advertises
+  resources is offered agenttool v0.0.27's `Remote.ResourceTools()`,
+  `list_resources` and `read_resource` under its prefix, beside its
+  tools, so the model can follow a `resource_link`. They are the
+  server's tools to `Kit.Tools`, `WithToolFilter`, the policy's offer,
+  conflict detection and the record, for New's servers and added ones,
+  and leave with `RemoveMCP`.
+
+### Fixed
+
+- A memory write in a run whose memory block the budget dropped is
+  refused where it is decided, before any policy asks a person (#95,
+  agentmemory RFC 0001 §6.8). The kit's first `BeforeToolCall` hook
+  blocks it, so the chain ends there; it was held, a person was asked,
+  and the write was refused when it ran whatever they answered. The
+  refusal reads as agentmemory's `ErrBlockDropped`, the text its tools
+  give. The dropped render's manifest is
+  `agentmemory.Manifest.LeaveOut()`, which records `dropped`, so a
+  block dropped over an empty store is told from one shown empty and a
+  write composed from it is refused after a restart too; the kit reads
+  a drop with `Manifest.Dropped()`, and decides a write with
+  `agentmemory.CheckWrite`. A write held before the kit refused it at
+  decision, by an older kit's engine or by hooks a product built by
+  hand, is still refused when it runs, after a restart too.
+- The kit's engine decides every call under `Kit.GrantScope`, with
+  skill grants or without (#94). It added the scope only under
+  `WithSkillGrants`, so in a kit without skills a set a front activated
+  under `Kit.GrantScope`, a person's "for this session", was granted
+  and never decided a call, and the person was asked again each time.
+  The offer is filtered under the same scope, so a bare deny a front
+  activates under it takes the tool off the offer as well as blocking
+  its calls.
+- The skill tool's facts claim follows `ReloadSkills` (#96). The tool
+  `New` offered ran the catalogue in force but answered its facts from
+  the tool of the catalogue `New` discovered, so under
+  `WithSkillTool(agentskill.WithFileClaim(fn))` a skill the reload added
+  was claimed as the call alone, and its files read past a policy that
+  holds skill reads to `read`'s rules, and a skill another source now
+  held was claimed at the file it no longer served. agentpolicy v0.0.18
+  reads a tool's facts by default, so the stale claim decided the call
+  with no splitter at all. The tool is now `agenttool.Follow` over the
+  tool in force, which answers every property and every call from it.
+- The revocation verdict the kit records for a skill's set that held
+  no rules carries agentpolicy v0.0.19's members, `grant` `revoke`,
+  `source` and `scope`, as the engine's own revocation does, so a reader
+  that takes a revocation from the members, as agentpolicy RFC 0001
+  draft 0.4 has it, finds it. It carried the reason alone.
+- A policy verdict the run's session refuses to record fails the run.
+  The kit's observer dropped the error from `Recorder.Annotate`, so a
+  run went on under a decision its session said nothing of, and a
+  restart could not regrant a skill grant whose verdict was lost. The
+  first lost write of a run is now returned by the kit's next hook in
+  that run: the engine's `BeforeToolCall`, right after the call's own
+  verdict, or `BeforeModelCall`, after the guards. A write outside any
+  run, a revocation between runs, has no run to fail and is still lost.
+- The answer `Kit.QuestionsFor`, and so `Control.Elicitor` and the
+  kit's elicitor under `WithQuestionEvents`, gives the asking tool
+  names its decider, `Answer.By` `human`, when the reply names none, as
+  agenttool v0.0.28 asks of an answer a person gave. The session
+  recorded the answer as a person's already; the tool, and whatever it
+  passed the answer to, such as an MCP server or a child agent, got one
+  that named nobody. A reply that names its decider keeps it.
+- `memory_insert` (agentmemory v0.0.11's `InsertTool`, offered under
+  `WithMemoryTools(agentmemory.WithInsert(…))`) is one of the writes a
+  request whose memory block the budget dropped is not offered and
+  whose run refuses, as `memory_save`, `memory_patch` and
+  `memory_forget` are: the kit's list is `agentmemory.WriteTools()`.
+- Each memory part carries the trust agentmemory gave it
+  (`agentsession.InstructionPart.Trust`): an entry part and an omission
+  line their scope's labels, `untrusted` unless the product set them
+  with `agentmemory.WithScopeTrust`, and the title, scope headings,
+  summary and usage paragraph an empty trust, which reads nothing. The
+  session's config entries record it, so a reader knows the memory the
+  model was shown came from text a model wrote (agentmemory RFC 0001
+  §7.2). The kit dropped it; agentsession v0.0.36's
+  `ConfigFromRequestParts` would also have dropped it from the record.
+  A session recorded before this release and resumed under it writes
+  every memory part's text once more in its first delta, since the
+  trust differs from that of the parts in force, which had none.
+- An omitted memory entry's `Omission.Size`, and the `size` of its
+  `instructions_omitted` element, is the bytes its part would have
+  added, `agentmemory.EntryPart`'s text and its separator, as
+  agentsession defines an omitted part's size (agentmemory RFC 0001
+  §8.1). It was the manifest's `Bytes`, the content's size, which is
+  less. Each scope that left an entry out is listed once per render; an
+  entry changed or forgotten since the render keeps the content's size.
+- The replay of a session's skill grants, at `New` and in
+  `Kit.RegrantSkills`, reads agentpolicy v0.0.19's `grant`, `source`
+  and `scope` record members (#80, agentpolicy RFC 0001 The record): a
+  revocation is the one its members name, and one made under a scope
+  the session's path never granted under, another conversation's, no
+  longer ends this one's grants, whatever the reason text says. A
+  record from before v0.0.19, which has no members, is still read by
+  its reason. The records read are those under the scopes the path's
+  own grants were made under, a fork's origin's on its prefix among
+  them; the grants are made again only under the scope the resumed
+  conversation's runs decide under, as before, so a resumed fork never
+  grants into its origin's conversation, nor gives it back what it
+  revoked after the fork.
+- `Control.Queue`, and the new `Control.Deliver`, write through the
+  conversation's recorder on the context (`ContextWithRecorder`) when
+  the kit has no session of its own, as one kit serving several
+  conversations does, so the queued entry is on the record before the
+  agent takes the item. Queue fell back to the agent's own, which wrote
+  nothing until a run took the item (agentturn#244).
+- `Kit.Tools()` lists each MCP server's tools as the server lists them
+  now, through `WithToolFilter` and the duplicate check, as the model is
+  offered them (#101). It gave the list a server had when it was added,
+  so after a server's `tools/list_changed` or a `WithReconnect` restart
+  it kept a removed tool and left out an added one. A provider's tools
+  are still those it gave at `New`, and after `Close` the servers' are
+  gone. The list also goes through the engine's offer filter, under the
+  grant scope of the kit's own conversation, so a tool a bare deny takes
+  off the offer is not listed, and the filter and wrappers run on every
+  call of `Kit.Tools`.
+- A sidecar session (`agentsession.Header.Media` `sidecar`) can be
+  resumed and moved in. agentturn/session v0.0.35 refuses to read a
+  sidecar session's media without a blob reader
+  (`session.ErrNoBlobReader`), and the kit read the seeded transcript in
+  `New`, and the branch, its models and its owed notes in
+  `Control.ContinueFrom`, with none, so `WithResumedSession` failed and
+  a head move failed. Each now reads with the recorder's
+  `ReadOptions()`. The replayed skill grants were bound to the
+  transcript's last user message through the same read, which failed
+  silently: the grant was bound to no message, and a message another
+  kit's run received after the restart left it in force.
+  `Kit.RegrantSkills` reads with the read options of the recorder that
+  writes the session and takes more of its own (`opts
+  ...session.ReadOption`) for a front that resumed the session without
+  one on the context.
+
 ## v0.0.15 - 2026-10-25
 
 ### Changed

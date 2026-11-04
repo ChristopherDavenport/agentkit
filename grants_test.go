@@ -719,6 +719,24 @@ func TestARevokeOfASetWithNoRulesSurvivesARestart(t *testing.T) {
 	}
 	first.RevokeSkillGrants(t.Context())
 	unsubscribe()
+	// The kit's revocation is recorded as the engine records one, with
+	// agentpolicy v0.0.19's members: the kind, the source and the scope.
+	revocations := 0
+	for _, c := range customEntries(first.Session(), agentpolicy.VerdictNS) {
+		var v struct{ Reason, Grant, Source, Scope string }
+		if err := json.Unmarshal(c.Data, &v); err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasPrefix(v.Reason, "revoked the rules granted by ") {
+			revocations++
+			if v.Grant != string(agentpolicy.KindRevoke) || v.Source != "agentskill:release" || v.Scope == "" {
+				t.Errorf("the revocation's record = %s, want grant revoke, source agentskill:release and the scope", c.Data)
+			}
+		}
+	}
+	if revocations != 1 {
+		t.Fatalf("revocations recorded = %d, want 1", revocations)
+	}
 
 	trusted := func(sk *agentskill.Skill) agentpolicy.Source {
 		return agentpolicy.Source{Name: "agentskill:" + sk.ListedName(), Path: sk.Location, Trusted: true}
@@ -1496,10 +1514,13 @@ func TestAMessageTheTailMissesEndsTheChildrensGrants(t *testing.T) {
 	}
 }
 
-// Without skill grants the kit puts no grant scope on a child agent's
-// context: a scope the product put on the host's, and grants of its own
-// under it, are the child's as they are any tool call's.
-func TestAChildKeepsTheProductsOwnGrantScopeWithoutSkillGrants(t *testing.T) {
+// A child agent decides under a grant scope of its own whenever the kit
+// has an engine, with skill grants or without: a set the host granted
+// under the conversation's scope, a person's "allow for this session",
+// does not let the child run the tool unasked. Without skill grants the
+// child decided under the host's scope and ran git status on the
+// parent's grant. (#109 review C1)
+func TestAChildDoesNotTakeTheConversationsGrantWithoutSkillGrants(t *testing.T) {
 	var ran []string
 	bash := agenttool.New("Bash", "run a command",
 		func(_ context.Context, in struct {
@@ -1546,8 +1567,8 @@ func TestAChildKeepsTheProductsOwnGrantScopeWithoutSkillGrants(t *testing.T) {
 	if _, err := agent.Prompt(ctx, openresponses.UserText("go")); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(ran, []string{"git status"}) {
-		t.Fatalf("the child ran %v, want git status under the product's own grant scope", ran)
+	if len(ran) != 0 {
+		t.Fatalf("the child ran %v on the conversation's grant, want it asked under its own scope", ran)
 	}
 }
 

@@ -117,7 +117,7 @@ func ExampleWithOrder() {
 	// memory
 	// memory/user
 	// memory:summary
-	// memory:usage
+	// memory-usage
 	// product
 }
 

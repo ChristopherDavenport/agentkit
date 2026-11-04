@@ -127,6 +127,48 @@ func (k *Kit) addMCP(ctx context.Context, d mcpDial) (string, error) {
 	return label, nil
 }
 
+// MCPServer is one MCP server the kit dialed: its label, as [Kit.Tools]
+// and a [Conflict] name it, and its remote.
+type MCPServer struct {
+	Label  string
+	Remote *mcpclient.Remote
+}
+
+// MCPServers lists the MCP servers the kit holds: New's, in the order
+// they were given, then those [Kit.AddMCP] and [Kit.AddMCPTransport]
+// connected and [Kit.RemoveMCP] has not removed, in the order they were
+// added. It is how a product reaches what a server offers beside its
+// tools, its resources, prompts and instructions, through the remote,
+// as a product that dialed the servers by hand holds them; a
+// notification handler goes in when the server is dialed, through
+// [mcpclient.WithClientOptions]. The remotes are the kit's: a product
+// must not close one, and treats it as gone after RemoveMCP or
+// [Kit.Close]. It is empty after Close.
+func (k *Kit) MCPServers() []MCPServer {
+	k.mcpMu.Lock()
+	defer k.mcpMu.Unlock()
+	out := make([]MCPServer, 0, len(k.remotes)+len(k.added))
+	for i, r := range k.remotes {
+		out = append(out, MCPServer{Label: k.remoteLabels[i], Remote: r})
+	}
+	for _, a := range k.added {
+		out = append(out, MCPServer{Label: a.label, Remote: a.remote})
+	}
+	return out
+}
+
+// MCP returns the remote of the server the kit holds under label, as
+// [Kit.MCPServers] lists it, and false for a label that names none. The
+// remote is the kit's, as there.
+func (k *Kit) MCP(label string) (*mcpclient.Remote, bool) {
+	for _, s := range k.MCPServers() {
+		if s.Label == label {
+			return s.Remote, true
+		}
+	}
+	return nil, false
+}
+
 // giveBack returns the number a server that was not added took, when
 // no server was numbered after it, so the next is numbered as if the
 // refused one had never been. Under mcpMu.
