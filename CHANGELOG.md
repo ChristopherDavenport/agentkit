@@ -62,6 +62,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `ErrNoCompaction`. It folds at the next model call, the run in
   flight's or the next run's, not at once.
 
+- `Kit.MCPServers()` and `Kit.MCP(label)`, with `MCPServer` (#113): the
+  remotes of the MCP servers the kit dialed, New's and those `AddMCP`
+  connected, by the label `Kit.Tools` names them with, so a kit product
+  reaches a server's resources, prompts and instructions as a product
+  that dialed it by hand does. The remotes stay the kit's to close.
+
 ### Fixed
 
 - A memory write in a run whose memory block the budget dropped is

@@ -127,8 +127,10 @@ type Kit struct {
 	// so neither holds Kit.Tools, RemoveMCP or Close.
 	mcpMu   sync.Mutex
 	remotes []*mcpclient.Remote
-	added   []addedMCP
-	mcpNext int
+	// remoteLabels are the labels of remotes, by position.
+	remoteLabels []string
+	added        []addedMCP
+	mcpNext      int
 	// closeCtx ends when Close begins, and cancelClose ends it. A dial
 	// AddMCP has in flight is bound to it, so Close does not wait for a
 	// sign-in nobody will finish.
@@ -596,6 +598,7 @@ func (k *Kit) dial(ctx context.Context, s *settings) error {
 			return err
 		}
 		k.remotes = append(k.remotes, remote)
+		k.remoteLabels = append(k.remoteLabels, "mcp:"+d.label(i))
 	}
 	return nil
 }
@@ -914,7 +917,7 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 		ts.sources = append(ts.sources, source{name: "WithMemory", tools: tools})
 	}
 	for i, remote := range k.remotes {
-		ts.sources = append(ts.sources, k.remoteSource("mcp:"+s.mcp[i].label(i), remote))
+		ts.sources = append(ts.sources, k.remoteSource(k.remoteLabels[i], remote))
 	}
 	ts.addAt = len(ts.sources)
 	for i, fn := range s.toolProvide {
@@ -2907,7 +2910,7 @@ func (k *Kit) Close() error {
 	}
 	k.mcpMu.Lock()
 	added, remotes := k.added, k.remotes
-	k.added, k.remotes = nil, nil
+	k.added, k.remotes, k.remoteLabels = nil, nil, nil
 	k.mcpMu.Unlock()
 
 	// All at once, off the lock, so closing costs one server's few

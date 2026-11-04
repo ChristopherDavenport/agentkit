@@ -385,6 +385,10 @@ error `New` returns when the server fails to start. With
 `WithToolElicitor` set, `mcpclient.WithElicitation()` goes ahead of
 `opts`, since a client offers elicitation only when asked.
 
+`Kit.MCPServers()` and `Kit.MCP(label)` hand back those remotes by
+label, which by hand are the ones the product dialed and holds, for a
+server's resources, prompts and instructions: the kit's to close.
+
 `Kit.AddMCP` and `Kit.AddMCPTransport` connect a server after `New`,
 the same way, and `Kit.RemoveMCP` closes one. By hand they are a list
 of remotes the provider reads each turn, after `New`'s servers and
