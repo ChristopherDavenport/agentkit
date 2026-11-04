@@ -1277,8 +1277,16 @@ Eleven things, all outside `agentturn.Config`:
   `session.WithBlobs(br)` for a sidecar session resumed without that
   recorder on ctx. It replays the path forward: an `agentskill:read`
   record of a skill's own instructions makes that skill's source live,
-  and a verdict whose reason is `revoked the rules granted by <source>`
-  ends it. `agentpolicy.Engine.Revoke` records that verdict when it
+  and a revocation ends it. The replay reads a verdict's `grant`,
+  `source` and `scope` members (agentpolicy v0.0.19, RFC 0001 The
+  record): a `revoke` of the source or a `revoke_scope` under the
+  replay's scope ends it, and a `grant_set` allow under that scope is a
+  rule the read was granted; a record under another scope is passed
+  over. Only a record with no `grant` member, written before
+  agentpolicy v0.0.19, is read by its reason, `revoked the rules
+  granted by <source>`. With no scope on ctx, the replay's scope is the
+  `scope` of the session's latest `activate` or `grant_set` record, and
+  the conversation's only for a session that has none. `agentpolicy.Engine.Revoke` records that verdict when it
   removed a rule, and the kit records it for a source whose set held
   none, an untrusted skill's or one whose rules were all refused,
   whether the scope or `Kit.RevokeSkillGrants` revoked it, as the

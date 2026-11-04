@@ -572,7 +572,9 @@ func (g *skillGrants) grant(ctx context.Context, sk *agentskill.Skill, out Skill
 // A restart may narrow a grant and never widen it. When the kit built
 // the engine, and so recorded its verdicts, what is granted again is
 // the rules the path says the engine granted for the read, the
-// "granted <rule> by <source>" verdicts written just before its record,
+// grant_set verdicts written just before its record (by their grant,
+// source and scope members, or, for a record from before agentpolicy
+// v0.0.19, their "granted <rule> by <source>" reason),
 // that the catalogue still gives the skill: a skill whose allowed-tools
 // were widened, or whose source turned trusted, since the read gets
 // nothing it did not have. A read the session records no verdict for,
@@ -684,10 +686,42 @@ func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, s
 				Rule   string `json:"rule"`
 				Source string `json:"source"`
 				Reason string `json:"reason"`
+				Grant  string `json:"grant"`
+				Scope  string `json:"scope"`
 			}
 			if json.Unmarshal(c.Data, &v) != nil {
 				continue
 			}
+			if v.Grant != "" {
+				// agentpolicy v0.0.19 and later record what a grant or a
+				// revocation did as members, which a reader takes and
+				// never the reason (agentpolicy RFC 0001, The record): a
+				// change counts here only under this replay's scope.
+				if v.Scope != scope {
+					continue
+				}
+				if v.Source != "" {
+					seen[v.Source] = true
+				}
+				switch agentpolicy.GrantKind(v.Grant) {
+				case agentpolicy.KindRevokeScope:
+					granted, pending, seen = nil, map[string]map[string]bool{}, map[string]bool{}
+				case agentpolicy.KindRevoke:
+					drop(v.Source)
+					delete(pending, v.Source)
+					delete(seen, v.Source)
+				case agentpolicy.KindGrantSet:
+					if v.Action == "allow" && v.Rule != "" {
+						if pending[v.Source] == nil {
+							pending[v.Source] = map[string]bool{}
+						}
+						pending[v.Source][v.Rule] = true
+					}
+				}
+				continue
+			}
+			// A record written before the members: the reason texts
+			// the RFC fixes.
 			if v.Source != "" {
 				seen[v.Source] = true
 			}
