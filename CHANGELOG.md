@@ -3,6 +3,44 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- **Breaking**: requires agentturn and agentturn/session v0.0.35, up
+  from v0.0.32, agentsession v0.0.36, up from v0.0.28, agenttool and
+  agenttool/mcpclient v0.0.29, up from v0.0.24, agentpolicy v0.0.19, up
+  from v0.0.17, agentmemory v0.0.12, up from v0.0.10, agentsmd v0.0.4,
+  up from v0.0.3, and openresponses v0.0.18, up from v0.0.15, in the
+  root and in `examples/a2a` (front/a2a and tools/a2a v0.0.35 there).
+  Sessions are written as `agentsession/0.19`, and a file the recorder
+  appends to is raised to 0.19, after which agentsession v0.0.35 and
+  earlier refuse it: upgrade every reader of a store first. Among what
+  arrives: agentpolicy's engine reads a tool's facts claim by default
+  and records a grant's kind, source and scope as members of its
+  verdict; agentturn's `Agent.Deliver` starts no run after a
+  terminating result; agentmemory labels every part's trust and adds
+  `memory_insert`. `openresponses.ReasoningConfig` holds a map, so it
+  can no longer be compared with `==`.
+
+### Fixed
+
+- A sidecar session (`agentsession.Header.Media` `sidecar`) can be
+  resumed and moved in. agentturn/session v0.0.35 refuses to read a
+  sidecar session's media without a blob reader
+  (`session.ErrNoBlobReader`), and the kit read the seeded transcript in
+  `New`, and the branch, its models and its owed notes in
+  `Control.ContinueFrom`, with none, so `WithResumedSession` failed and
+  a head move failed. Each now reads with the recorder's
+  `ReadOptions()`. The replayed skill grants were bound to the
+  transcript's last user message through the same read, which failed
+  silently: the grant was bound to no message, and a message another
+  kit's run received after the restart left it in force.
+  `Kit.RegrantSkills` reads with the read options of the recorder that
+  writes the session and takes more of its own (`opts
+  ...session.ReadOption`) for a front that resumed the session without
+  one on the context.
+
 ## v0.0.15 - 2026-10-25
 
 ### Changed

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -1905,7 +1906,7 @@ func TestTheSummaryRequestsReasoningFollowsTheModelAsked(t *testing.T) {
 				t.Fatal("no summary was asked for")
 			}
 			for _, req := range reqs {
-				if req.Reasoning != tc.want {
+				if !reflect.DeepEqual(req.Reasoning, tc.want) {
 					t.Fatalf("a summary request's reasoning = %+v, want %+v", req.Reasoning, tc.want)
 				}
 			}

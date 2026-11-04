@@ -17,6 +17,7 @@ import (
 	"github.com/ChristopherDavenport/agentskill"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
 
@@ -591,7 +592,7 @@ func (g *skillGrants) grant(ctx context.Context, sk *agentskill.Skill, out Skill
 // verdict whose write failed. The journal matches a revocation to a
 // read by the source name the product's source function gives now; a
 // function that renames its sources between releases loses the match.
-func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, scoped bool) {
+func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, scoped bool, opts ...session.ReadOption) {
 	path := sess.Path(sess.Leaf())
 	// A replayed grant is bound to the user message the transcript an
 	// agent is seeded with ends under, session.Transcript, the same items
@@ -600,7 +601,7 @@ func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, s
 	// stands in for the messages it folded there, a user-role message of
 	// its own, and a restart after a fold past the last prompt would read
 	// the prompt's digest as stale.
-	if mark, ok := seededMark(sess); ok {
+	if mark, ok := seededMark(sess, opts...); ok {
 		ctx = context.WithValue(ctx, markKey{}, mark)
 	}
 	// The grants are the session's, made under the grant scope of its

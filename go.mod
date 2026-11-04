@@ -3,16 +3,16 @@ module github.com/ChristopherDavenport/agentkit
 go 1.25.0
 
 require (
-	github.com/ChristopherDavenport/agentmemory v0.0.10
-	github.com/ChristopherDavenport/agentpolicy v0.0.17
-	github.com/ChristopherDavenport/agentsession v0.0.28
+	github.com/ChristopherDavenport/agentmemory v0.0.12
+	github.com/ChristopherDavenport/agentpolicy v0.0.19
+	github.com/ChristopherDavenport/agentsession v0.0.36
 	github.com/ChristopherDavenport/agentskill v0.0.12
-	github.com/ChristopherDavenport/agentsmd v0.0.3
-	github.com/ChristopherDavenport/agenttool v0.0.24
-	github.com/ChristopherDavenport/agenttool/mcpclient v0.0.24
-	github.com/ChristopherDavenport/agentturn v0.0.32
-	github.com/ChristopherDavenport/agentturn/session v0.0.32
-	github.com/ChristopherDavenport/openresponses v0.0.15
+	github.com/ChristopherDavenport/agentsmd v0.0.4
+	github.com/ChristopherDavenport/agenttool v0.0.29
+	github.com/ChristopherDavenport/agenttool/mcpclient v0.0.29
+	github.com/ChristopherDavenport/agentturn v0.0.35
+	github.com/ChristopherDavenport/agentturn/session v0.0.35
+	github.com/ChristopherDavenport/openresponses v0.0.18
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 )
 

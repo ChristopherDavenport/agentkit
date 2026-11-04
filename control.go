@@ -582,7 +582,8 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 	if err := rehold(); err != nil {
 		return fail(err)
 	}
-	items, models, err := session.TranscriptModels(s)
+	// The recorder's read options resolve a sidecar session's media.
+	items, models, err := session.TranscriptModels(s, append(rec.ReadOptions(), session.WithContext(ctx))...)
 	if err != nil {
 		return fail(err)
 	}
@@ -599,7 +600,7 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 	// The notes the branch owes after outputs already on it, which a
 	// failed run there could not append; with calls pending, Pending
 	// put them on the last call instead.
-	owed, err := session.OwedNotes(s)
+	owed, err := session.OwedNotes(s, append(rec.ReadOptions(), session.WithContext(ctx))...)
 	if err != nil {
 		return fail(err)
 	}

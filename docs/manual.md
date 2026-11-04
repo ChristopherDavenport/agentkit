@@ -1022,8 +1022,12 @@ under: marks[agentturn.RunIDFromContext(ctx)], bound: ok}`: the mark
 the hook kept for the run the read was made in, which is the same ID
 `TurnStartInfo.RunID` carries, and no mark for a read made in no run,
 which the tail test alone then ends. A replayed grant, `New`'s or
-`Kit.RegrantSkills`', is bound to `userMarkOf(session.Transcript(sess))`,
-the items `Kit.AgentOptions` seeds the agent with, so the first turn
+`Kit.RegrantSkills`', is bound to
+`userMarkOf(session.Transcript(sess, rec.ReadOptions()...))`, the items
+`Kit.AgentOptions` seeds the agent with, read with the recorder's blob
+reader so a sidecar session's images are the data URLs the agent holds
+and not a read refused with `session.ErrNoBlobReader`, which left the
+grant bound to no message; so the first turn
 after a restart does not end what the restart granted again. Not the
 path's `ItemEntry` items: a fold's summary stands in for the messages
 it folded in the seeded transcript, a user-role message of its own, and
@@ -1121,7 +1125,12 @@ Eleven things, all outside `agentturn.Config`:
   the items the filter kept from the model put back; the model each
   reasoning item came from, `agentturn.WithReasoningModels`; and the
   calls pending there, read through a fork's origin, for
-  `agentturn.New`. `Kit.Transcript()` is `session.Transcript(sess)`.
+  `agentturn.New`. `Kit.Transcript()` is
+  `session.Transcript(sess, rec.ReadOptions()...)`. The read options
+  carry the recorder's blob reader, without which a sidecar session's
+  transcript is refused with `session.ErrNoBlobReader`;
+  `Control.ContinueFrom` reads `session.TranscriptModels`,
+  `session.Pending` and `session.OwedNotes` with them as well.
 - `Kit.LookupToolFor(ctx, name)` reads the union the provider last
   returned to the run the context belongs to, and is what the kit's
   engine is given through `agentpolicy.WithToolsFor`; `Kit.LookupTool(name)`

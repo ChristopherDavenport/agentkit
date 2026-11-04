@@ -374,7 +374,11 @@ func New(ctx context.Context, opts ...Option) (*Kit, error) {
 	}
 	if sess := k.sess.Load(); k.grants != nil && sess != nil {
 		k.grants.gmu.Lock()
-		k.grants.regrant(agentpolicy.ContextWithGrantScope(ctx, k.resumeScope(ctx, k.rec, "")), sess, k.grants.scoped)
+		var opts []session.ReadOption
+		if k.rec != nil {
+			opts = k.rec.ReadOptions()
+		}
+		k.grants.regrant(agentpolicy.ContextWithGrantScope(ctx, k.resumeScope(ctx, k.rec, "")), sess, k.grants.scoped, opts...)
 		k.grants.gmu.Unlock()
 	}
 	return k, nil
@@ -774,7 +778,7 @@ func (k *Kit) openSession(ctx context.Context, s *settings) error {
 	// where the failures are reported, so they are read here and not in
 	// the accessors. The recorder's read options read a fork's origin, so
 	// a call the fork's prefix holds is read with its dispatch there.
-	if k.seed, err = session.Transcript(sess); err != nil {
+	if k.seed, err = session.Transcript(sess, rec.ReadOptions()...); err != nil {
 		return fmt.Errorf("agentkit: reading the session's context: %w", err)
 	}
 	if k.seedOps, err = session.AgentOptions(sess, rec.ReadOptions()...); err != nil {
@@ -2098,10 +2102,13 @@ func userMarkOf(items openresponses.Items) (userMark, bool) {
 // seededMark is the mark of the transcript an agent resumed from sess
 // is seeded with, session.Transcript, the items Kit.AgentOptions hands
 // agentturn.New: a fold's summary stands in there for the messages it
-// folded, as it does in the agent. False when the session has none or
-// cannot be read, and the replayed grant is then bound to nothing.
-func seededMark(sess *agentsession.Session) (userMark, bool) {
-	items, err := session.Transcript(sess)
+// folded, as it does in the agent. opts are the read options of the
+// recorder that writes sess, whose blob reader resolves a sidecar
+// session's media: without it a sidecar session cannot be read. False
+// when the session has none or cannot be read, and the replayed grant
+// is then bound to nothing.
+func seededMark(sess *agentsession.Session, opts ...session.ReadOption) (userMark, bool) {
+	items, err := session.Transcript(sess, opts...)
 	if err != nil {
 		return userMark{}, false
 	}
@@ -2502,7 +2509,18 @@ func (k *Kit) Tools() []ToolOrigin {
 // the read and no verdict of its grant, as a session a front recorded
 // without ContextWithRecorder does. It does nothing without skill
 // grants.
-func (k *Kit) RegrantSkills(ctx context.Context, sess *agentsession.Session) error {
+//
+// sess is read as the recorder writing it reads it, with its
+// [session.Recorder.ReadOptions], and then opts: a sidecar session's
+// media is resolved through the recorder's blob reader, so the grants
+// are bound to the last user message of the transcript an agent resumed
+// from sess is seeded with. A caller that resumed sess without the
+// recorder on ctx passes the read options it seeded its agent with,
+// [session.WithBlobs] for a sidecar session; without a blob reader a
+// sidecar session's transcript cannot be read, and the grants are then
+// bound to no message, so under [WithSkillGrantScope] the next user
+// message does not end them.
+func (k *Kit) RegrantSkills(ctx context.Context, sess *agentsession.Session, opts ...session.ReadOption) error {
 	if k.grants == nil || sess == nil {
 		return nil
 	}
@@ -2523,9 +2541,13 @@ func (k *Kit) RegrantSkills(ctx context.Context, sess *agentsession.Session) err
 	// The conversation sess is, as a run recorded by rec or naming it is,
 	// unless the front names its scope itself.
 	ctx = agentpolicy.ContextWithGrantScope(ctx, k.resumeScope(ctx, rec, sess.ID()))
+	var read []session.ReadOption
+	if rec != nil {
+		read = rec.ReadOptions()
+	}
 	g.gmu.Lock()
 	defer g.gmu.Unlock()
-	g.regrant(ctx, sess, g.scoped)
+	g.regrant(ctx, sess, g.scoped, append(read, opts...)...)
 	return nil
 }
 
