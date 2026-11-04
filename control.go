@@ -187,11 +187,22 @@ func (c *Control) Elicitor() agenttool.Elicitor {
 // so each question is an [agentturn.Question] event to a's subscribers
 // answered with Reply, recorded by the run's recorder, the one on the
 // call's context or the kit's, as answered by a person
-// ([agentsession.ByHuman]). It is what [Control.Elicitor] returns, for
+// ([agentsession.ByHuman]). The answer the asking tool gets names that
+// decider too, [agenttool.Answer.By] [agenttool.ByHuman], when the
+// reply names none, so a tool that passes it on, through MCP or to a
+// child agent, does not hand on an answer that names nobody; a reply
+// naming its decider keeps it. It is what [Control.Elicitor] returns, for
 // a product that drives a by hand: it names it on each run's context
 // with [ContextWithQuestions], as [Control.RunContext] does.
 func (k *Kit) QuestionsFor(a *agentturn.Agent) agenttool.Elicitor {
-	ask := a.QuestionElicitor()
+	reply := a.QuestionElicitor()
+	ask := func(ctx context.Context, q agenttool.Elicitation) (agenttool.Answer, error) {
+		ans, err := reply(ctx, q)
+		if err == nil && ans.By == "" {
+			ans.By = agenttool.ByHuman
+		}
+		return ans, err
+	}
 	return func(ctx context.Context, q agenttool.Elicitation) (agenttool.Answer, error) {
 		rec := RecorderFromContext(ctx)
 		if rec == nil {

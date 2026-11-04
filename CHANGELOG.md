@@ -39,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The answer `Kit.QuestionsFor`, and so `Control.Elicitor` and the
+  kit's elicitor under `WithQuestionEvents`, gives the asking tool
+  names its decider, `Answer.By` `human`, when the reply names none, as
+  agenttool v0.0.28 asks of an answer a person gave. The session
+  recorded the answer as a person's already; the tool, and whatever it
+  passed the answer to, such as an MCP server or a child agent, got one
+  that named nobody. A reply that names its decider keeps it.
 - `memory_insert` (agentmemory v0.0.11's `InsertTool`, offered under
   `WithMemoryTools(agentmemory.WithInsert(…))`) is one of the writes a
   request whose memory block the budget dropped is not offered and
