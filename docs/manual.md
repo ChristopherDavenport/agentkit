@@ -1230,7 +1230,10 @@ Eleven things, all outside `agentturn.Config`:
   ends it. `agentpolicy.Engine.Revoke` records that verdict when it
   removed a rule, and the kit records it for a source whose set held
   none, an untrusted skill's or one whose rules were all refused,
-  whether the scope or `Kit.RevokeSkillGrants` revoked it. A record
+  whether the scope or `Kit.RevokeSkillGrants` revoked it, as the
+  engine does: `agentpolicy.Verdict{Grant: agentpolicy.KindRevoke,
+  Source: name, Scope: agentpolicy.GrantScopeFromContext(ctx)}` beside
+  the reason, recorded as the `grant`, `source` and `scope` members. A record
   whose name the catalogue now gives a skill at another `Location` is
   passed over. One whose `SHA256` is not the digest of
   `agentskill.Skill.Instructions()` now, which agentskill ends with the

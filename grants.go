@@ -928,7 +928,11 @@ func (g *skillGrants) revokeLive(ctx context.Context, drop bool) (int, []liveGra
 			// A skill's set held none, untrusted or refused, and a restart
 			// that replays the journal must still see it end, or a rule the
 			// skill gains by then is granted for a read the scope ended.
-			g.observe(ctx, agentpolicy.Verdict{Action: agentturn.Block, Reason: revokedPrefix + name, By: agentpolicy.ByPolicy})
+			// It is recorded as the engine records one, with the kind,
+			// the source and the grant scope as members (agentpolicy
+			// v0.0.19), which a reader takes before the reason's text.
+			g.observe(ctx, agentpolicy.Verdict{Action: agentturn.Block, Reason: revokedPrefix + name, By: agentpolicy.ByPolicy,
+				Grant: agentpolicy.KindRevoke, Source: name, Scope: agentpolicy.GrantScopeFromContext(ctx)})
 		}
 		n += removed
 	}

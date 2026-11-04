@@ -43,6 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The revocation verdict the kit records for a skill's set that held
+  no rules carries agentpolicy v0.0.19's members, `grant` `revoke`,
+  `source` and `scope`, as the engine's own revocation does, so a reader
+  that takes a revocation from the members, as agentpolicy RFC 0001
+  draft 0.4 has it, finds it. It carried the reason alone.
 - A policy verdict the run's session refuses to record fails the run.
   The kit's observer dropped the error from `Recorder.Annotate`, so a
   run went on under a decision its session said nothing of, and a

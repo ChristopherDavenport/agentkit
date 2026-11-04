@@ -719,6 +719,24 @@ func TestARevokeOfASetWithNoRulesSurvivesARestart(t *testing.T) {
 	}
 	first.RevokeSkillGrants(t.Context())
 	unsubscribe()
+	// The kit's revocation is recorded as the engine records one, with
+	// agentpolicy v0.0.19's members: the kind, the source and the scope.
+	revocations := 0
+	for _, c := range customEntries(first.Session(), agentpolicy.VerdictNS) {
+		var v struct{ Reason, Grant, Source, Scope string }
+		if err := json.Unmarshal(c.Data, &v); err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasPrefix(v.Reason, "revoked the rules granted by ") {
+			revocations++
+			if v.Grant != string(agentpolicy.KindRevoke) || v.Source != "agentskill:release" || v.Scope == "" {
+				t.Errorf("the revocation's record = %s, want grant revoke, source agentskill:release and the scope", c.Data)
+			}
+		}
+	}
+	if revocations != 1 {
+		t.Fatalf("revocations recorded = %d, want 1", revocations)
+	}
 
 	trusted := func(sk *agentskill.Skill) agentpolicy.Source {
 		return agentpolicy.Source{Name: "agentskill:" + sk.ListedName(), Path: sk.Location, Trusted: true}
