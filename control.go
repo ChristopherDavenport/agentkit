@@ -361,6 +361,27 @@ func checkAnswers(pending []agentturn.PendingCall, answers []agentturn.Answer) e
 	return nil
 }
 
+// ErrNoCompaction is the error [Control.Compact] returns for a kit
+// configured without [WithCompaction], [WithCompactionModel] or
+// [WithCompactor]: there is no transform to fold with.
+var ErrNoCompaction = errors.New("agentkit: no compaction is configured, so there is nothing to fold with")
+
+// Compact asks the kit's compaction transform to fold on the next
+// request, whatever its budget, with instructions, when not empty, for
+// that fold alone ([compact.Transform.FoldNext]): a product's /compact.
+// The fold is the one a request over budget makes, kept tail and pins
+// included, reported to [WithFoldObserver] and recorded as an automatic
+// fold is, and [compact.WithMinFold] still guards it. The next request
+// is the agent's next model call: the run in flight's, or the next
+// run's, so a host that wants the conversation folded now prompts it.
+// A later Compact before that request replaces the instructions. It
+// returns [ErrNoCompaction] without a compaction transform. The kit
+// holds one transform for every agent it configures, so the next
+// request of any of them takes the fold.
+func (c *Control) Compact(ctx context.Context, instructions string) error {
+	return c.kit.compactNext(instructions)
+}
+
 var _ agentturn.Deliverer = (*Control)(nil)
 
 // Deliver implements [agentturn.Deliverer]: the agent's Deliver under

@@ -218,6 +218,10 @@ type Kit struct {
 	lostVerdicts    bounded[error]
 	recordsVerdicts bool
 
+	// compact is the compaction transform the kit built, nil without
+	// one; Control.Compact asks it to fold.
+	compact *compact.Transform
+
 	// recmu guards recorded, the manifest last written to each session
 	// and the entry that holds it, keyed by the session's ID, and is held
 	// across the write. A later write may be a delta on it,
@@ -1384,9 +1388,20 @@ func (k *Kit) buildHooks(s *settings) {
 			}
 			t = compact.NewLocal(model, opts...)
 		}
+		k.compact = t
 		transforms = append(transforms, t.Transform)
 	}
 	k.cfg.Transform = chain1(transforms, agentturn.ChainTransform)
+}
+
+// compactNext asks the kit's compaction transform to fold on its next
+// call, [Control.Compact].
+func (k *Kit) compactNext(instructions string) error {
+	if k.compact == nil {
+		return ErrNoCompaction
+	}
+	k.compact.FoldNext(instructions)
+	return nil
 }
 
 // onFold is the fold callback the kit gives compaction: the Fold of the

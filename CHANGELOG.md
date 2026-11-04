@@ -53,6 +53,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   run and returns agentturn's `ErrTerminated` unchanged. A steer is
   `Control.Queue` with `agentturn.QueueSteer`, as before.
 
+- `Control.Compact(ctx, instructions)` and `ErrNoCompaction` (#110): the
+  next request folds whatever its budget, with instructions for that
+  fold alone, through agentturn v0.0.35's `compact.Transform.FoldNext`
+  on the transform `WithCompaction` built, which a product could not
+  reach. The fold is reported to `WithFoldObserver` and recorded as an
+  automatic one; without a compaction transform Compact returns
+  `ErrNoCompaction`. It folds at the next model call, the run in
+  flight's or the next run's, not at once.
+
 ### Fixed
 
 - A memory write in a run whose memory block the budget dropped is
