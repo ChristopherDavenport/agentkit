@@ -1609,6 +1609,115 @@ func TestARestartedKitsFirstHandBackIsADelta(t *testing.T) {
 	}
 }
 
+// A memory write held for approval in a run whose block the budget
+// dropped, and approved, is refused when it runs, in the process that
+// held it and after a restart. The kit's own hook now refuses such a
+// write before anyone is asked, so the first run here is decided by a
+// hold alone in place of the kit's BeforeToolCall, as an older kit's
+// engine held it, or a product that built its hooks by hand; a run the
+// bounded render map has dropped reaches the same path. The Resume that
+// runs the write has rendered nothing, so the refusal reads the manifest
+// in force at the call on the session's path, which says the block was
+// left out. After the restart the kit's own config runs it, under a
+// budget that now fits the block, so agentmemory's tools, which read the
+// kit's last render, would let the write through: the kit's refusal is
+// what stops it. (#53, #69, #95)
+func TestAHeldWriteInARunWhoseBlockWasDroppedIsRefused(t *testing.T) {
+	const prompt = "be brief"
+	content := "This project pins Go 1.25. " + strings.Repeat("c", 4000)
+	writes := map[string]string{
+		agentmemory.SaveTool:   `{"scope":"user","name":"go-version","content":"This project pins Go 1.26."}`,
+		agentmemory.PatchTool:  `{"scope":"user","name":"go-version","old_text":"1.25","new_text":"1.26"}`,
+		agentmemory.ForgetTool: `{"scope":"user","name":"go-version"}`,
+		agentmemory.InsertTool: `{"scope":"user","content":"This project pins Go 1.26."}`,
+	}
+	// hold holds every memory write for a person, and decides nothing
+	// else.
+	hold := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+		if slices.Contains(agentmemory.WriteTools(), info.Call.Name) {
+			return &agentturn.ToolDecision{Action: agentturn.Defer, Reason: "memory writes are approved by hand"}, nil
+		}
+		return nil, nil
+	}
+	for _, restart := range []bool{false, true} {
+		for name, args := range writes {
+			t.Run(fmt.Sprintf("%s restart %v", name, restart), func(t *testing.T) {
+				store := memStore(t, agentmemory.Entry{Scope: "user", Name: "go-version", Content: content})
+				sessions := agentsession.NewMemoryStore()
+				build := func(model agentturn.Model, sess agentkit.Option, held bool) (*agentkit.Kit, agentturn.Config) {
+					budget := int64(len(prompt) + len(agentkit.Separator) + 40)
+					if !held {
+						budget = 1 << 20 // the block fits after the restart
+					}
+					kit, err := agentkit.New(t.Context(),
+						agentkit.WithModel(model, "m"),
+						agentkit.WithInstructions(prompt),
+						agentkit.WithMemory(store, "user"),
+						agentkit.WithMemoryTools(agentmemory.WithInsert("user")),
+						agentkit.WithInstructionBudget(budget),
+						sess,
+					)
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = kit.Close() })
+					cfg := kit.Config()
+					if held {
+						cfg.BeforeToolCall = hold
+					}
+					return kit, cfg
+				}
+				model := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn(name, args)}}
+				kit, cfg := build(model, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}), true)
+				if cfg.Instructions != prompt {
+					t.Fatalf("instructions = %q, want the block dropped", cfg.Instructions)
+				}
+				agent := agentturn.New(cfg, kit.AgentOptions()...)
+				unsubscribe := kit.Attach(agent)
+				end, err := agent.Prompt(t.Context(), openresponses.UserText("bump go"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if end.Reason != agentturn.ReasonInputRequired {
+					t.Fatalf("reason = %q, want the write held", end.Reason)
+				}
+				if restart {
+					unsubscribe()
+					model = &scriptModel{}
+					kit, cfg = build(model, agentkit.WithResumedSession(sessions, kit.SessionID()), false)
+					if cfg.Instructions == prompt {
+						t.Fatal("the block is dropped after the restart too; the budget must fit it")
+					}
+					agent = agentturn.New(cfg, kit.AgentOptions()...)
+					unsubscribe = kit.Attach(agent)
+				} else {
+					model.mu.Lock()
+					model.turns = append(model.turns, textTurn("ok"))
+					model.mu.Unlock()
+				}
+				defer unsubscribe()
+				pending := agent.State().Pending
+				if len(pending) != 1 {
+					t.Fatalf("pending = %+v, want the held write", pending)
+				}
+				if _, err := agent.Resume(t.Context(), agentturn.Approve(pending[0].Call.CallID).WithBy(agentpolicy.ByHuman)); err != nil {
+					t.Fatal(err)
+				}
+				entries, err := store.List(t.Context(), "user")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(entries) != 1 || entries[0].Content != content {
+					t.Fatalf("after the approved %s the store holds %d entries; want the entry untouched, the model was shown no block", name, len(entries))
+				}
+				if out := lastToolOutput(model); !strings.Contains(out, "memory cannot be changed") {
+					t.Fatalf("the approved %s was told %q, want the refusal", name, out)
+				}
+			})
+		}
+	}
+}
+
 // A memory write the model makes in a run whose block the budget dropped
 // is refused (#53), and refused where it is decided, before the policy
 // asks anyone: a write composed from a block the model was not shown

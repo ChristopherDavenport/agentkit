@@ -2090,8 +2090,11 @@ func (k *Kit) keepSaveBase(ctx context.Context, info agentturn.ToolCallInfo) (*a
 	if !ok {
 		return nil, nil
 	}
-	if r.dropped {
-		return &agentturn.ToolDecision{Action: agentturn.Block, Reason: errMemoryDropped.Error(), By: agentsession.ByPolicy}, nil
+	// agentmemory's own rule for the decision: a writer's call under a
+	// manifest that records the block left out ([memoryPart] records a
+	// drop as agentmemory.Manifest.LeaveOut).
+	if err := agentmemory.CheckWrite(r.man, info.Call.Name); err != nil {
+		return &agentturn.ToolDecision{Action: agentturn.Block, Reason: err.Error(), By: agentsession.ByPolicy}, nil
 	}
 	k.saveBase.put(saveKey(ctx, info.Call.CallID), r)
 	return nil, nil

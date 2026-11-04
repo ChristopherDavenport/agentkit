@@ -88,7 +88,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `agentmemory.Manifest.LeaveOut()`, which records `dropped`, so a
   block dropped over an empty store is told from one shown empty and a
   write composed from it is refused after a restart too; the kit reads
-  a drop with `Manifest.Dropped()`.
+  a drop with `Manifest.Dropped()`, and decides a write with
+  `agentmemory.CheckWrite`. A write held before the kit refused it at
+  decision, by an older kit's engine or by hooks a product built by
+  hand, is still refused when it runs, after a restart too.
 - The kit's engine decides every call under `Kit.GrantScope`, with
   skill grants or without (#94). It added the scope only under
   `WithSkillGrants`, so in a kit without skills a set a front activated

@@ -712,8 +712,8 @@ keepSaveBase := func(ctx context.Context, info agentturn.ToolCallInfo) (*agenttu
 	if !ok {
 		return nil, nil
 	}
-	if r.dropped {
-		return &agentturn.ToolDecision{Action: agentturn.Block, Reason: agentmemory.ErrBlockDropped.Error(), By: agentsession.ByPolicy}, nil
+	if err := agentmemory.CheckWrite(r.man, info.Call.Name); err != nil { // the render left the block out
+		return &agentturn.ToolDecision{Action: agentturn.Block, Reason: err.Error(), By: agentsession.ByPolicy}, nil
 	}
 	saveBase[sessionID(ctx)+"\x00"+info.Call.CallID] = r
 	return nil, nil
