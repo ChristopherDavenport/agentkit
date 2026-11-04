@@ -34,14 +34,17 @@ const (
 	// PartMemory is the memory block, from [WithMemory]. The block is
 	// several parts, one per piece [agentmemory.RenderParts] returns,
 	// and PartMemory is both the ID of the first, the block's title, and
-	// the ID [WithOrder] places the whole group by. Every part of the
-	// group has an ID that is PartMemory or starts with "memory/" or
-	// "memory:".
+	// the ID [WithOrder] places the whole group by. Every part
+	// agentmemory renders has an ID that is PartMemory or starts with
+	// "memory/" or "memory:", the space agentmemory reserves to its
+	// renderer; the group ends with [PartMemoryUsage].
 	PartMemory = "memory"
 	// PartMemoryUsage is the last part of the memory group:
 	// [agentmemory.Usage], the paragraph that tells the model what the
-	// block is and which tool makes which change.
-	PartMemoryUsage = "memory:usage"
+	// block is and which tool makes which change. It is the kit's part,
+	// not the renderer's, so its ID is outside agentmemory's reserved
+	// space (agentmemory RFC 0001 §7.2).
+	PartMemoryUsage = "memory-usage"
 )
 
 // The Source of each part: the library that produced the text, in the
@@ -117,9 +120,10 @@ func join(order []string, byID map[string][]Part) (string, []Part) {
 }
 
 // group is the ID [WithOrder] places a part by: [PartMemory] for every
-// part of the memory block, and the part's own ID for the rest.
+// part of the memory block, [PartMemoryUsage] included, and the part's
+// own ID for the rest.
 func group(id string) string {
-	if id == PartMemory || strings.HasPrefix(id, PartMemory+"/") || strings.HasPrefix(id, PartMemory+":") {
+	if id == PartMemory || id == PartMemoryUsage || strings.HasPrefix(id, PartMemory+"/") || strings.HasPrefix(id, PartMemory+":") {
 		return PartMemory
 	}
 	return id

@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `memory_insert`. `openresponses.ReasoningConfig` holds a map, so it
   can no longer be compared with `==`.
 
+- **Breaking**: `PartMemoryUsage`, the usage paragraph's part, is
+  `memory-usage`, where it was `memory:usage`. agentmemory reserves the
+  part IDs `memory`, `memory/…` and `memory:…` to the parts its renderer
+  writes, and a product's own parts take IDs outside that space
+  (agentmemory RFC 0001 §7.2). `WithOrder` still places it with the
+  block. A product that told the memory group's parts by their prefix
+  adds `PartMemoryUsage`, and a session recorded before records the
+  paragraph under the old ID, so the first config entry after the
+  upgrade carries its text again under the new one.
 - Docs: `docs/manual.md`'s `ToolElicitor` row says the loop asks the
   kit's elicitor about a nested call (`agenttool.Invoke`) the policy
   defers, and never an elicitor the invoking tool installed, as of

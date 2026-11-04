@@ -102,7 +102,7 @@ each of its parts, the same pass each turn's hook makes
 layers := []agentsession.InstructionPart{
 	{ID: "product", Text: prompt},
 	{ID: "skills", Text: cat.Prompt() + "\n\n" + cat.Usage()},
-	// one part per agentmemory.RenderParts piece, then memory:usage
+	// one part per agentmemory.RenderParts piece, then memory-usage
 	{ID: "agentsmd", Text: agentsmd.Render(chain.Files)},
 }
 first, err := guardParts(ctx, guard.Chain{Guards: guards}, layers)
@@ -126,7 +126,9 @@ the session format's own, so the joined text of `Kit.Parts()` is what
 the request carried and what its hash covers.
 
 The kit holds the memory block as parts, `agentmemory.RenderParts`, one
-part per piece and `agentmemory.Usage()` as `memory:usage` after them.
+part per piece and `agentmemory.Usage()` as `memory-usage`
+(`agentkit.PartMemoryUsage`) after them, an ID outside the `memory`,
+`memory/…` and `memory:…` space agentmemory reserves to its renderer.
 `agentmemory.Render` is `RenderParts` joined with the same separator, so
 the text above is unchanged; the parts are what `Kit.Parts` and the
 recorder see, so a write to one entry is recorded as that entry's part
@@ -500,7 +502,7 @@ instructions := func(ctx context.Context, req *openresponses.Request) error {
 		return err
 	}
 	// The memory group's parts replaced by one part per piece and then
-	// memory:usage, in the position the first of them held.
+	// memory-usage, in the position the first of them held.
 	layers = withMemoryGroup(layers, pieces)
 	if r := recorderFor(ctx); r != nil {
 		if err := record(ctx, r, m); err != nil { // below

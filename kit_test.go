@@ -1149,7 +1149,7 @@ func groupIDs(parts []agentkit.Part) []string {
 }
 
 func isMemoryPart(id string) bool {
-	return id == agentkit.PartMemory || strings.HasPrefix(id, "memory/") || strings.HasPrefix(id, "memory:")
+	return id == agentkit.PartMemory || id == agentkit.PartMemoryUsage || strings.HasPrefix(id, "memory/") || strings.HasPrefix(id, "memory:")
 }
 
 func toolNames(ts []agenttool.Tool) []string {
