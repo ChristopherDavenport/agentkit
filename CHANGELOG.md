@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `memory_insert`. `openresponses.ReasoningConfig` holds a map, so it
   can no longer be compared with `==`.
 
+- Docs: `docs/manual.md`'s `ToolElicitor` row says the loop asks the
+  kit's elicitor about a nested call (`agenttool.Invoke`) the policy
+  defers, and never an elicitor the invoking tool installed, as of
+  agentturn v0.0.35.
+
 ### Fixed
 
 - A sidecar session (`agentsession.Header.Media` `sidecar`) can be
