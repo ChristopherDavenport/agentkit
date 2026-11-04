@@ -34,11 +34,11 @@ and no fold is recorded.
 | `Model`, `ModelName` | `WithModel` | assign them; the kit builds no adapter, so a model that is an `openresponses.ClientAdapter` over a provider's own API is the product's `client.AsAdapter(openresponses.WithProviderSlugs())`, which leaves out an item under another provider's slug that the loop keeps (`Config.Model`'s doc, agentturn v0.0.35) |
 | `Request`, `RequestExtra`, `Reasoning`, `Text`, `MaxTurns`, `Filter` | `WithRequest`, `WithRequestExtra`, `WithReasoning`, `WithText`, `WithMaxTurns`, `WithFilter` | assign them; the kit copies them through and owns no member of any |
 | `Retry`, `ToolExecution`, `MaxParallelTools` | `WithRetry`, `WithToolExecution`, `WithMaxParallelTools` | assign them; the kit contests none of them and reads none of them |
-| `Instructions` | `WithInstructions`, `WithSkills`, `WithMemory`, `WithAgentsMD` | `strings.Join` of the four blocks, in the order of [ordering.md](ordering.md) — see below |
+| `Instructions` | `WithInstructions`, `WithSkills`, `WithMemory`, `WithAgentsMD`, `WithPart` | `strings.Join` of the four blocks and each `WithPart` part's first render, in the order of [ordering.md](ordering.md) — see below |
 | `Tools` | — | the kit never sets it; it sets `ToolProvider`, which the loop reads in its place |
 | `ToolProvider` | `WithTools`, `WithSkills`, `WithMemory`, `WithMCP`, `WithMCPResourceTools`, `WithChildAgent`, `WithDeferredTools`, `WithToolProvider`, `WithToolFilter`, `WithToolWrap`, `WithPolicy` | `append` the slices, wrap each tool, and wrap the list in `engine.ToolProvider` — see below |
 | `BeforeTurn` | `WithSkillGrantScope`, `WithBeforeTurn` | `agentturn.ChainBeforeTurn(revokeOnUserMessage, yours...)` — see below |
-| `BeforeModelCall` | `WithMemory`, `WithGuards`, `WithPolicy`, `WithSkillGrants`, `WithVerdictObserver`, `WithBeforeModelCall` | `agentturn.ChainBeforeModelCall(instructions, chain.BeforeModelCall(), yours...)` — see below |
+| `BeforeModelCall` | `WithMemory`, `WithPart`, `WithGuards`, `WithPolicy`, `WithSkillGrants`, `WithVerdictObserver`, `WithBeforeModelCall` | `agentturn.ChainBeforeModelCall(instructions, chain.BeforeModelCall(), yours...)` — see below |
 | `BeforeToolCall` | `WithPolicy`, `WithMemory`, `WithSkillGrants`, `WithSkillGrantScope`, `WithBeforeToolCall` | `agentturn.ChainBeforeToolCall(keepSaveBase, decide)`, `decide` being `engine.BeforeToolCall()` under the call's grant scope, the engine built with `agentpolicy.WithHooks(refuseEndedGrant, yours...)`; with `WithEngine` or no policy, `yours...` after the engine and no `refuseEndedGrant` — see below |
 | `AfterToolCall` | `WithAfterToolCall` | assign it; the kit contests nothing here |
 | `OutputGuard` | `WithGuards`, `WithOutputGuard` | `agentturn.ChainOutputGuard(chain.OutputGuard(), yours...)` |
@@ -531,6 +531,16 @@ guardParts := func(ctx context.Context, c guard.Chain, parts []agentsession.Inst
 }
 
 instructions := func(ctx context.Context, req *openresponses.Request) error {
+	// Each WithPart part rendered again, in its place, {id, text, source,
+	// trust}; an empty text leaves it out of this request. The memory
+	// share is the budget less every part but memory's.
+	for _, p := range productParts {
+		r, err := p.render(ctx)
+		if err != nil {
+			return err
+		}
+		layers = withGroup(layers, p.id, []agentsession.InstructionPart{{ID: p.id, Text: r.Text, Source: p.source, Trust: r.Trust}})
+	}
 	pieces, m, dropped, err := renderUnder(ctx, store, scopes, share) // RenderParts under the budget; see Instructions
 	if err != nil {
 		return err

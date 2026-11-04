@@ -54,8 +54,10 @@ type settings struct {
 	maxParallel  int
 
 	instructions string
-	budget       int64
-	order        []string
+	// parts are WithPart's, in the order they were added.
+	parts  []productPart
+	budget int64
+	order  []string
 
 	agentsMDPath string
 	agentsMD     agentsmd.Options
@@ -237,6 +239,57 @@ func WithMaxParallelTools(n int) Option {
 // instructions part, [PartProduct], the frame every other part refines.
 func WithInstructions(text string) Option {
 	return func(s *settings) { s.instructions = text }
+}
+
+// PartRender is one render of a part [WithPart] adds to the
+// instructions.
+type PartRender struct {
+	// Text is the part's text. Empty leaves the part out of this
+	// request, as an empty layer is left out.
+	Text string
+	// Trust is what the product knows of where the text came from,
+	// agentsession's member, recorded on the part: a rule file a
+	// repository holds is not text the product wrote. nil says nothing.
+	Trust *agentsession.Trust
+	// Omitted is what the product considered for the part and left
+	// out, reported in [Kit.Omitted] and recorded as the session's
+	// instructions_omitted. An omission's Part is the part's id when
+	// left empty.
+	Omitted []Omission
+}
+
+// productPart is a part [WithPart] adds.
+type productPart struct {
+	id, source string
+	render     func(context.Context) (PartRender, error)
+}
+
+// WithPart adds a part of the product's own to the instructions, id
+// naming it and source the layer that produced it, in the harness's
+// terms (agentsession's well-known values where one fits, agentsmd for
+// a rule file). render is called at New and for every request, so the
+// part may change mid-session: a rule file loaded when the model opens
+// a file, a /memory reload, a path-scoped rule. The kit then records
+// the new text as that part in the session's next config delta, with
+// the part's source and trust, and every other part stays a part,
+// where a BeforeModelCall that rewrote the instructions after the
+// kit's left the record one flattened string.
+//
+// The part is placed by [WithOrder], after the kit's own parts in
+// [DefaultOrder] when no order is given, in the order the parts were
+// added. It is charged to [WithInstructionBudget] as the product's
+// prompt is, whole, since its text is the product's: the bounded layers
+// share what is left, at New and at each request, and New fails when
+// the first render leaves the budget short. The input guards run over
+// it as over every part, and [Kit.PartsFor] gives it with the rest. An
+// id the kit composes ([PartProduct], [PartSkills], agentsmd.PartID,
+// [PartMemoryUsage]), one in agentmemory's reserved space (memory,
+// memory/…, memory:…), an empty one, or one added twice is refused by
+// New. An error from render fails New, or the request.
+func WithPart(id, source string, render func(context.Context) (PartRender, error)) Option {
+	return func(s *settings) {
+		s.parts = append(s.parts, productPart{id: id, source: source, render: render})
+	}
 }
 
 // WithAgentsMD reads the AGENTS.md chain that applies at path and

@@ -65,6 +65,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `WithPart(id, source, render)` and `PartRender` (#111): a part of the
+  product's own, rendered at `New` and for every request, with its
+  text, its trust and its omissions. It is placed by `WithOrder` (after
+  the kit's own parts by default), charged to `WithInstructionBudget`
+  whole as the product's prompt is, guarded like every part, and given
+  by `Kit.PartsFor`, so when its text changes mid-session the session's
+  next delta carries the new text under the part's id, source and trust
+  and every other part stays a part. The only route before was a
+  `BeforeModelCall` after the kit's, which left the record one flattened
+  string. An id the kit composes, one in agentmemory's reserved space,
+  an empty one or a repeated one is refused by `New`.
+
 - `Control.Deliver`, so a kit's `Control` is an `agentturn.Deliverer`
   (#106). A message that arrives after a run's last drain, between its
   final turn and its end, starts a run once that run has ended, where

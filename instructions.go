@@ -402,6 +402,45 @@ func sessionTrust(t *agentmemory.Trust) *agentsession.Trust {
 	return &agentsession.Trust{Reads: reads}
 }
 
+// checkPartIDs refuses a [WithPart] id the kit composes, one in
+// agentmemory's reserved space, an empty one and one given twice.
+func checkPartIDs(parts []productPart) error {
+	seen := map[string]bool{}
+	for _, p := range parts {
+		switch {
+		case p.id == "":
+			return errors.New("agentkit: WithPart needs an id")
+		case p.id == PartProduct || p.id == PartSkills || p.id == agentsmd.PartID || group(p.id) == PartMemory:
+			return fmt.Errorf("agentkit: WithPart %q names a part the kit composes", p.id)
+		case seen[p.id]:
+			return fmt.Errorf("agentkit: WithPart %q is given twice", p.id)
+		}
+		seen[p.id] = true
+	}
+	return nil
+}
+
+// renderPart renders a [WithPart] part: its group, empty for an empty
+// text, and its omissions, each under the part's id unless it names
+// another.
+func renderPart(ctx context.Context, p productPart) ([]Part, []Omission, error) {
+	r, err := p.render(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("agentkit: rendering part %s: %w", p.id, err)
+	}
+	om := make([]Omission, 0, len(r.Omitted))
+	for _, o := range r.Omitted {
+		if o.Part == "" {
+			o.Part = p.id
+		}
+		if o.Source == "" {
+			o.Source = p.source
+		}
+		om = append(om, o)
+	}
+	return single(Part{ID: p.id, Text: r.Text, Source: p.source, Trust: r.Trust}), om, nil
+}
+
 // memoryWrites are the memory tools that write,
 // [agentmemory.WriteTools]: memory_save, memory_patch, memory_forget
 // and memory_insert. They are withheld from a request whose render the

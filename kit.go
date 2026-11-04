@@ -193,6 +193,9 @@ type Kit struct {
 	skillToolOpts []agentskill.ToolOption
 	budget        int64
 	guards        []guard.Guard
+	// partOmitted is the omissions of the last render of the WithPart
+	// parts, and firstPartOmitted those of New's, as for memory below.
+	partOmitted, firstPartOmitted []Omission
 	// firstOmitted is the memory omissions of New's render, which go
 	// with first.
 	firstOmitted []Omission
@@ -514,9 +517,27 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 		}
 	}
 
+	if err := checkPartIDs(s.parts); err != nil {
+		return err
+	}
+	var partOm []Omission
+	for _, pp := range s.parts {
+		g, om, err := renderPart(ctx, pp)
+		if err != nil {
+			return err
+		}
+		parts[pp.id] = g
+		partOm = append(partOm, om...)
+		configured[pp.id] = true
+	}
+	k.partOmitted, k.firstPartOmitted = partOm, partOm
+
 	order := s.order
 	if order == nil {
-		order = DefaultOrder
+		order = slices.Clone(DefaultOrder)
+		for _, pp := range s.parts {
+			order = append(order, pp.id)
+		}
 	}
 	if s.memStore != nil {
 		configured[PartMemory] = true
@@ -536,11 +557,14 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 	avail := int64(0)
 	if s.budget > 0 {
 		fixed := int64(len(agentsession.JoinInstructions(parts[PartProduct])) + len(agentsession.JoinInstructions(parts[PartSkills])))
+		for _, pp := range s.parts {
+			fixed += int64(len(agentsession.JoinInstructions(parts[pp.id])))
+		}
 		seps := int64(len(Separator) * max(0, len(configured)-1))
 		avail = s.budget - fixed - seps
 		if avail < 0 {
 			return fmt.Errorf(
-				"agentkit: the instruction budget of %d bytes is under the %d bytes of the parts the kit cannot bound (the product prompt and the skill catalogue) plus %d of separators",
+				"agentkit: the instruction budget of %d bytes is under the %d bytes of the parts the kit cannot bound (the product prompt, the skill catalogue and the WithPart parts) plus %d of separators",
 				s.budget, fixed, seps)
 		}
 	}
@@ -1282,7 +1306,7 @@ func (k *Kit) buildHooks(s *settings) {
 	// part guarded, then the guards over the whole request, then the
 	// product's own.
 	var before []func(context.Context, *openresponses.Request) error
-	if s.memStore != nil || (len(s.guards) > 0 && len(k.base) > 0) {
+	if s.memStore != nil || len(s.parts) > 0 || (len(s.guards) > 0 && len(k.base) > 0) {
 		before = append(before, k.instructions(s, guards))
 	}
 	if len(s.guards) > 0 {
@@ -1483,15 +1507,26 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 		var (
 			man     agentmemory.Manifest
 			memOm   []Omission
+			partOm  []Omission
 			dropped bool
 			render  = s.memStore != nil
 		)
+		// The product's parts first, so the memory block is bounded by
+		// what they leave of the budget this request.
+		for _, pp := range s.parts {
+			g, om, err := renderPart(ctx, pp)
+			if err != nil {
+				return err
+			}
+			base = withGroup(base, pp.id, g, k.order)
+			partOm = append(partOm, om...)
+		}
 		if render {
 			// The same render, the same bound and the same drop as the
 			// first one, so the block cannot grow past the budget
 			// between turns and cannot come back at its floor after the
 			// budget dropped it.
-			group, m, om, drop, err := memoryPart(ctx, s, k.memoryShare(s))
+			group, m, om, drop, err := memoryPart(ctx, s, memoryShare(s.budget, base))
 			if err != nil {
 				return err
 			}
@@ -1514,6 +1549,9 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 
 		k.mu.Lock()
 		k.base, k.parts = base, sent
+		if len(s.parts) > 0 {
+			k.partOmitted = partOm
+		}
 		if render {
 			k.manifest, k.memOmitted, k.memDropped = man, memOm, dropped
 			if id := agentturn.RunIDFromContext(ctx); id != "" {
@@ -2326,23 +2364,22 @@ func newUserMessage(tr agentturn.Transcript) bool {
 }
 
 // memoryShare is what is left of the budget for the memory block this
-// turn: the budget less every other part and the separator each of them
-// costs. The other parts do not change after New, so this is the same
-// number every turn unless the caller's budget is zero, in which case
-// there is no bound and the layer keeps its own.
-func (k *Kit) memoryShare(s *settings) int64 {
-	if s.budget <= 0 {
+// turn: the budget less every other part of base and the separator each
+// of them costs. The other parts change after New only by a ReloadSkills
+// or a WithPart render, so this is the same number every turn otherwise,
+// and nothing when the caller's budget is zero, in which case there is
+// no bound and the layer keeps its own.
+func memoryShare(budget int64, base []Part) int64 {
+	if budget <= 0 {
 		return 0
 	}
-	k.mu.Lock()
 	var other int64
-	for _, p := range k.base {
+	for _, p := range base {
 		if group(p.ID) != PartMemory {
 			other += int64(len(p.Text)) + int64(len(Separator))
 		}
 	}
-	k.mu.Unlock()
-	return share(s.budget, s.budget-other)
+	return share(budget, budget-other)
 }
 
 // insertByOrder puts a group of parts back at the position the order
@@ -2420,7 +2457,7 @@ func (k *Kit) PartsFor(_ context.Context, req openresponses.Request) ([]agentses
 		return nil, nil
 	}
 	k.mu.Lock()
-	parts, memOmitted := k.parts, k.memOmitted
+	parts, memOmitted, partOmitted := k.parts, k.memOmitted, k.partOmitted
 	if agentsession.JoinInstructions(parts) != req.Instructions {
 		// The configuration's own instructions, which the recorder
 		// settles at a run's start before any hook has run, are New's
@@ -2430,13 +2467,16 @@ func (k *Kit) PartsFor(_ context.Context, req openresponses.Request) ([]agentses
 			k.mu.Unlock()
 			return nil, nil
 		}
-		memOmitted = k.firstOmitted
+		memOmitted, partOmitted = k.firstOmitted, k.firstPartOmitted
 	}
 	out := make([]Part, len(parts))
 	copy(out, parts)
 	// The omissions under the same lock, so they are the same render's.
-	omitted := make([]agentsession.OmittedPart, 0, len(k.omitted)+len(memOmitted))
+	omitted := make([]agentsession.OmittedPart, 0, len(k.omitted)+len(partOmitted)+len(memOmitted))
 	for _, o := range k.omitted {
+		omitted = append(omitted, o.OmittedPart())
+	}
+	for _, o := range partOmitted {
 		omitted = append(omitted, o.OmittedPart())
 	}
 	for _, o := range memOmitted {
@@ -2480,8 +2520,9 @@ func PartsFrom(kits ...**Kit) func(context.Context, openresponses.Request) ([]ag
 func (k *Kit) Omitted() []Omission {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	out := make([]Omission, 0, len(k.omitted)+len(k.memOmitted))
+	out := make([]Omission, 0, len(k.omitted)+len(k.partOmitted)+len(k.memOmitted))
 	out = append(out, k.omitted...)
+	out = append(out, k.partOmitted...)
 	return append(out, k.memOmitted...)
 }
 
