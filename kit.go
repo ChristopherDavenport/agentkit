@@ -2479,7 +2479,7 @@ func (k *Kit) mcpServers() []mcpServer {
 		out = append(out, mcpServer{label: k.remoteLabels[i], remote: r})
 	}
 	for _, a := range k.added {
-		out = append(out, mcpServer{label: a.label, remote: a.remote})
+		out = append(out, mcpServer(a))
 	}
 	return out
 }
