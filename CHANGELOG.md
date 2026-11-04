@@ -168,6 +168,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   model was shown came from text a model wrote (agentmemory RFC 0001
   §7.2). The kit dropped it; agentsession v0.0.36's
   `ConfigFromRequestParts` would also have dropped it from the record.
+  A session recorded before this release and resumed under it writes
+  every memory part's text once more in its first delta, since the
+  trust differs from that of the parts in force, which had none.
 - An omitted memory entry's `Omission.Size`, and the `size` of its
   `instructions_omitted` element, is the bytes its part would have
   added, `agentmemory.EntryPart`'s text and its separator, as

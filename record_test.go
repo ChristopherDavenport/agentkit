@@ -706,6 +706,13 @@ func TestAMemoryWriteIsRecordedAsThePartsItChanged(t *testing.T) {
 	if !slices.Equal(carried, want) {
 		t.Fatalf("the write's delta carries the text of %v, want only %v", carried, want)
 	}
+	// The new entry part carries its trust in the delta, as the first
+	// config's parts do: an entry a model wrote is untrusted.
+	for _, p := range last.InstructionsParts {
+		if p.ID == agentmemory.PartID("user", "travel") && (p.Trust == nil || !slices.Equal(p.Trust.Reads, []string{"untrusted"})) {
+			t.Fatalf("the delta's new entry part has trust %+v, want untrusted", p.Trust)
+		}
+	}
 }
 
 // memory_save is based on the block the model was shown: a write
