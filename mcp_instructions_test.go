@@ -2,6 +2,7 @@ package agentkit_test
 
 import (
 	"context"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"github.com/ChristopherDavenport/agentkit"
 	"github.com/ChristopherDavenport/agentpolicy"
 	"github.com/ChristopherDavenport/agentsession"
+	"github.com/ChristopherDavenport/agentsmd"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -152,22 +154,29 @@ func TestADeniedServersInstructionsAreNotSent(t *testing.T) {
 	}
 }
 
-// An order that does not name mcp puts the servers' instructions first,
-// before the product's own parts, so every part after them has the last
-// word over a third party's text; last would give it the last word.
-func TestAnOrderThatOmitsMCPPutsTheServersFirst(t *testing.T) {
+// An order that does not name mcp puts the servers' instructions right
+// after the product's own prompt: the product's frame first, and every
+// other part it named after them, with the last word over a third
+// party's text. An order without the product's prompt puts them first.
+func TestAnOrderThatOmitsMCPPutsTheServersAfterTheProduct(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "AGENTS.md"), "Run the tests.")
 	kit, err := agentkit.New(t.Context(),
 		agentkit.WithModel(stubModel{}, "m"),
 		agentkit.WithInstructions("Be brief."),
+		agentkit.WithAgentsMD(root, agentsmd.Options{Root: root}),
 		agentkit.WithMCPTransport(serveInstructed(t, "lookup", "Use lookup first.")),
-		agentkit.WithOrder(agentkit.PartProduct),
+		agentkit.WithOrder(agentkit.PartProduct, agentsmd.PartID),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer kit.Close()
-	parts := kit.Parts()
-	if len(parts) != 2 || !strings.HasPrefix(parts[0].ID, "mcp:") || parts[1].ID != agentkit.PartProduct {
-		t.Fatalf("parts = %+v, want the server's part before the product's", parts)
+	var ids []string
+	for _, p := range kit.Parts() {
+		ids = append(ids, p.ID)
+	}
+	if len(ids) != 3 || ids[0] != agentkit.PartProduct || !strings.HasPrefix(ids[1], "mcp:") || ids[2] != agentsmd.PartID {
+		t.Fatalf("parts = %v, want the server's part right after the product's", ids)
 	}
 }

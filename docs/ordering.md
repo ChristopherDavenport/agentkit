@@ -29,9 +29,11 @@ wrote them, about the server's tools, so they sit with the skill
 catalogue, the other text about what the agent can reach, and early,
 where every later layer overrides them. They are labelled untrusted,
 fenced so nothing in them reads as the harness's own structure, and
-an order that does not name `mcp` puts them first, before the
-product's own parts, so every part it names has the last word over
-them. A server's instructions are given only while the conversation is
+an order that does not name `mcp` puts them right after the
+product's prompt, or first when it names no product prompt, as the
+default order does, so the parts after them have the last word over
+them; an order that puts the product's prompt last names `mcp` to keep
+them from the end. A server's instructions are given only while the conversation is
 offered one of its tools, after the filter, the wrapper, the duplicate
 check and the policy's offer.
 

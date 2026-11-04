@@ -59,9 +59,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `WithoutMCPInstructions()` is the way back.
 - **Breaking**: `DefaultOrder` is `product, skills, mcp, memory,
   agentsmd`: `PartMCP` places the MCP servers' instructions (#112). An
-  order that does not name it puts them first, before the product's own
-  parts, so a third party's text never has the last word; `WithOrder`
-  need not change.
+  order that does not name it puts them right after the product's
+  prompt, or first without one, as the default order does; `WithOrder`
+  need not change, unless it puts the product's prompt last, when it
+  names `mcp` to keep a third party's text from the last word.
 - Docs: `Kit.ReloadSkills` and the manual say the reload is not
   serialised with the engine's decisions, so a call claimed before it
   and run after it is decided on the old catalogue's claim; a host

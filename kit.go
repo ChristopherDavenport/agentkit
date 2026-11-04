@@ -555,9 +555,12 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 	}
 	if !slices.Contains(order, PartMCP) {
 		// The servers' instructions have a place whatever order the
-		// product gave: first, before the product's own parts, so every
-		// part it named has the last word over a third party's text.
-		order = append([]string{PartMCP}, order...)
+		// product gave: right after the product's own prompt, as in
+		// DefaultOrder the product's frame comes first and the parts
+		// after them have the last word over a third party's text; first
+		// when the order has no product prompt.
+		at := slices.Index(order, PartProduct) + 1
+		order = slices.Insert(slices.Clone(order), at, PartMCP)
 	}
 	if s.memStore != nil {
 		configured[PartMemory] = true
