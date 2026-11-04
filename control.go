@@ -361,6 +361,30 @@ func checkAnswers(pending []agentturn.PendingCall, answers []agentturn.Answer) e
 	return nil
 }
 
+var _ agentturn.Deliverer = (*Control)(nil)
+
+// Deliver implements [agentturn.Deliverer]: the agent's Deliver under
+// RunContext. The items join the run in flight, or, when no run would
+// take them, such as one past its last drain, start a run that does
+// once that run has ended, unless calls are pending, and Deliver
+// returns its end. With a recorder, each item is written as a queued
+// entry carrying deliver before the agent takes it
+// ([session.Recorder.Deliver]), so a delivery is on the record even if
+// the process ends before a run takes it. After a run that ended on a
+// terminating result it starts none and returns
+// [agentturn.ErrTerminated] with that run's end, unchanged: the items
+// wait for the host's next run. While calls are pending it starts none
+// either, [agentturn.ErrInputRequired], and the Resume that answers them
+// takes the items, so unlike [Control.Prompt] it never starts a run
+// that settles what the kit's engine held.
+func (c *Control) Deliver(ctx context.Context, items ...openresponses.Item) (bool, *agentturn.RunEnd, error) {
+	ctx = c.RunContext(ctx)
+	if rec := c.kit.Recorder(); rec != nil {
+		return rec.Deliver(ctx, c.agent, items...)
+	}
+	return c.agent.Deliver(ctx, items...)
+}
+
 // Queue implements [agentturn.Control]: with a recorder, each item is
 // written as a queued entry before the agent takes it
 // ([session.Recorder.Queue]) rather than at the agent's queued event,

@@ -41,6 +41,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   adapter, so the product does; without it an item under another
   provider's slug reaches the provider, which refuses the request.
 
+### Added
+
+- `Control.Deliver`, so a kit's `Control` is an `agentturn.Deliverer`
+  (#106). A message that arrives after a run's last drain, between its
+  final turn and its end, starts a run once that run has ended, where
+  `Control.Queue` left it in a queue nothing drained until the next
+  input. With a recorder the items are written as queued entries
+  carrying `deliver` before the agent takes them
+  (`session.Recorder.Deliver`). After a terminating result it starts no
+  run and returns agentturn's `ErrTerminated` unchanged. A steer is
+  `Control.Queue` with `agentturn.QueueSteer`, as before.
+
 ### Fixed
 
 - A memory write in a run whose memory block the budget dropped is
