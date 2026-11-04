@@ -714,8 +714,10 @@ scopeOf := func(ctx context.Context) string {
 }
 
 // decide is the engine's hook under the grant scope of the call's
-// conversation (WithSkillGrants): the sets the engine consults are the
-// policy's, the unscoped ones and those of this scope.
+// conversation, Kit.GrantScope, with skill grants or without (#94): the
+// sets the engine consults are the policy's, the unscoped ones and those
+// of this scope, so a set a front activates under kit.GrantScope(ctx)
+// decides the conversation's calls.
 decide := func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
 	d, err := engine.BeforeToolCall()(agentpolicy.ContextWithGrantScope(ctx, scopeOf(ctx)), info)
 	if err == nil {

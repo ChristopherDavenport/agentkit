@@ -1284,18 +1284,20 @@ func (k *Kit) buildHooks(s *settings) {
 	// goes first, ahead of whatever may hold or allow the call; then the
 	// engine, with the scope's refusal and the product's own hooks folded
 	// into it when the kit built it, and the product's chained after it
-	// otherwise. Under skill grants the engine decides under the grant
-	// scope of the call's conversation, so a grant is its conversation's.
+	// otherwise. The engine decides under the grant scope of the call's
+	// conversation, Kit.GrantScope, with skill grants or without, so a
+	// set a front activates under that scope decides the conversation's
+	// calls and a grant is its conversation's.
 	var tool []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
 	if s.memStore != nil {
 		tool = append(tool, k.keepSaveBase)
 	}
 	if k.engine != nil {
 		decide := k.engine.BeforeToolCall()
-		if k.grants != nil {
+		{
 			inner := decide
 			decide = func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
-				return inner(k.grants.scopedCtx(ctx), info)
+				return inner(agentpolicy.ContextWithGrantScope(ctx, k.GrantScope(ctx)), info)
 			}
 		}
 		if k.recordsVerdicts {

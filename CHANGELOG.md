@@ -43,6 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The kit's engine decides every call under `Kit.GrantScope`, with
+  skill grants or without (#94). It added the scope only under
+  `WithSkillGrants`, so in a kit without skills a set a front activated
+  under `Kit.GrantScope`, a person's "for this session", was granted
+  and never decided a call, and the person was asked again each time.
 - The skill tool's facts claim follows `ReloadSkills` (#96). The tool
   `New` offered ran the catalogue in force but answered its facts from
   the tool of the catalogue `New` discovered, so under
