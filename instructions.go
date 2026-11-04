@@ -321,9 +321,11 @@ func memoryPart(ctx context.Context, s *settings, limit int64) (group []Part, ma
 	if size > 0 && len(parts) > 0 {
 		group = make([]Part, 0, len(parts)+1)
 		for _, p := range parts {
-			group = append(group, Part{ID: p.ID, Text: p.Text, Source: SourceMemory})
+			group = append(group, Part{ID: p.ID, Text: p.Text, Source: SourceMemory, Trust: sessionTrust(p.Trust)})
 		}
-		group = append(group, Part{ID: PartMemoryUsage, Text: usage, Source: SourceMemory})
+		// The usage paragraph is agentmemory's own text, which reads
+		// nothing, as the block's title and summary do.
+		group = append(group, Part{ID: PartMemoryUsage, Text: usage, Source: SourceMemory, Trust: &agentsession.Trust{}})
 	}
 
 	sizes := omittedSizes(ctx, s.memStore, man.Omitted)
@@ -382,6 +384,22 @@ func omittedSizes(ctx context.Context, store agentmemory.Store, omitted []agentm
 		}
 	}
 	return sizes
+}
+
+// sessionTrust is a memory part's trust in agentsession's form: the
+// same labels, so the session records an entry part a model wrote as
+// what it is, untrusted unless the product set the scope's labels with
+// agentmemory.WithScopeTrust (agentmemory RFC 0001 §7.2). nil, which
+// says nothing, stays nil.
+func sessionTrust(t *agentmemory.Trust) *agentsession.Trust {
+	if t == nil {
+		return nil
+	}
+	reads := make([]string, 0, len(t.Reads))
+	for _, l := range t.Reads {
+		reads = append(reads, string(l))
+	}
+	return &agentsession.Trust{Reads: reads}
 }
 
 // memoryWrites are the memory tools that write,

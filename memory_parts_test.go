@@ -4,10 +4,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ChristopherDavenport/agentsession"
-
 	"github.com/ChristopherDavenport/agentkit"
 	"github.com/ChristopherDavenport/agentmemory"
+	"github.com/ChristopherDavenport/agentsession"
+	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/openresponses"
 )
 
 // agentmemory reserves the part IDs memory, memory/… and memory:… to
@@ -103,5 +104,53 @@ func TestADroppedBlockOverAnEmptyStoreSaysSo(t *testing.T) {
 	}
 	if man := kit.MemoryManifest(); !man.LeftOut || !man.Dropped() {
 		t.Fatalf("manifest = %+v, want it to say the block was left out", man)
+	}
+}
+
+// Each memory part carries the trust agentmemory gave it, in
+// agentsession's form, so the session records an entry a model wrote
+// as untrusted and the renderer's own lines as reading nothing.
+// (agentmemory RFC 0001 §7.2, Trust)
+func TestTheMemoryPartsCarryTheirTrust(t *testing.T) {
+	sessions := agentsession.NewMemoryStore()
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(&scriptModel{}, "m"),
+		agentkit.WithMemory(memStore(t, agentmemory.Entry{Scope: "user", Name: "a", Content: "remember"}), "user"),
+		agentkit.WithSession(sessions, agentsession.Header{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	byID := map[string]agentkit.Part{}
+	for _, p := range kit.Parts() {
+		byID[p.ID] = p
+	}
+	entry, title := byID[agentmemory.PartID("user", "a")], byID[agentkit.PartMemory]
+	if entry.Trust == nil || len(entry.Trust.Reads) != 1 || entry.Trust.Reads[0] != "untrusted" {
+		t.Errorf("the entry part's trust = %+v, want untrusted", entry.Trust)
+	}
+	if title.Trust == nil || len(title.Trust.Reads) != 0 {
+		t.Errorf("the title part's trust = %+v, want reading nothing", title.Trust)
+	}
+
+	agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
+	defer kit.Attach(agent)()
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("hi")); err != nil {
+		t.Fatal(err)
+	}
+	recorded := false
+	for _, e := range kit.Session().Entries() {
+		line, err := agentsession.MarshalEntry(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(line), `"id":"memory/user/a"`) && strings.Contains(string(line), `"trust":{"reads":["untrusted"]}`) {
+			recorded = true
+		}
+	}
+	if !recorded {
+		t.Error("no config entry records the entry part as untrusted")
 	}
 }

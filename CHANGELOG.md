@@ -8,14 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - **Breaking**: requires agentturn and agentturn/session v0.0.35, up
-  from v0.0.32, agentsession v0.0.36, up from v0.0.28, agenttool and
+  from v0.0.32, agentsession v0.0.37, up from v0.0.28, agenttool and
   agenttool/mcpclient v0.0.29, up from v0.0.24, agentpolicy v0.0.19, up
   from v0.0.17, agentmemory v0.0.12, up from v0.0.10, agentsmd v0.0.4,
   up from v0.0.3, and openresponses v0.0.18, up from v0.0.15, in the
   root and in `examples/a2a` (front/a2a and tools/a2a v0.0.35 there).
-  Sessions are written as `agentsession/0.19`, and a file the recorder
-  appends to is raised to 0.19, after which agentsession v0.0.35 and
-  earlier refuse it: upgrade every reader of a store first. Among what
+  Sessions are written as `agentsession/0.20`, and a file the recorder
+  appends to is raised to 0.20, after which agentsession v0.0.36 and
+  earlier refuse it: upgrade every reader of a store first. A redactor
+  now keeps closed-set members as written (0.20), and
+  `ConfigFromRequestParts` keeps each part whole, its trust included,
+  and refuses a delta-form part (`Hash`, `Keep` or unresolved), which
+  the kit never passes it. Among what
   arrives: agentpolicy's engine reads a tool's facts claim by default
   and records a grant's kind, source and scope as members of its
   verdict; agentturn's `Agent.Deliver` starts no run after a
@@ -155,6 +159,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   request whose memory block the budget dropped is not offered and
   whose run refuses, as `memory_save`, `memory_patch` and
   `memory_forget` are: the kit's list is `agentmemory.WriteTools()`.
+- Each memory part carries the trust agentmemory gave it
+  (`agentsession.InstructionPart.Trust`): an entry part and an omission
+  line their scope's labels, `untrusted` unless the product set them
+  with `agentmemory.WithScopeTrust`, and the title, scope headings,
+  summary and usage paragraph an empty trust, which reads nothing. The
+  session's config entries record it, so a reader knows the memory the
+  model was shown came from text a model wrote (agentmemory RFC 0001
+  §7.2). The kit dropped it; agentsession v0.0.36's
+  `ConfigFromRequestParts` would also have dropped it from the record.
 - An omitted memory entry's `Omission.Size`, and the `size` of its
   `instructions_omitted` element, is the bytes its part would have
   added, `agentmemory.EntryPart`'s text and its separator, as

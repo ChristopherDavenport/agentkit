@@ -126,7 +126,9 @@ the session format's own, so the joined text of `Kit.Parts()` is what
 the request carried and what its hash covers.
 
 The kit holds the memory block as parts, `agentmemory.RenderParts`, one
-part per piece and `agentmemory.Usage()` as `memory-usage`
+part per piece, each with the piece's trust as
+`&agentsession.Trust{Reads: labels}` (the labels as strings), and
+`agentmemory.Usage()`, with an empty trust, as `memory-usage`
 (`agentkit.PartMemoryUsage`) after them, an ID outside the `memory`,
 `memory/…` and `memory:…` space agentmemory reserves to its renderer.
 `agentmemory.Render` is `RenderParts` joined with the same separator, so
