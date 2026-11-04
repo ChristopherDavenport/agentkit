@@ -2770,7 +2770,13 @@ const earlierConfigs = 8
 // writes its own skills and uses one in the conversation it wrote it in.
 //
 // The skill tool serves the new catalogue from the next call, in every
-// run of every config the kit returned. The skills part of the
+// run of every config the kit returned, and answers its facts claim
+// from the new catalogue from then on ([agenttool.Follow]). The reload
+// is not serialised with the engine's decisions: a call whose claim was
+// read before the reload and that runs after it is decided on the old
+// catalogue's claim and served from the new one, so a host that reloads
+// while calls are being decided reloads between runs, with
+// [agentturn.Agent.WhileIdle], to keep the two together. The skills part of the
 // instructions is the new catalogue's, and [Kit.Omitted] its omissions,
 // from the next request of a kit that renders its instructions each
 // request, under [WithMemory] or [WithGuards]; otherwise from the next

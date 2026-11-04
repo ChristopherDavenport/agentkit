@@ -1319,7 +1319,11 @@ Eleven things, all outside `agentturn.Config`:
 - `Kit.ReloadSkills(ctx)` discovers the skills again over the same
   sources and puts the new catalogue behind the skill tool (`currentCat`
   above) and its part in place of the old, guarded as `New` guarded the
-  first. It sets the next `Config()`'s `Instructions`; a config already
+  first. Nothing serialises the swap with the engine's decisions, as
+  `agenttool.Follow` asks of a host that swaps while calls are decided:
+  a call claimed before the reload and run after it is decided on the
+  old catalogue's claim, so a host reloads between runs
+  (`agent.WhileIdle`) to keep claim and call together. It sets the next `Config()`'s `Instructions`; a config already
   handed out keeps its own, which `partsFor` still recognises, and its
   agent takes the new one with `SetConfig` between runs, unless the
   instructions hook re-renders each request, under `WithMemory` or

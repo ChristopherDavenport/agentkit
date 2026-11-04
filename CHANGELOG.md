@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The text the model reads when a memory write is refused because the
   memory block was left out is agentmemory's `ErrBlockDropped`, which
   no longer says the instruction budget was the reason (#95).
+- Docs: `Kit.ReloadSkills` and the manual say the reload is not
+  serialised with the engine's decisions, so a call claimed before it
+  and run after it is decided on the old catalogue's claim; a host
+  reloads between runs, with `Agent.WhileIdle`.
 - Docs: the README names `Control.Deliver`, `Control.Compact`,
   `Kit.MCPServers` and `Kit.MCP`, and `docs/manual.md` names the read
   options `Kit.RegrantSkills` reads with.
