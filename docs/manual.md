@@ -1067,7 +1067,11 @@ Eleven things, all outside `agentturn.Config`:
 - `Kit.Omitted()` collects what each layer reported it left out —
   `agentsmd.Result.Omitted`, `agentmemory.Manifest.Omitted`, the skills
   `agentskill.Catalog.Listed` does not offer — into one list. A product
-  reads the three itself if it would rather.
+  reads the three itself if it would rather. A memory entry's `Size` is
+  `len(agentmemory.EntryPart(e, store.MaxEntryBytes()).Text) + 2`, the
+  bytes its part would have added, for the entry `store.List` gives
+  under the manifest's hash, and the manifest's `Bytes` when the store
+  no longer holds it so.
 - `WithSkillGrants` calls `agentpolicy.Engine.GrantSet` with the rules
   from `agentskill.Skill.Rules()` each time the model reads a skill,
   around the catalogue's tool through `agenttool.Wrap`, and

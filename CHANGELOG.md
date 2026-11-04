@@ -39,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- An omitted memory entry's `Omission.Size`, and the `size` of its
+  `instructions_omitted` element, is the bytes its part would have
+  added, `agentmemory.EntryPart`'s text and its separator, as
+  agentsession defines an omitted part's size (agentmemory RFC 0001
+  §8.1). It was the manifest's `Bytes`, the content's size, which is
+  less. Each scope that left an entry out is listed once per render; an
+  entry changed or forgotten since the render keeps the content's size.
 - A sidecar session (`agentsession.Header.Media` `sidecar`) can be
   resumed and moved in. agentturn/session v0.0.35 refuses to read a
   sidecar session's media without a blob reader

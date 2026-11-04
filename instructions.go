@@ -329,21 +329,62 @@ func memoryPart(ctx context.Context, s *settings, limit int64) (group []Part, ma
 		group = append(group, Part{ID: PartMemoryUsage, Text: usage, Source: SourceMemory})
 	}
 
+	sizes := omittedSizes(ctx, s.memStore, man.Omitted)
 	omitted = make([]Omission, 0, len(man.Omitted))
 	for _, e := range man.Omitted {
 		reason := e.Reason
 		if reason == "" {
 			reason = agentmemory.OmitBudget
 		}
+		size, ok := sizes[agentmemory.PartID(e.Scope, e.Name)]
+		if !ok {
+			size = int64(e.Bytes)
+		}
 		omitted = append(omitted, Omission{
 			Part:   PartMemory,
 			Source: SourceMemory,
 			What:   agentmemory.PartID(e.Scope, e.Name),
 			Reason: reason,
-			Size:   int64(e.Bytes),
+			Size:   size,
 		})
 	}
 	return group, man, omitted, dropped, nil
+}
+
+// omittedSizes is the size of each omitted entry's part by its part ID,
+// as agentsession means an omitted part's size: the bytes the part would
+// have added, its text as [agentmemory.EntryPart] renders it and its
+// separator, which is more than the manifest's Bytes, the content's
+// size (agentmemory RFC 0001 §8.1). Each scope that left an entry out
+// is listed once. An entry the listing does not hold as the manifest
+// hashed it, changed or forgotten since the render, or a scope that
+// cannot be listed, is missing from the map, and the caller falls back
+// on the content's size.
+func omittedSizes(ctx context.Context, store agentmemory.Store, omitted []agentmemory.ManifestEntry) map[string]int64 {
+	if len(omitted) == 0 {
+		return nil
+	}
+	want := map[agentmemory.Scope]map[string]string{}
+	for _, e := range omitted {
+		if want[e.Scope] == nil {
+			want[e.Scope] = map[string]string{}
+		}
+		want[e.Scope][e.Name] = e.Hash
+	}
+	bound := store.MaxEntryBytes()
+	sizes := make(map[string]int64, len(omitted))
+	for scope, names := range want {
+		entries, err := store.List(ctx, scope)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if h, ok := names[e.Name]; ok && h == e.Hash {
+				sizes[agentmemory.PartID(scope, e.Name)] = int64(len(agentmemory.EntryPart(e, bound).Text) + len(Separator))
+			}
+		}
+	}
+	return sizes
 }
 
 // memoryWrites are the memory tools that write: withheld from a request
