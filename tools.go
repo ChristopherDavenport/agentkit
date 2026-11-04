@@ -102,6 +102,27 @@ func (ts *toolSet) current() []source {
 	return append(out, ts.sources[ts.addAt:]...)
 }
 
+// beforeProviders is the sources in union order up to the product's
+// providers: the fixed sources, New's servers and the added ones.
+func (ts *toolSet) beforeProviders() []source {
+	ts.amu.RLock()
+	defer ts.amu.RUnlock()
+	out := make([]source, 0, ts.addAt+len(ts.added))
+	out = append(out, ts.sources[:ts.addAt]...)
+	return append(out, ts.added...)
+}
+
+// isProvider reports whether the source named name is one of the
+// product's providers, the sources after the servers.
+func (ts *toolSet) isProvider(name string) bool {
+	for _, s := range ts.sources[ts.addAt:] {
+		if s.name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // with is the sources in union order with extra among the added
 // servers, last of them, for checking a server before it is added.
 func (ts *toolSet) with(extra source) []source {

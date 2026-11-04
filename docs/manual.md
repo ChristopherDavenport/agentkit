@@ -466,7 +466,9 @@ Two things the kit adds that the `append` above does not:
   adds to both is the source label, which it has because it did the
   union and the libraries the tools came from did not. `Kit.Tools()`
   returns the same labels once, beside each tool's name, for a product
-  naming the libraries' tools to its policy.
+  naming the libraries' tools to its policy: the union through the
+  filter and the duplicate check, each MCP server's `remote.Tools()` as
+  it lists now, and a provider's tools as they were at `New`.
 
 ## `BeforeModelCall`, in full
 

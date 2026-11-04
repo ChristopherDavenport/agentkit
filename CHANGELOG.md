@@ -136,6 +136,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   §8.1). It was the manifest's `Bytes`, the content's size, which is
   less. Each scope that left an entry out is listed once per render; an
   entry changed or forgotten since the render keeps the content's size.
+- `Kit.Tools()` lists each MCP server's tools as the server lists them
+  now, through `WithToolFilter` and the duplicate check, as the model is
+  offered them (#101). It gave the list a server had when it was added,
+  so after a server's `tools/list_changed` or a `WithReconnect` restart
+  it kept a removed tool and left out an added one. A provider's tools
+  are still those it gave at `New`, and after `Close` the servers' are
+  gone.
 - A sidecar session (`agentsession.Header.Media` `sidecar`) can be
   resumed and moved in. agentturn/session v0.0.35 refuses to read a
   sidecar session's media without a blob reader

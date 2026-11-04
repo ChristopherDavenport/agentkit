@@ -2584,14 +2584,35 @@ func (k *Kit) LookupTool(name string) (agenttool.Tool, bool) {
 //	}
 //
 // The kit does not allow them itself: whether a library's tool runs
-// unasked is the product's decision. An MCP server's list and a
-// provider's are fetched each turn, so a tool they add after New is
-// not here. A server [Kit.AddMCP] connected is, with the tools it
-// listed when it was added, until [Kit.RemoveMCP] removes it.
+// unasked is the product's decision. Each MCP server's tools, New's and
+// those [Kit.AddMCP] connected until [Kit.RemoveMCP] removes them, are
+// its list now, as the model is offered it each turn, through the same
+// filter and duplicate check, so a tool a server adds or a restart
+// brings is here and one it removed is not; after [Kit.Close] they are
+// gone. A provider's list is fetched each turn too and is listed as it
+// was at New, so a tool a [WithToolProvider] adds later is not here.
 func (k *Kit) Tools() []ToolOrigin {
 	k.mcpMu.Lock()
-	defer k.mcpMu.Unlock()
-	return append([]ToolOrigin(nil), k.origins...)
+	snapshot := append([]ToolOrigin(nil), k.origins...)
+	k.mcpMu.Unlock()
+	if k.tools == nil {
+		return snapshot
+	}
+	// Every source up to the providers resolved now: the fixed ones as
+	// at New, the servers' as they list now. A provider's tools come
+	// after them and never shadow them, so its tools at New follow,
+	// less a name a server has taken since.
+	_, out, _ := k.tools.resolveSources(context.Background(), k.tools.beforeProviders())
+	taken := make(map[string]bool, len(out))
+	for _, o := range out {
+		taken[o.Name] = true
+	}
+	for _, o := range snapshot {
+		if k.tools.isProvider(o.Source) && !taken[o.Name] {
+			out = append(out, o)
+		}
+	}
+	return out
 }
 
 // RegrantSkills grants again, under [WithSkillGrants], what the skill
