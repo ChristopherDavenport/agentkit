@@ -1972,6 +1972,77 @@ func (k *Kit) resumeScope(ctx context.Context, rec *session.Recorder, sid string
 	return k.conversationOf(rec, sid)
 }
 
+// ErrNoChildRecorder is the error of [Kit.StartChild] and
+// [Kit.ContinueChild] when neither ctx nor the kit carries a recorder:
+// a host-started child is recorded in the session of the conversation
+// it serves, and there is none.
+var ErrNoChildRecorder = errors.New("agentkit: no recorder writes the conversation, so a child the host starts would be recorded nowhere")
+
+// StartChild records a child agent the host starts itself, not through a
+// model's function call, such as a memory pass after a turn, as a
+// subsession of the conversation ctx belongs to, with
+// [session.Recorder.StartChild] of the recorder the conversation's runs
+// record into (ctx's, [ContextWithRecorder], else the kit's): the
+// parent's subsession link carrying spawnID, written before the child
+// has a session, and a context naming the child's session,
+// agentsession.SpawnedSessionID(parent, spawnID). spawnID is the host's
+// to choose, agentsession.NewSpawnID, and one the session already
+// carries is refused with agentsession.ErrSpawnIDRepeated.
+//
+// The child's agent is prompted with the context returned and observed
+// with [Kit.AttachChild], so its run is written to its own session,
+// whose header names the parent and the spawn: the foreground session's
+// export embeds its steps, and agentsession.DelegatedWork counts it. The
+// context carries the recorder, the child's session ID for the memory
+// journal, and under [WithSkillGrants] a grant scope of the child's own,
+// as a child [WithChildAgent] runs has. A later pass continues the child
+// with [Kit.ContinueChild]. The kit that calls it may be another than
+// the one the conversation's agent runs under, a pass's kit built
+// [WithRecorder] the conversation's recorder.
+func (k *Kit) StartChild(ctx context.Context, spawnID string) (context.Context, error) {
+	rec := k.recorderFor(ctx)
+	if rec == nil {
+		return ctx, ErrNoChildRecorder
+	}
+	cctx, err := rec.StartChild(ctx, spawnID)
+	if err != nil {
+		return ctx, fmt.Errorf("agentkit: starting child %s: %w", spawnID, err)
+	}
+	return k.childRun(ctx, ContextWithRecorder(cctx, rec), rec, spawnID), nil
+}
+
+// ContinueChild gives the context for a child [Kit.StartChild] started,
+// whose link the conversation's path holds, with
+// [session.Recorder.ContinueChild]: a pass after a restart, or each pass
+// with a new agent, continues the child's session at its leaf, the
+// child's call IDs reserved. It writes nothing. A spawn ID the path does
+// not link is refused with session.ErrNoSpawn, and no recorder with
+// [ErrNoChildRecorder].
+func (k *Kit) ContinueChild(ctx context.Context, spawnID string) (context.Context, error) {
+	rec := k.recorderFor(ctx)
+	if rec == nil {
+		return ctx, ErrNoChildRecorder
+	}
+	cctx, err := rec.ContinueChild(ctx, spawnID)
+	if err != nil {
+		return ctx, fmt.Errorf("agentkit: continuing child %s: %w", spawnID, err)
+	}
+	return k.childRun(ctx, ContextWithRecorder(cctx, rec), rec, spawnID), nil
+}
+
+// AttachChild subscribes the recorder of each run's context to a, the
+// agent of a child [Kit.StartChild] or [Kit.ContinueChild] gave a
+// context for, as [WithChildAgent] observes a child it runs:
+// [session.Recorder.Observe] files the run in the child's session. It
+// returns the unsubscribe. Not [Kit.Attach], which writes a's runs into
+// the kit's own session.
+func (k *Kit) AttachChild(a *agentturn.Agent) func() {
+	return a.Subscribe(func(ctx context.Context, ev agentturn.Event) error {
+		k.observeChild(ctx, ev)
+		return nil
+	})
+}
+
 // noConversation is the grant scope of runs the kit records nowhere and
 // that name no session.
 const noConversation = "agentkit:no-session"

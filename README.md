@@ -224,6 +224,14 @@ before the agent takes it. `Control.Compact(ctx, instructions)` folds
 the next model call whatever the budget, a product's `/compact`, under
 `WithCompaction`.
 
+A child the host starts itself, such as a memory pass after a turn,
+is recorded as a subsession of the conversation it serves:
+`kit.StartChild(ctx, agentsession.NewSpawnID())` writes the link and
+gives the context to prompt the child's agent with, `kit.AttachChild`
+records its runs, and `kit.ContinueChild` continues it after a
+restart; the foreground session's export and `DelegatedWork` then
+count its work.
+
 `kit.MCPServers()` and `kit.MCP(label)` hand back the MCP servers the
 kit dialed, by the label `kit.Tools()` names them with, for what a
 server offers beside its tools: resources, prompts, instructions. The

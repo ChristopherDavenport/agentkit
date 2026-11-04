@@ -81,6 +81,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Kit.StartChild(ctx, spawnID)`, `Kit.ContinueChild(ctx, spawnID)`,
+  `Kit.AttachChild(agent)` and `ErrNoChildRecorder` (#109): a child
+  the host starts itself, such as a sleep-time memory pass, is recorded
+  as a subsession of the conversation it serves, over agentturn
+  v0.0.36's `Recorder.StartChild` and `ContinueChild` (agentsession RFC
+  0001 0.19, a `subsession` link carrying `spawn_id`). The foreground
+  session's ATIF export embeds the pass's steps and writes,
+  `agentsession.DelegatedWork` counts it, and a pass after a restart
+  continues the same child session. The child's context carries the
+  recorder, its session for the memory journal and, under
+  `WithSkillGrants`, a grant scope of its own, as a `WithChildAgent`
+  child's does.
+
 - `WithMemoryArchive(scopes...)` (#107): scopes the memory tools write
   and search and the block never renders, an archive like Letta's
   archival memory. They join the writable scopes `agentmemory.Tools`

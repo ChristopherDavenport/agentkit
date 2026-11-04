@@ -178,6 +178,14 @@ block's bound less the usage paragraph, which cannot be bounded. Both are
 exported, and a product that wants to spend the budget differently sets
 them itself and leaves the kit's budget at zero.
 
+A child the host starts itself, a memory pass after a turn, is no
+tool: `Kit.StartChild(ctx, spawnID)` is `rec.StartChild(ctx, spawnID)`
+of `recorderFor(ctx)`, `Kit.ContinueChild` is `rec.ContinueChild`, each
+followed by `agentkit.ContextWithRecorder` and the same memory session
+and grant scope the run context below adds, with the spawn ID standing
+for the call ID; `Kit.AttachChild(agent)` is the observer below as a
+subscription, `agent.Subscribe(func(ctx, ev) error { recorderFor(ctx).Observe(ctx, ev); return nil })`.
+
 ## `ToolProvider`
 
 ```go

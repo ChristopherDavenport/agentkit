@@ -1413,6 +1413,16 @@ func (k *Kit) childContext(ctx context.Context, callID string) context.Context {
 	if rec != nil {
 		ctx = rec.ChildContext(ctx, callID)
 	}
+	return k.childRun(parentCtx, ctx, rec, callID)
+}
+
+// childRun is what the kit adds to a child's run context ctx, made from
+// parentCtx by rec, or by no recorder: the child's session ID under
+// agentmemory's key, and under skill grants a grant scope of its own,
+// as [Kit.childContext] says. name stands for the child in the scope
+// when no session names it.
+func (k *Kit) childRun(parentCtx, ctx context.Context, rec *session.Recorder, name string) context.Context {
+	callID := name
 	child := ""
 	if id := session.SessionIDFromContext(ctx); rec != nil && id != "" {
 		child = id
