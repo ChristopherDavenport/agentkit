@@ -610,6 +610,7 @@ func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, s
 	// conversation.
 	ctx = g.scopedCtx(ctx)
 	scope := agentpolicy.GrantScopeFromContext(ctx)
+	ours := pathGrantScopes(path, scope)
 	from := 0
 	if scoped {
 		for i := len(path) - 1; i >= 0; i-- {
@@ -696,8 +697,9 @@ func (g *skillGrants) regrant(ctx context.Context, sess *agentsession.Session, s
 				// agentpolicy v0.0.19 and later record what a grant or a
 				// revocation did as members, which a reader takes and
 				// never the reason (agentpolicy RFC 0001, The record): a
-				// change counts here only under this replay's scope.
-				if v.Scope != scope {
+				// change counts here under a scope this path's own grants
+				// were made under, and under no other conversation's.
+				if !ours[v.Scope] {
 					continue
 				}
 				if v.Source != "" {
@@ -893,6 +895,43 @@ type replayKey struct{}
 func replaying(ctx context.Context) bool {
 	v, _ := ctx.Value(replayKey{}).(bool)
 	return v
+}
+
+// pathGrantScopes is the scopes a replay of path reads member records
+// under: target, the scope the grants are made again under, and every
+// scope a grant set was activated or granted under on the path, which
+// are the conversation's own, its origin's on a fork's prefix among
+// them, less any scope under another of them, a child agent's, whose
+// grants were never the conversation's.
+func pathGrantScopes(path []agentsession.Entry, target string) map[string]bool {
+	scopes := map[string]bool{target: true}
+	for _, e := range path {
+		c, ok := e.(*agentsession.CustomEntry)
+		if !ok || c.NS != agentpolicy.VerdictNS {
+			continue
+		}
+		var v struct {
+			Grant string `json:"grant"`
+			Scope string `json:"scope"`
+		}
+		if json.Unmarshal(c.Data, &v) != nil || v.Scope == "" {
+			continue
+		}
+		switch agentpolicy.GrantKind(v.Grant) {
+		case agentpolicy.KindActivate, agentpolicy.KindGrantSet:
+			scopes[v.Scope] = true
+		}
+	}
+	for s := range scopes {
+		for other := range scopes {
+			if s != other && strings.HasPrefix(s, other+"/") {
+				delete(scopes, s)
+				break
+			}
+		}
+	}
+	scopes[target] = true
+	return scopes
 }
 
 // revokedPrefix opens the reason of the verdict agentpolicy's

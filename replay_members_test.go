@@ -10,6 +10,7 @@ import (
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentskill"
 	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
 
@@ -96,12 +97,11 @@ func TestTheReplayReadsAVerdictsMembers(t *testing.T) {
 }
 
 // A front that scoped the conversation's grants itself, with
-// agentpolicy.ContextWithGrantScope, finds them under that scope after a
-// restart that names none: the session's records name the scope the
-// grants were made under, and the replay makes them again there. It made
-// them under the kit's own conversation, where the front's runs never
-// look. (#80)
-func TestAResumeRegrantsUnderTheScopeTheRecordsName(t *testing.T) {
+// agentpolicy.ContextWithGrantScope, and resumes it naming no scope has
+// the records it made under its scope replayed, into the scope the
+// resumed conversation's runs decide under, the kit's, and not back into
+// the front's: the kit grants only where the resumed runs look. (#80)
+func TestAResumeReplaysAFrontsScopedGrantsIntoItsOwnScope(t *testing.T) {
 	root := t.TempDir()
 	skills := skillWithTools(t, filepath.Join(root, "skills"), "release", "Bash(git:*)")
 	sessions := agentsession.NewMemoryStore()
@@ -135,7 +135,80 @@ func TestAResumeRegrantsUnderTheScopeTheRecordsName(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer second.Close()
-	if got := len(second.Engine().GrantsFor(agentpolicy.ContextWithGrantScope(t.Context(), front))); got == 0 {
-		t.Fatal("no grant under the front's scope after the restart")
+	if got := len(second.Engine().GrantsFor(agentpolicy.ContextWithGrantScope(t.Context(), second.GrantScope(t.Context())))); got == 0 {
+		t.Fatal("the front's scoped grant was not replayed into the resumed conversation's scope")
+	}
+	if got := len(second.Engine().GrantsFor(agentpolicy.ContextWithGrantScope(t.Context(), front))); got != 0 {
+		t.Fatal("the replay granted into the front's scope, which the resumed runs do not decide under")
+	}
+}
+
+// A fork resumed with no scope on its context grants what its prefix
+// granted into its own conversation's scope, the one its runs decide
+// under, and never into its origin's: the origin's conversation, served
+// by the same engine, does not get back a rule it revoked after the
+// fork point. The scope the records name selects which records to
+// replay; it is never the target. (#80)
+func TestAResumedForkGrantsIntoItsOwnScopeNotItsOrigins(t *testing.T) {
+	root := t.TempDir()
+	skills := skillWithTools(t, filepath.Join(root, "skills"), "release", "Bash(git:*)")
+	store := agentsession.NewMemoryStore()
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(&scriptModel{turns: []func(*openresponses.Emitter) error{
+			callTurn(agentskill.ToolName, `{"name":"release"}`),
+		}}, "m"),
+		agentkit.WithSkills(skills),
+		agentkit.WithPolicy(agentpolicy.FullAuto(agentpolicy.Tools{Read: []string{agentskill.ToolName}}),
+			map[string]agentpolicy.ToolMatcher{"Bash": {Match: agentpolicy.PrefixMatcher("command")}}),
+		agentkit.WithSkillGrants(trustedSkills),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	// Conversation A reads the skill under its own recorder.
+	recA, sessA, err := session.Start(t.Context(), store, agentsession.Header{CWD: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctxA := agentkit.ContextWithRecorder(t.Context(), recA)
+	agent := agentturn.New(kit.Config())
+	unsubscribe := recA.Attach(agent)
+	if _, err := agent.Prompt(ctxA, openresponses.UserText("cut the release")); err != nil {
+		t.Fatal(err)
+	}
+	unsubscribe()
+	scopeA := agentpolicy.ContextWithGrantScope(t.Context(), kit.GrantScope(ctxA))
+	if len(kit.Engine().GrantsFor(scopeA)) == 0 {
+		t.Fatal("A's read granted nothing")
+	}
+
+	// B forks A here; then A revokes its grant.
+	live, err := store.Open(t.Context(), sessA.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recB, sessB, err := session.Start(t.Context(), store, agentsession.Header{CWD: root, ParentSession: sessA.ID(), Base: live.Leaf()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kit.RevokeSkillGrants(ctxA) == 0 {
+		t.Fatal("A's revoke removed nothing")
+	}
+
+	// The front resumes B, naming no scope.
+	ctxB := agentkit.ContextWithRecorder(t.Context(), recB)
+	if err := kit.RegrantSkills(ctxB, sessB); err != nil {
+		t.Fatal(err)
+	}
+	for _, set := range kit.Engine().GrantsFor(scopeA) {
+		if len(set.Allow) > 0 {
+			t.Fatalf("A's scope holds %v after B's resume; A revoked it", set.Allow)
+		}
+	}
+	scopeB := agentpolicy.ContextWithGrantScope(t.Context(), kit.GrantScope(ctxB))
+	if len(kit.Engine().GrantsFor(scopeB)) == 0 {
+		t.Fatal("B's own scope holds nothing: the fork's runs lost the prefix's grant")
 	}
 }

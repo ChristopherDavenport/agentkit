@@ -409,7 +409,7 @@ func New(ctx context.Context, opts ...Option) (*Kit, error) {
 		if k.rec != nil {
 			opts = k.rec.ReadOptions()
 		}
-		k.grants.regrant(agentpolicy.ContextWithGrantScope(ctx, k.resumeScope(ctx, k.rec, "", sess)), sess, k.grants.scoped, opts...)
+		k.grants.regrant(agentpolicy.ContextWithGrantScope(ctx, k.resumeScope(ctx, k.rec, "")), sess, k.grants.scoped, opts...)
 		k.grants.gmu.Unlock()
 	}
 	return k, nil
@@ -1955,47 +1955,17 @@ func (k *Kit) GrantScope(ctx context.Context) string {
 // resumeScope is the grant scope a resumed session's grants are made
 // again under: the one ctx carries, when the front scopes its
 // conversations itself with [agentpolicy.ContextWithGrantScope], as
-// [Kit.GrantScope] reads it for a run; else the scope the session's
-// latest grant names, agentpolicy v0.0.19's scope member,
-// which is where the front's runs made the grants; else, for a session
-// recorded before the member, the conversation of rec and sid.
-func (k *Kit) resumeScope(ctx context.Context, rec *session.Recorder, sid string, sess *agentsession.Session) string {
+// [Kit.GrantScope] reads it for a run, else the conversation of rec and
+// sid. It is the scope the resumed conversation's runs decide under and
+// never one a record names: a fork's prefix holds its origin's records,
+// under the origin's scope, and granting there would give the origin
+// back what it revoked after the fork. The scopes the records name only
+// select which records the replay reads ([skillGrants.regrant]).
+func (k *Kit) resumeScope(ctx context.Context, rec *session.Recorder, sid string) string {
 	if scope := agentpolicy.GrantScopeFromContext(ctx); scope != "" {
 		return scope
 	}
-	if scope := recordedGrantScope(sess); scope != "" {
-		return scope
-	}
 	return k.conversationOf(rec, sid)
-}
-
-// recordedGrantScope is the scope member of the latest grant set's
-// activation or grant on sess's path, the scope the session's grants
-// were made under, "" for none. A revocation does not say it: one a
-// product made under another scope ends nothing here.
-func recordedGrantScope(sess *agentsession.Session) string {
-	if sess == nil {
-		return ""
-	}
-	path := sess.Path(sess.Leaf())
-	for i := len(path) - 1; i >= 0; i-- {
-		c, ok := path[i].(*agentsession.CustomEntry)
-		if !ok || c.NS != agentpolicy.VerdictNS {
-			continue
-		}
-		var v struct {
-			Grant string `json:"grant"`
-			Scope string `json:"scope"`
-		}
-		if json.Unmarshal(c.Data, &v) != nil || v.Scope == "" {
-			continue
-		}
-		switch agentpolicy.GrantKind(v.Grant) {
-		case agentpolicy.KindActivate, agentpolicy.KindGrantSet:
-			return v.Scope
-		}
-	}
-	return ""
 }
 
 // noConversation is the grant scope of runs the kit records nowhere and
@@ -2819,12 +2789,14 @@ func (n offerName) Execute(context.Context, agenttool.Call) (agenttool.Result, e
 
 // RegrantSkills grants again, under [WithSkillGrants], what the skill
 // reads on sess's path granted and nothing revoked, as [New] does for a
-// session it resumes, under the scope ctx carries when the front names
+// session it resumes, under the grant scope of sess's conversation,
+// [Kit.GrantScope], or under the scope ctx carries when the front names
 // its conversations' scopes itself with
-// [agentpolicy.ContextWithGrantScope], else the scope the session's
-// latest grant record names (agentpolicy v0.0.19's scope member), else,
-// for a session recorded before that, the grant scope of sess's
-// conversation, [Kit.GrantScope]. It is for a front that resumes a conversation
+// [agentpolicy.ContextWithGrantScope]: the scope the conversation's runs
+// decide under, so such a front passes the one its runs use. The
+// replay reads the records made under any scope the session's path
+// made grants under, its origin's on a fork's prefix among them, and
+// grants into that one alone. It is for a front that resumes a conversation
 // itself, with session.Resume under [ContextWithRecorder], so a call
 // held before a restart is approved with the tools its task had. ctx
 // carries that conversation's recorder, ContextWithRecorder, which is
@@ -2874,7 +2846,7 @@ func (k *Kit) RegrantSkills(ctx context.Context, sess *agentsession.Session, opt
 	}
 	// The conversation sess is, as a run recorded by rec or naming it is,
 	// unless the front names its scope itself.
-	ctx = agentpolicy.ContextWithGrantScope(ctx, k.resumeScope(ctx, rec, sess.ID(), sess))
+	ctx = agentpolicy.ContextWithGrantScope(ctx, k.resumeScope(ctx, rec, sess.ID()))
 	var read []session.ReadOption
 	if rec != nil {
 		read = rec.ReadOptions()

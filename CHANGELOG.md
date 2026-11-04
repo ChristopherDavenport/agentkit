@@ -220,13 +220,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The replay of a session's skill grants, at `New` and in
   `Kit.RegrantSkills`, reads agentpolicy v0.0.19's `grant`, `source`
   and `scope` record members (#80, agentpolicy RFC 0001 The record): a
-  revocation is the one its members name, under its own scope, and one
-  made under another conversation's scope no longer ends this one's
-  grants, whatever the reason text says. A record from before v0.0.19,
-  which has no members, is still read by its reason. With no scope on
-  the context, the grants are made again under the scope the session's
-  latest grant record names, so a front that scoped its conversations
-  itself finds them under its scope after a restart without passing it.
+  revocation is the one its members name, and one made under a scope
+  the session's path never granted under, another conversation's, no
+  longer ends this one's grants, whatever the reason text says. A
+  record from before v0.0.19, which has no members, is still read by
+  its reason. The records read are those under the scopes the path's
+  own grants were made under, a fork's origin's on its prefix among
+  them; the grants are made again only under the scope the resumed
+  conversation's runs decide under, as before, so a resumed fork never
+  grants into its origin's conversation, nor gives it back what it
+  revoked after the fork.
 - `Control.Queue`, and the new `Control.Deliver`, write through the
   conversation's recorder on the context (`ContextWithRecorder`) when
   the kit has no session of its own, as one kit serving several

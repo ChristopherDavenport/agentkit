@@ -1279,14 +1279,18 @@ Eleven things, all outside `agentturn.Config`:
   record of a skill's own instructions makes that skill's source live,
   and a revocation ends it. The replay reads a verdict's `grant`,
   `source` and `scope` members (agentpolicy v0.0.19, RFC 0001 The
-  record): a `revoke` of the source or a `revoke_scope` under the
-  replay's scope ends it, and a `grant_set` allow under that scope is a
-  rule the read was granted; a record under another scope is passed
-  over. Only a record with no `grant` member, written before
-  agentpolicy v0.0.19, is read by its reason, `revoked the rules
-  granted by <source>`. With no scope on ctx, the replay's scope is the
-  `scope` of the session's latest `activate` or `grant_set` record, and
-  the conversation's only for a session that has none. `agentpolicy.Engine.Revoke` records that verdict when it
+  record): a `revoke` of the source or a `revoke_scope` ends it, and a
+  `grant_set` allow is a rule the read was granted, when the record's
+  `scope` is one the path's own grants were made under (an `activate`
+  or `grant_set` on the path, the origin's on a fork's prefix among
+  them, less a child agent's under one of them) or the target; a
+  record under any other scope is passed over. Only a record with no
+  `grant` member, written before agentpolicy v0.0.19, is read by its
+  reason, `revoked the rules granted by <source>`. The grants are made
+  again only under the target, the scope on ctx or else the
+  conversation's, `kit.GrantScope`: the scope the resumed runs decide
+  under, never one a record names, so a fork never grants into its
+  origin's conversation. `agentpolicy.Engine.Revoke` records that verdict when it
   removed a rule, and the kit records it for a source whose set held
   none, an untrusted skill's or one whose rules were all refused,
   whether the scope or `Kit.RevokeSkillGrants` revoked it, as the
