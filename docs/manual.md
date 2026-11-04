@@ -38,7 +38,7 @@ and no fold is recorded.
 | `Tools` | — | the kit never sets it; it sets `ToolProvider`, which the loop reads in its place |
 | `ToolProvider` | `WithTools`, `WithSkills`, `WithMemory`, `WithMCP`, `WithMCPResourceTools`, `WithChildAgent`, `WithDeferredTools`, `WithToolProvider`, `WithToolFilter`, `WithToolWrap`, `WithPolicy` | `append` the slices, wrap each tool, and wrap the list in `engine.ToolProvider` — see below |
 | `BeforeTurn` | `WithSkillGrantScope`, `WithBeforeTurn` | `agentturn.ChainBeforeTurn(revokeOnUserMessage, yours...)` — see below |
-| `BeforeModelCall` | `WithMemory`, `WithGuards`, `WithVerdictObserver`, `WithBeforeModelCall` | `agentturn.ChainBeforeModelCall(instructions, chain.BeforeModelCall(), yours...)` — see below |
+| `BeforeModelCall` | `WithMemory`, `WithGuards`, `WithPolicy`, `WithSkillGrants`, `WithVerdictObserver`, `WithBeforeModelCall` | `agentturn.ChainBeforeModelCall(instructions, chain.BeforeModelCall(), yours...)` — see below |
 | `BeforeToolCall` | `WithPolicy`, `WithMemory`, `WithSkillGrants`, `WithSkillGrantScope`, `WithBeforeToolCall` | `agentturn.ChainBeforeToolCall(keepSaveBase, decide)`, `decide` being `engine.BeforeToolCall()` under the call's grant scope, the engine built with `agentpolicy.WithHooks(refuseEndedGrant, yours...)`; with `WithEngine` or no policy, `yours...` after the engine and no `refuseEndedGrant` — see below |
 | `AfterToolCall` | `WithAfterToolCall` | assign it; the kit contests nothing here |
 | `OutputGuard` | `WithGuards`, `WithOutputGuard` | `agentturn.ChainOutputGuard(chain.OutputGuard(), yours...)` |

@@ -2001,9 +2001,12 @@ func callIDOf(p agentturn.PendingCall) string {
 // run, [Kit.failOnLostVerdict], fails the run with it, as a write of the
 // recorder's own fails the run: the session would otherwise say nothing
 // of a decision the run went on under, and a restart regrants skill
-// grants from these verdicts. A write that fails outside any run, a
-// revocation a product makes between runs, has no run to fail and is
-// lost.
+// grants from these verdicts. A write that fails in the last hook a
+// run calls, an output guard's verdict on the final answer or a stop
+// hook's, has no later hook in that run and is lost, and so is one that
+// fails outside any run, a revocation a product makes between runs.
+// When the engine had deferred the call whose hook fails the run, it
+// keeps what it held of the run until [agentpolicy.Engine.Forget].
 func (k *Kit) observeVerdicts(s *settings, guards bool) func(context.Context, agentpolicy.Verdict) {
 	product := s.verdicts
 	k.recordsVerdicts = true

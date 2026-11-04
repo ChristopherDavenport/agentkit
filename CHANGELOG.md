@@ -31,6 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   adds `PartMemoryUsage`, and a session recorded before records the
   paragraph under the old ID, so the first config entry after the
   upgrade carries its text again under the new one.
+- A run fails when the kit cannot record one of its policy verdicts
+  in the run's session, where it went on (see Fixed). The first lost
+  write of a run fails the kit's next hook in that run, the engine's
+  `BeforeToolCall` or `BeforeModelCall`; a verdict lost in the last
+  hook a run calls, such as an output guard's on the final answer, and
+  one lost between runs, such as a revocation outside any run, are
+  still lost, and the engine keeps what it held of a run that failed so
+  after deferring a call until `Forget`.
+- The text the model reads when a memory write is refused because the
+  memory block was left out is agentmemory's `ErrBlockDropped`, which
+  no longer says the instruction budget was the reason (#95).
 - Docs: `docs/manual.md`'s `ToolElicitor` row says the loop asks the
   kit's elicitor about a nested call (`agenttool.Invoke`) the policy
   defers, and never an elicitor the invoking tool installed, as of
@@ -60,7 +71,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   reach. The fold is reported to `WithFoldObserver` and recorded as an
   automatic one; without a compaction transform Compact returns
   `ErrNoCompaction`. It folds at the next model call, the run in
-  flight's or the next run's, not at once.
+  flight's or the next run's, not at once. The kit builds one
+  transform for every agent configured from it, so the next model call
+  of any of them takes the fold, not only the Control's own agent's.
 
 - `Kit.MCPServers()` and `Kit.MCP(label)`, with `MCPServer` (#113): the
   remotes of the MCP servers the kit dialed, New's and those `AddMCP`
