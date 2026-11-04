@@ -276,16 +276,23 @@ type productPart struct {
 // part may change mid-session: a rule file loaded when the model opens
 // a file, a /memory reload, a path-scoped rule. The kit then records
 // the new text as that part in the session's next config delta, with
-// the part's source and trust, and every other part stays a part,
-// where a BeforeModelCall that rewrote the instructions after the
-// kit's left the record one flattened string.
+// the part's source and trust, and every other part stays a part. A
+// BeforeModelCall that rewrites the instructions after the kit's, by
+// [WithBeforeModelCall] or a product's own chain, still leaves the
+// record one flattened string for that request, as it did before
+// WithPart: the kit's parts no longer join to what was sent, so
+// [Kit.PartsFor] gives none. A part that should change mid-session is
+// a WithPart, not such a hook.
 //
 // The part is placed by [WithOrder], after the kit's own parts in
 // [DefaultOrder] when no order is given, in the order the parts were
 // added. It is charged to [WithInstructionBudget] as the product's
 // prompt is, whole, since its text is the product's: the bounded layers
 // share what is left, at New and at each request, and New fails when
-// the first render leaves the budget short. The input guards run over
+// the first render leaves the budget short. A later render that grows
+// past the budget is neither refused nor cut: the bounded layers shrink
+// to nothing, the memory block is dropped, and the request is sent over
+// the budget by what the part added. The input guards run over
 // it as over every part, and [Kit.PartsFor] gives it with the rest. An
 // id the kit composes ([PartProduct], [PartSkills], agentsmd.PartID,
 // [PartMemoryUsage]), one in agentmemory's reserved space (memory,

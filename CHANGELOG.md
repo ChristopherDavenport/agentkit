@@ -109,8 +109,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   next delta carries the new text under the part's id, source and trust
   and every other part stays a part. The only route before was a
   `BeforeModelCall` after the kit's, which left the record one flattened
-  string. An id the kit composes, one in agentmemory's reserved space,
-  an empty one or a repeated one is refused by `New`.
+  string. A hook that rewrites the instructions after the kit's still
+  flattens the record for that request, and a part that grows past the
+  budget after `New` drops the bounded layers but is sent whole. An id
+  the kit composes, one in agentmemory's reserved space, an empty one
+  or a repeated one is refused by `New`.
 
 - `Control.Deliver`, so a kit's `Control` is an `agentturn.Deliverer`
   (#106). A message that arrives after a run's last drain, between its
