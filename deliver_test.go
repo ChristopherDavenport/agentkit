@@ -2,12 +2,16 @@ package agentkit_test
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ChristopherDavenport/agentkit"
+	"github.com/ChristopherDavenport/agentpolicy"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
 
@@ -76,5 +80,62 @@ func TestControlDeliversAMessageThatMissedTheRun(t *testing.T) {
 	}
 	if !recorded {
 		t.Error("the session records no delivery")
+	}
+}
+
+// A kit that serves several conversations has no session of its own,
+// and each conversation's recorder is on the context its front runs it
+// with. Control.Deliver and Control.Queue write through that recorder,
+// so the queued entry, a delivery's with deliver, is on the record
+// before the agent takes the item: here the agent waits on an approval,
+// so nothing else would write it until a run took the item. They fell
+// back to the agent's own Deliver and Queue. (agentturn#244, #106)
+func TestControlDeliversThroughTheConversationsRecorder(t *testing.T) {
+	var ran atomic.Int32
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(&scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("bash", `{}`)}}, "m"),
+		agentkit.WithTools(counting("bash", &ran)),
+		agentkit.WithPolicy(agentpolicy.Policy{Default: agentpolicy.Ask()}, nil),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	store := agentsession.NewMemoryStore()
+	rec, sess, err := session.Start(t.Context(), store, agentsession.Header{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := agentturn.New(kit.Config())
+	defer rec.Attach(agent)()
+	ctl, err := kit.Control(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := agentkit.ContextWithRecorder(t.Context(), rec)
+	end, err := ctl.Prompt(ctx, openresponses.UserText("run it"))
+	if err != nil || end.Reason != agentturn.ReasonInputRequired {
+		t.Fatalf("prompt: end %+v, err %v; want the call held", end, err)
+	}
+	if _, _, err := ctl.Deliver(ctx, openresponses.UserText("and then this")); !errors.Is(err, agentturn.ErrInputRequired) {
+		t.Fatalf("Deliver = %v, want ErrInputRequired while the call waits", err)
+	}
+	if err := ctl.Queue(ctx, agentturn.QueueFollowUp, openresponses.UserText("and that")); err != nil {
+		t.Fatal(err)
+	}
+	live, err := store.Open(t.Context(), sess.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var delivered, queued bool
+	for _, e := range live.Entries() {
+		if q, ok := e.(*agentsession.QueuedEntry); ok {
+			line, _ := agentsession.MarshalEntry(q)
+			delivered = delivered || strings.Contains(string(line), "and then this") && strings.Contains(string(line), `"deliver":true`)
+			queued = queued || strings.Contains(string(line), "and that")
+		}
+	}
+	if !delivered || !queued {
+		t.Fatalf("the conversation's session records the delivery %v and the queued item %v; want both before a run takes them", delivered, queued)
 	}
 }

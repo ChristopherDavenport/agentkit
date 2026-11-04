@@ -1339,7 +1339,8 @@ Eleven things, all outside `agentturn.Config`:
   with no answers, for the calls still pending, and `engine.Forget` of
   their run. `Queue` is `rec.Queue`, and `Deliver`, which makes the
   Control an `agentturn.Deliverer`, is `rec.Deliver(ctx, agent, items...)`,
-  or `agent.Deliver` with no recorder. Under `WithQuestionEvents`, an
+  `rec` being the kit's or, without one, the conversation's on ctx
+  (`agentkit.RecorderFromContext`), or `agent.Deliver` with neither. Under `WithQuestionEvents`, an
   agent whose config has no `ToolElicitor` is given the kit's with
   `agent.SetConfig`. It hands the agent what a resumed session owes,
   `rec.Requeue(ctx, agent)`. `ContinueFrom` is

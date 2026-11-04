@@ -398,9 +398,13 @@ var _ agentturn.Deliverer = (*Control)(nil)
 // either, [agentturn.ErrInputRequired], and the Resume that answers them
 // takes the items, so unlike [Control.Prompt] it never starts a run
 // that settles what the kit's engine held.
+//
+// The recorder is the kit's, or, for a kit with no session of its own
+// that serves several conversations, the conversation's on ctx
+// ([ContextWithRecorder]), as RunContext puts the kit's there.
 func (c *Control) Deliver(ctx context.Context, items ...openresponses.Item) (bool, *agentturn.RunEnd, error) {
 	ctx = c.RunContext(ctx)
-	if rec := c.kit.Recorder(); rec != nil {
+	if rec := RecorderFromContext(ctx); rec != nil {
 		return rec.Deliver(ctx, c.agent, items...)
 	}
 	return c.agent.Deliver(ctx, items...)
@@ -410,9 +414,11 @@ func (c *Control) Deliver(ctx context.Context, items ...openresponses.Item) (boo
 // written as a queued entry before the agent takes it
 // ([session.Recorder.Queue]) rather than at the agent's queued event,
 // which the run's next event delivers and a quiet tool can hold off.
+// The recorder is the kit's, or the conversation's on ctx, as for
+// [Control.Deliver].
 func (c *Control) Queue(ctx context.Context, mode agentturn.QueueMode, items ...openresponses.Item) error {
 	ctx = c.RunContext(ctx)
-	if rec := c.kit.Recorder(); rec != nil {
+	if rec := RecorderFromContext(ctx); rec != nil {
 		return rec.Queue(ctx, c.agent, mode, items...)
 	}
 	return c.agent.Queue(ctx, mode, items...)

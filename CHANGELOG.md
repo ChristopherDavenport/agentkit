@@ -158,6 +158,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   §8.1). It was the manifest's `Bytes`, the content's size, which is
   less. Each scope that left an entry out is listed once per render; an
   entry changed or forgotten since the render keeps the content's size.
+- `Control.Queue`, and the new `Control.Deliver`, write through the
+  conversation's recorder on the context (`ContextWithRecorder`) when
+  the kit has no session of its own, as one kit serving several
+  conversations does, so the queued entry is on the record before the
+  agent takes the item. Queue fell back to the agent's own, which wrote
+  nothing until a run took the item (agentturn#244).
 - `Kit.Tools()` lists each MCP server's tools as the server lists them
   now, through `WithToolFilter` and the duplicate check, as the model is
   offered them (#101). It gave the list a server had when it was added,
