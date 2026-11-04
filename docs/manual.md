@@ -518,7 +518,7 @@ instructions := func(ctx context.Context, req *openresponses.Request) error {
 	if dropped {
 		req.Tools = slices.DeleteFunc(slices.Clone(req.Tools), func(t openresponses.Tool) bool {
 			f, ok := t.(*openresponses.FunctionTool)
-			return ok && (f.Name == agentmemory.SaveTool || f.Name == agentmemory.PatchTool || f.Name == agentmemory.ForgetTool)
+			return ok && slices.Contains(agentmemory.WriteTools(), f.Name)
 		})
 	}
 	return nil
