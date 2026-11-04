@@ -210,6 +210,13 @@ type Kit struct {
 	// keyed by the run's ID and kept by revokeOnUserMessage, which is what
 	// a skill grant made in that run is bound to; see userMark.
 	turnMarks bounded[userMark]
+	// lostVerdicts is the first verdict write each run's session
+	// refused, keyed by the run's ID, kept by observeVerdicts and taken
+	// by failOnLostVerdict, which fails the run with it. recordsVerdicts
+	// is set when the kit made an observer that writes verdicts, and is
+	// what installs failOnLostVerdict.
+	lostVerdicts    bounded[error]
+	recordsVerdicts bool
 
 	// recmu guards recorded, the manifest last written to each session
 	// and the entry that holds it, keyed by the session's ID, and is held
@@ -1263,6 +1270,11 @@ func (k *Kit) buildHooks(s *settings) {
 	if len(s.guards) > 0 {
 		before = append(before, guards.BeforeModelCall())
 	}
+	if k.recordsVerdicts {
+		before = append(before, func(ctx context.Context, _ *openresponses.Request) error {
+			return k.failOnLostVerdict(ctx, "")
+		})
+	}
 	before = append(before, s.beforeModelCall...)
 	k.cfg.BeforeModelCall = chain1(before, agentturn.ChainBeforeModelCall)
 
@@ -1282,6 +1294,19 @@ func (k *Kit) buildHooks(s *settings) {
 			inner := decide
 			decide = func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
 				return inner(k.grants.scopedCtx(ctx), info)
+			}
+		}
+		if k.recordsVerdicts {
+			inner := decide
+			decide = func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+				d, err := inner(ctx, info)
+				if err != nil {
+					return d, err
+				}
+				if lost := k.failOnLostVerdict(ctx, info.RunID); lost != nil {
+					return nil, lost
+				}
+				return d, nil
 			}
 		}
 		tool = append(tool, decide)
@@ -1941,22 +1966,66 @@ func callIDOf(p agentturn.PendingCall) string {
 // message, and their silence would outweigh the run.
 //
 // An observer cannot fail the decision it observes, so a write that
-// fails is lost, as it is for any observer; the recorder's own writes
-// for the run fail the run first.
+// fails is kept under the run on ctx, and the kit's next hook in that
+// run, [Kit.failOnLostVerdict], fails the run with it, as a write of the
+// recorder's own fails the run: the session would otherwise say nothing
+// of a decision the run went on under, and a restart regrants skill
+// grants from these verdicts. A write that fails outside any run, a
+// revocation a product makes between runs, has no run to fail and is
+// lost.
 func (k *Kit) observeVerdicts(s *settings, guards bool) func(context.Context, agentpolicy.Verdict) {
 	product := s.verdicts
+	k.recordsVerdicts = true
 	return func(ctx context.Context, v agentpolicy.Verdict) {
 		if replaying(ctx) {
 			return
 		}
 		if rec := k.recorderFor(ctx); rec != nil && (!guards || v.Action != agentturn.Allow || v.Reason != "") {
 			ns, data := v.Record()
-			_, _ = rec.Annotate(ctx, ns, json.RawMessage(data))
+			if _, err := rec.Annotate(ctx, ns, json.RawMessage(data)); err != nil {
+				k.loseVerdict(ctx, v, err)
+			}
 		}
 		if product != nil {
 			product(ctx, v)
 		}
 	}
+}
+
+// loseVerdict keeps the failed write of v for the run on ctx, the first
+// one only, for failOnLostVerdict.
+func (k *Kit) loseVerdict(ctx context.Context, v agentpolicy.Verdict, err error) {
+	run := agentturn.RunIDFromContext(ctx)
+	if run == "" {
+		return
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if _, ok := k.lostVerdicts.get(run); !ok {
+		k.lostVerdicts.put(run, fmt.Errorf("agentkit: recording the policy verdict on %s: %w", v.Subject, err))
+	}
+}
+
+// failOnLostVerdict returns the verdict write the run on ctx lost, once,
+// so the hook that calls it fails the run. The kit calls it after its
+// engine decides a call, which reports the call's verdict before it
+// returns, and after the guards and the instructions in BeforeModelCall,
+// which find what a guard's check and a skill read's grant lost.
+func (k *Kit) failOnLostVerdict(ctx context.Context, run string) error {
+	if run == "" {
+		run = agentturn.RunIDFromContext(ctx)
+	}
+	if run == "" {
+		return nil
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	err, ok := k.lostVerdicts.get(run)
+	if !ok {
+		return nil
+	}
+	k.lostVerdicts.delete(run)
+	return err
 }
 
 // keepSaveBase is the BeforeToolCall hook the kit puts first whenever

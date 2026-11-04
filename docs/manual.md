@@ -465,11 +465,28 @@ Two things the kit adds that the `append` above does not:
 observe := func(ctx context.Context, v agentpolicy.Verdict) {
 	if r := recorderFor(ctx); r != nil && (v.Guard == "" || v.Action != agentturn.Allow || v.Reason != "") {
 		ns, data := v.Record()
-		r.Annotate(ctx, ns, json.RawMessage(data))
+		if _, err := r.Annotate(ctx, ns, json.RawMessage(data)); err != nil {
+			// An observer cannot fail the decision; the run's next hook
+			// does. The first lost write per run.
+			if run := agentturn.RunIDFromContext(ctx); run != "" && lost[run] == nil {
+				lost[run] = fmt.Errorf("agentkit: recording the policy verdict on %s: %w", v.Subject, err)
+			}
+		}
 	}
 	productObserver(ctx, v) // WithVerdictObserver
 }
 chain := guard.Chain{Guards: guards, Observer: observe}
+
+// failOnLost fails the run with the verdict write it lost, once: after
+// the guards in BeforeModelCall, and after the engine decides a call.
+failOnLost := func(ctx context.Context, run string) error {
+	if run == "" {
+		run = agentturn.RunIDFromContext(ctx)
+	}
+	err := lost[run]
+	delete(lost, run)
+	return err
+}
 
 // guardParts runs the input guards over each part alone. A refusal
 // names its part, and so does each verdict's Subject, since the chain
@@ -526,6 +543,7 @@ instructions := func(ctx context.Context, req *openresponses.Request) error {
 cfg.BeforeModelCall = agentturn.ChainBeforeModelCall(
 	instructions,
 	chain.BeforeModelCall(),
+	func(ctx context.Context, _ *openresponses.Request) error { return failOnLost(ctx, "") },
 	productHook,
 )
 ```
@@ -696,7 +714,13 @@ scopeOf := func(ctx context.Context) string {
 // conversation (WithSkillGrants): the sets the engine consults are the
 // policy's, the unscoped ones and those of this scope.
 decide := func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
-	return engine.BeforeToolCall()(agentpolicy.ContextWithGrantScope(ctx, scopeOf(ctx)), info)
+	d, err := engine.BeforeToolCall()(agentpolicy.ContextWithGrantScope(ctx, scopeOf(ctx)), info)
+	if err == nil {
+		if lostErr := failOnLost(ctx, info.RunID); lostErr != nil { // the call's own verdict, written above
+			return nil, lostErr
+		}
+	}
+	return d, err
 }
 
 // refuseEndedGrant blocks, inside the engine, a call that only a grant

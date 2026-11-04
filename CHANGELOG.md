@@ -39,6 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A policy verdict the run's session refuses to record fails the run.
+  The kit's observer dropped the error from `Recorder.Annotate`, so a
+  run went on under a decision its session said nothing of, and a
+  restart could not regrant a skill grant whose verdict was lost. The
+  first lost write of a run is now returned by the kit's next hook in
+  that run: the engine's `BeforeToolCall`, right after the call's own
+  verdict, or `BeforeModelCall`, after the guards. A write outside any
+  run, a revocation between runs, has no run to fail and is still lost.
 - The answer `Kit.QuestionsFor`, and so `Control.Elicitor` and the
   kit's elicitor under `WithQuestionEvents`, gives the asking tool
   names its decider, `Answer.By` `human`, when the reply names none, as
