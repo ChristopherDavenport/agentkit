@@ -201,8 +201,11 @@ tools = append(tools, childagent.New(childCfg,
 	})))
 // The catalogue's tool as it stands: ReloadSkills puts another
 // catalogue's in its place, and every run sees it from its next call.
-tools = append(tools, agenttool.Wrap(cat.Tool(), func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
-	return currentCat().Tool().Execute(ctx, call) // under a lock in real code
+// agenttool.Follow answers the facts claim, and every other property,
+// from the tool in force as well as the call, so a WithFileClaim claim
+// is the reloaded catalogue's (agenttool v0.0.29).
+tools = append(tools, agenttool.Follow(func() agenttool.Tool {
+	return currentTool() // currentCat().Tool(skillToolOpts...), kept beside the catalogue, under a lock
 }))
 
 // memory_save is based on the render its call was composed from:

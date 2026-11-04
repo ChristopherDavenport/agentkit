@@ -43,6 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The skill tool's facts claim follows `ReloadSkills` (#96). The tool
+  `New` offered ran the catalogue in force but answered its facts from
+  the tool of the catalogue `New` discovered, so under
+  `WithSkillTool(agentskill.WithFileClaim(fn))` a skill the reload added
+  was claimed as the call alone, and its files read past a policy that
+  holds skill reads to `read`'s rules, and a skill another source now
+  held was claimed at the file it no longer served. agentpolicy v0.0.18
+  reads a tool's facts by default, so the stale claim decided the call
+  with no splitter at all. The tool is now `agenttool.Follow` over the
+  tool in force, which answers every property and every call from it.
 - The revocation verdict the kit records for a skill's set that held
   no rules carries agentpolicy v0.0.19's members, `grant` `revoke`,
   `source` and `scope`, as the engine's own revocation does, so a reader

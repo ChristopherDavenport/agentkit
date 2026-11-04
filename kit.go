@@ -872,13 +872,15 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 	}
 	if k.catalog != nil && offersSkillTool(s) {
 		// The catalogue's tool as it stands, which ReloadSkills replaces,
-		// behind the one New built, which keeps its name and properties.
+		// behind a stand-in that answers every property, the facts claim
+		// above all, and every call from the tool in force, so a call is
+		// never decided on the claim of a catalogue the tool no longer
+		// serves (agenttool RFC 0001, Binding and forwarding).
 		k.skillTool = k.catalog.Tool(s.skillToolOpt...)
-		tool := agenttool.Wrap(k.skillTool, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+		tool := agenttool.Follow(func() agenttool.Tool {
 			k.mu.Lock()
-			t := k.skillTool
-			k.mu.Unlock()
-			return t.Execute(ctx, call)
+			defer k.mu.Unlock()
+			return k.skillTool
 		})
 		src := source{name: "WithSkills", tools: []agenttool.Tool{tool}}
 		if s.skillGrants && k.engine != nil {
