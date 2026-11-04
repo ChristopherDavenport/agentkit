@@ -521,7 +521,7 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 //
 // A render [WithInstructionBudget] leaves no room for drops the block
 // and the paragraph, and that request is not offered memory_save,
-// memory_patch or memory_forget: the model would be writing over
+// memory_patch, memory_forget or memory_insert: the model would be writing over
 // entries it was never shown, with no word on the tools. A write the
 // model makes anyway in that run is refused, and so is one a policy
 // held and a person approved, which runs in a Resume: the render kept

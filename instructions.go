@@ -387,13 +387,17 @@ func omittedSizes(ctx context.Context, store agentmemory.Store, omitted []agentm
 	return sizes
 }
 
-// memoryWrites are the memory tools that write: withheld from a request
-// whose render the budget dropped, and refused in its run.
-var memoryWrites = map[string]bool{
-	agentmemory.SaveTool:   true,
-	agentmemory.PatchTool:  true,
-	agentmemory.ForgetTool: true,
-}
+// memoryWrites are the memory tools that write,
+// [agentmemory.WriteTools]: memory_save, memory_patch, memory_forget
+// and memory_insert. They are withheld from a request whose render the
+// budget dropped, and refused in its run.
+var memoryWrites = func() map[string]bool {
+	m := map[string]bool{}
+	for _, name := range agentmemory.WriteTools() {
+		m[name] = true
+	}
+	return m
+}()
 
 // withoutMemoryWrites returns tools without the [memoryWrites], tools
 // itself when it holds none.

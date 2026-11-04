@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `memory_insert` (agentmemory v0.0.11's `InsertTool`, offered under
+  `WithMemoryTools(agentmemory.WithInsert(…))`) is one of the writes a
+  request whose memory block the budget dropped is not offered and
+  whose run refuses, as `memory_save`, `memory_patch` and
+  `memory_forget` are: the kit's list is `agentmemory.WriteTools()`.
 - An omitted memory entry's `Omission.Size`, and the `size` of its
   `instructions_omitted` element, is the bytes its part would have
   added, `agentmemory.EntryPart`'s text and its separator, as

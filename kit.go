@@ -1007,8 +1007,8 @@ func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
 // path cannot attribute to the call's run, or whose shape does not say,
 // is let through to the base saveAsRendered finds, or refuses for.
 //
-// The kept render is consumed here for memory_patch and memory_forget,
-// and for a memory_save refused here, since none of them reaches
+// The kept render is consumed here for memory_patch, memory_forget and
+// memory_insert, and for a memory_save refused here, since none of them reaches
 // saveAsRendered, which consumes the one it bases a save on.
 func (k *Kit) refuseWhenDropped(t agenttool.Tool) agenttool.Tool {
 	save := t.Name() == agentmemory.SaveTool
@@ -1966,7 +1966,7 @@ func (k *Kit) observeVerdicts(s *settings, guards bool) func(context.Context, ag
 // decides nothing. Whoever then holds the call, the kit's engine, one the
 // product built, or a hook of the product's, the render is kept for the
 // Resume that runs it: a save's base, and the drop that refuses any of
-// the three. A Resume decides a call again before any render, and that
+// the four. A Resume decides a call again before any render, and that
 // decision keeps nothing, so the render the held call was decided under
 // stands.
 func (k *Kit) keepSaveBase(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {

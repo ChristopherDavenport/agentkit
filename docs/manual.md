@@ -160,7 +160,8 @@ tells the model to reach the listed skills through that tool.
 to a memory block that is sent, since `WithMemory` offers
 `agentmemory.Tools`; a block the budget drops takes it along, and the
 writes with it: the request that block was dropped from is not offered
-`memory_save`, `memory_patch` or `memory_forget`, and the run refuses
+`memory_save`, `memory_patch`, `memory_forget` or `memory_insert`
+(`agentmemory.WriteTools()`), and the run refuses
 them, outright or when a held one is approved (below).
 
 Under `WithInstructionBudget`, the layers that take a bound are given
