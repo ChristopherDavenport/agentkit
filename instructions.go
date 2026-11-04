@@ -289,6 +289,9 @@ func unlistedReason(sk *agentskill.Skill, problems []agentskill.Problem) string 
 // restart.
 func memoryPart(ctx context.Context, s *settings, limit int64) (group []Part, man agentmemory.Manifest, omitted []Omission, dropped bool, err error) {
 	usage := agentmemory.Usage()
+	if archive := s.archiveScopes(); len(archive) > 0 {
+		usage += " " + archiveNote(archive)
+	}
 	if limit > 0 {
 		if limit -= int64(len(Separator) + len(usage)); limit <= 0 {
 			limit = -1
@@ -396,6 +399,18 @@ func omittedSizes(ctx context.Context, store agentmemory.Store, omitted []agentm
 		}
 	}
 	return sizes
+}
+
+// archiveNote is the sentence the usage paragraph ends with under
+// [WithMemoryArchive]: the archive scopes are the tools' and never the
+// block's.
+func archiveNote(scopes []agentmemory.Scope) string {
+	names := make([]string, len(scopes))
+	for i, sc := range scopes {
+		names[i] = fmt.Sprintf("%q", string(sc))
+	}
+	return "The scopes " + strings.Join(names, ", ") + " are an archive: the block never shows them, however much they hold; find their entries with " +
+		agentmemory.SearchTool + " and add to them with " + agentmemory.InsertTool + " when it is offered."
 }
 
 // sessionTrust is a memory part's trust in agentsession's form: the

@@ -34,9 +34,9 @@ and no fold is recorded.
 | `Model`, `ModelName` | `WithModel` | assign them; the kit builds no adapter, so a model that is an `openresponses.ClientAdapter` over a provider's own API is the product's `client.AsAdapter(openresponses.WithProviderSlugs())`, which leaves out an item under another provider's slug that the loop keeps (`Config.Model`'s doc, agentturn v0.0.35) |
 | `Request`, `RequestExtra`, `Reasoning`, `Text`, `MaxTurns`, `Filter` | `WithRequest`, `WithRequestExtra`, `WithReasoning`, `WithText`, `WithMaxTurns`, `WithFilter` | assign them; the kit copies them through and owns no member of any |
 | `Retry`, `ToolExecution`, `MaxParallelTools` | `WithRetry`, `WithToolExecution`, `WithMaxParallelTools` | assign them; the kit contests none of them and reads none of them |
-| `Instructions` | `WithInstructions`, `WithSkills`, `WithMemory`, `WithAgentsMD`, `WithPart`, `WithMCP`, `WithTrustedMCPInstructions` | `strings.Join` of the four blocks, each MCP server's instructions part and each `WithPart` part's first render, in the order of [ordering.md](ordering.md) — see below |
+| `Instructions` | `WithInstructions`, `WithSkills`, `WithMemory`, `WithMemoryArchive`, `WithAgentsMD`, `WithPart`, `WithMCP`, `WithTrustedMCPInstructions` | `strings.Join` of the four blocks, each MCP server's instructions part and each `WithPart` part's first render, in the order of [ordering.md](ordering.md) — see below |
 | `Tools` | — | the kit never sets it; it sets `ToolProvider`, which the loop reads in its place |
-| `ToolProvider` | `WithTools`, `WithSkills`, `WithMemory`, `WithMCP`, `WithMCPResourceTools`, `WithChildAgent`, `WithDeferredTools`, `WithToolProvider`, `WithToolFilter`, `WithToolWrap`, `WithPolicy` | `append` the slices, wrap each tool, and wrap the list in `engine.ToolProvider` — see below |
+| `ToolProvider` | `WithTools`, `WithSkills`, `WithMemory`, `WithMemoryArchive`, `WithMCP`, `WithMCPResourceTools`, `WithChildAgent`, `WithDeferredTools`, `WithToolProvider`, `WithToolFilter`, `WithToolWrap`, `WithPolicy` | `append` the slices, wrap each tool, and wrap the list in `engine.ToolProvider` — see below |
 | `BeforeTurn` | `WithSkillGrantScope`, `WithBeforeTurn` | `agentturn.ChainBeforeTurn(revokeOnUserMessage, yours...)` — see below |
 | `BeforeModelCall` | `WithMemory`, `WithPart`, `WithGuards`, `WithPolicy`, `WithSkillGrants`, `WithVerdictObserver`, `WithBeforeModelCall` | `agentturn.ChainBeforeModelCall(instructions, chain.BeforeModelCall(), yours...)` — see below |
 | `BeforeToolCall` | `WithPolicy`, `WithMemory`, `WithSkillGrants`, `WithSkillGrantScope`, `WithBeforeToolCall` | `agentturn.ChainBeforeToolCall(keepSaveBase, decide)`, `decide` being `engine.BeforeToolCall()` under the call's grant scope, the engine built with `agentpolicy.WithHooks(refuseEndedGrant, yours...)`; with `WithEngine` or no policy, `yours...` after the engine and no `refuseEndedGrant` — see below |
@@ -135,7 +135,11 @@ part per piece, each with the piece's trust as
 the text above is unchanged; the parts are what `Kit.Parts` and the
 recorder see, so a write to one entry is recorded as that entry's part
 and the summary. The scopes rendered are `WithMemory`'s and then any
-`WithMemoryReadScopes` it does not name.
+`WithMemoryReadScopes` it does not name. `WithMemoryArchive`'s
+scopes are never rendered: they join the writable scopes
+`agentmemory.Tools` is built over, so `memory_search` finds them and
+the writers reach them, and the usage paragraph ends with a sentence
+naming them as an archive the block never shows.
 
 `cwd` and `opts` are `WithAgentsMD`'s, and `opts` is passed to
 `agentsmd.Chain` verbatim. A product whose project is not on the host's

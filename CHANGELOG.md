@@ -68,6 +68,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `WithMemoryArchive(scopes...)` (#107): scopes the memory tools write
+  and search and the block never renders, an archive like Letta's
+  archival memory. They join the writable scopes `agentmemory.Tools`
+  is built over, so `memory_search` finds a passage and
+  `memory_insert` (under `WithMemoryTools(agentmemory.WithInsert(...))`)
+  adds one, and the usage paragraph names them as searchable and not
+  shown; no request's instructions hold a passage. A scope also given
+  to `WithMemory` or `WithMemoryReadScopes` is refused by `New`.
+
 - Each consumed MCP server's instructions are a part of their own,
   `mcp:#<n> <what>`, the server's label as its id and source, while the
   kit holds the server and offers its tools (#112, agenttool RFC 0001,

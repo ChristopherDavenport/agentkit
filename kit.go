@@ -1042,6 +1042,11 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 // agentmemory.Tools panics on scopes it cannot build over, and New is
 // the call documented to fail, so the panic is returned as an error.
 func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
+	for _, a := range s.archiveScopes() {
+		if slices.Contains(s.memScopes, a) || slices.Contains(s.memRead, a) {
+			return nil, fmt.Errorf("agentkit: memory scope %q is an archive and rendered; WithMemoryArchive names a scope the block never shows, so leave it out of WithMemory and WithMemoryReadScopes", a)
+		}
+	}
 	writable := s.writableScopes()
 	if len(writable) == 0 {
 		return nil, errors.New("agentkit: WithMemory has no writable scope; agentmemory's tools need one, so leave at least one scope out of WithMemoryReadScopes")

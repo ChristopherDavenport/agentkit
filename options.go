@@ -77,11 +77,12 @@ type settings struct {
 	skillSource      func(*agentskill.Skill) agentpolicy.Source
 	skillGrant       func(SkillGrant)
 
-	memStore  agentmemory.Store
-	memScopes []agentmemory.Scope
-	memRead   []agentmemory.Scope
-	memRender []agentmemory.RenderOption
-	memTools  []agentmemory.ToolOption
+	memStore   agentmemory.Store
+	memScopes  []agentmemory.Scope
+	memRead    []agentmemory.Scope
+	memArchive []agentmemory.Scope
+	memRender  []agentmemory.RenderOption
+	memTools   []agentmemory.ToolOption
 
 	tools      []agenttool.Tool
 	deferTools []deferred
@@ -635,6 +636,33 @@ func WithMemoryReadScopes(scopes ...agentmemory.Scope) Option {
 	return func(s *settings) { s.memRead = append(s.memRead, scopes...) }
 }
 
+// WithMemoryArchive adds scopes the memory tools write and search and
+// the block never renders: an archive, Letta's archival memory, whose
+// passages the model adds with memory_insert or memory_save and finds
+// with memory_search, and which never reaches a request's instructions
+// however many it holds. The usage paragraph names them as searchable
+// and not shown. memory_insert into them needs
+// WithMemoryTools(agentmemory.WithInsert(scopes...)). memory_save is
+// based on the block, which never shows an archived entry, so an
+// archive is added to with memory_insert rather than saved over. A scope
+// [WithMemory] or [WithMemoryReadScopes] names cannot be an archive too;
+// [New] fails. It has no effect without [WithMemory]. Several calls
+// accumulate.
+func WithMemoryArchive(scopes ...agentmemory.Scope) Option {
+	return func(s *settings) { s.memArchive = append(s.memArchive, scopes...) }
+}
+
+// archiveScopes is the archive scopes, each once.
+func (s *settings) archiveScopes() []agentmemory.Scope {
+	var out []agentmemory.Scope
+	for _, a := range s.memArchive {
+		if !slices.Contains(out, a) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // renderScopes is every scope the block renders: WithMemory's, in
 // order, then the read scopes it does not name, each once.
 func (s *settings) renderScopes() []agentmemory.Scope {
@@ -647,7 +675,8 @@ func (s *settings) renderScopes() []agentmemory.Scope {
 	return out
 }
 
-// writableScopes is WithMemory's scopes less the read-only ones.
+// writableScopes is WithMemory's scopes less the read-only ones, then
+// the archive scopes.
 func (s *settings) writableScopes() []agentmemory.Scope {
 	var out []agentmemory.Scope
 	for _, sc := range s.memScopes {
@@ -655,7 +684,7 @@ func (s *settings) writableScopes() []agentmemory.Scope {
 			out = append(out, sc)
 		}
 	}
-	return out
+	return append(out, s.archiveScopes()...)
 }
 
 // readScopes is the read-only scopes, each once.
