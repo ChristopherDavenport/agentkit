@@ -7,12 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **Breaking**: requires agentturn and agentturn/session v0.0.35, up
+- **Breaking**: requires agentturn and agentturn/session v0.0.36, up
   from v0.0.32, agentsession v0.0.37, up from v0.0.28, agenttool and
   agenttool/mcpclient v0.0.29, up from v0.0.24, agentpolicy v0.0.19, up
   from v0.0.17, agentmemory v0.0.12, up from v0.0.10, agentsmd v0.0.4,
   up from v0.0.3, and openresponses v0.0.18, up from v0.0.15, in the
-  root and in `examples/a2a` (front/a2a and tools/a2a v0.0.35 there).
+  root and in `examples/a2a` (front/a2a and tools/a2a v0.0.36 there).
+  agentturn v0.0.36 records every quarantine, `TurnStart`,
+  `ModelRetry`, `RunEnd` and `ModelBlocked` carrying `Quarantined` and
+  a new `QuarantineAdded` event for one made between runs, so a resumed
+  session no longer sends a quarantined item again (a security fix);
+  the kit forwards every event to a child's recorder unchanged and has
+  no observer that switches on event types, so nothing in it changes.
   Sessions are written as `agentsession/0.20`, and a file the recorder
   appends to is raised to 0.20, after which agentsession v0.0.36 and
   earlier refuse it: upgrade every reader of a store first. A redactor
