@@ -312,13 +312,10 @@ func memoryPart(ctx context.Context, s *settings, limit int64) (group []Part, ma
 		parts, dropped = nil, true
 		// Every entry is left out for the block, those a bounded render
 		// had already left out for the budget too: the block is not sent.
-		omitted := make([]agentmemory.ManifestEntry, 0, len(man.Entries)+len(man.Omitted))
-		omitted = append(omitted, man.Entries...)
-		omitted = append(omitted, man.Omitted...)
-		for i := range omitted {
-			omitted[i].Reason = agentmemory.OmitBlock
-		}
-		man.Entries, man.Omitted = nil, omitted
+		// The manifest says the block was left out, LeftOut, even over
+		// an empty store, so a write composed from it is refused after a
+		// restart too (agentmemory.Manifest.Dropped).
+		man = man.LeaveOut()
 	}
 
 	if size > 0 && len(parts) > 0 {
@@ -415,8 +412,10 @@ func isMemoryWrite(t openresponses.Tool) bool {
 
 // errMemoryDropped is what a memory write gets in a run whose render the
 // instruction budget dropped: the model was shown no block, so a write
-// could replace an entry it never saw.
-var errMemoryDropped = errors.New("the memory block is not shown this turn, because the instruction budget has no room for it, so memory cannot be changed: a write could replace an entry you have not seen; " + agentmemory.SearchTool + " still reads it")
+// could replace an entry it never saw. It is agentmemory's own, so the
+// refusal where the call is decided, the kit's at its run and the
+// tool's own read the same (agentmemory RFC 0001 §6.8).
+var errMemoryDropped = agentmemory.ErrBlockDropped
 
 // agentsMDPart reads the AGENTS.md chain and renders it, bounded to
 // limit bytes when limit is positive.

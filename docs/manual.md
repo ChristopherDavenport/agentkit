@@ -161,8 +161,9 @@ to a memory block that is sent, since `WithMemory` offers
 `agentmemory.Tools`; a block the budget drops takes it along, and the
 writes with it: the request that block was dropped from is not offered
 `memory_save`, `memory_patch`, `memory_forget` or `memory_insert`
-(`agentmemory.WriteTools()`), and the run refuses
-them, outright or when a held one is approved (below).
+(`agentmemory.WriteTools()`), and the run refuses a call of one where
+it is decided, before any policy asks a person, and again when a call
+decided before the drop runs (below).
 
 Under `WithInstructionBudget`, the layers that take a bound are given
 one: `agentsmd.Options.Budget` and `agentmemory.WithMaxTotalBytes`, in
@@ -692,14 +693,22 @@ engine, err := agentpolicy.Build(policy, matchers,
 
 // keepSaveBase keeps a memory write's render, the manifest and whether
 // the budget dropped the block, for the Resume that may run it, and
-// decides nothing (WithMemory).
+// decides nothing (WithMemory), unless the render dropped the block:
+// then it blocks the write, so the chain ends before the engine asks
+// anyone about a call no answer could let through (agentmemory RFC 0001
+// §6.8).
 keepSaveBase := func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
-	switch info.Call.Name {
-	case agentmemory.SaveTool, agentmemory.PatchTool, agentmemory.ForgetTool:
-		if r, ok := rendered[info.RunID]; ok {
-			saveBase[sessionID(ctx)+"\x00"+info.Call.CallID] = r
-		}
+	if !slices.Contains(agentmemory.WriteTools(), info.Call.Name) {
+		return nil, nil
 	}
+	r, ok := rendered[info.RunID]
+	if !ok {
+		return nil, nil
+	}
+	if r.dropped {
+		return &agentturn.ToolDecision{Action: agentturn.Block, Reason: agentmemory.ErrBlockDropped.Error(), By: agentsession.ByPolicy}, nil
+	}
+	saveBase[sessionID(ctx)+"\x00"+info.Call.CallID] = r
 	return nil, nil
 }
 
@@ -805,8 +814,9 @@ the engine on a conversation's behalf puts the scope on the context it
 calls with, `agentpolicy.ContextWithGrantScope(ctx, kit.GrantScope(ctx))`:
 `engine.Answers` for a `Resume`, `engine.GrantsFor` to show the grants in
 force, `engine.RevokeScope` when the conversation ends. `keepSaveBase`
-decides nothing and goes first, ahead of whatever may hold or allow the
-call: it keeps the render for any holder.
+goes first, ahead of whatever may hold or allow the call: it keeps the
+render for any holder, and blocks a memory write in a run whose render
+dropped the block, so no holder asks about it.
 
 `refuseEndedGrant` is the one decision the kit makes, and it makes it
 inside the engine, as the first of the hooks `agentpolicy.WithHooks`

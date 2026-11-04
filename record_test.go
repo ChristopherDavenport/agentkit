@@ -1610,91 +1610,69 @@ func TestARestartedKitsFirstHandBackIsADelta(t *testing.T) {
 }
 
 // A memory write the model makes in a run whose block the budget dropped
-// is refused (#53). One a policy held and a person approved runs in a
-// Resume, a run with no render of its own, and was let through: it ran
-// over an entry the model was never shown. The render kept for the call
-// says the block was dropped, so the approved write is refused the same
-// way, for each of the three writes; after a restart, the manifest at the
-// call says it, holding no entry and every entry omitted. (#69)
-func TestAHeldWriteInARunWhoseBlockWasDroppedIsRefused(t *testing.T) {
+// is refused (#53), and refused where it is decided, before the policy
+// asks anyone: a write composed from a block the model was not shown
+// cannot be let through whatever a person answers, so asking them is a
+// question with no answer. It was held, a person approved it, and the
+// write was refused when it ran (#69); now the kit's first
+// BeforeToolCall hook blocks it, the engine never defers it, and the
+// session holds no question. Each of the four writes. (agentmemory RFC
+// 0001 §6.8, #95)
+func TestAWriteInARunWhoseBlockWasDroppedIsRefusedBeforeAnyoneIsAsked(t *testing.T) {
 	const prompt = "be brief"
 	content := "This project pins Go 1.25. " + strings.Repeat("c", 4000)
 	writes := map[string]string{
 		agentmemory.SaveTool:   `{"scope":"user","name":"go-version","content":"This project pins Go 1.26."}`,
 		agentmemory.PatchTool:  `{"scope":"user","name":"go-version","old_text":"1.25","new_text":"1.26"}`,
 		agentmemory.ForgetTool: `{"scope":"user","name":"go-version"}`,
+		agentmemory.InsertTool: `{"scope":"user","content":"This project pins Go 1.26."}`,
 	}
-	for _, restart := range []bool{false, true} {
-		for name, args := range writes {
-			t.Run(fmt.Sprintf("%s restart %v", name, restart), func(t *testing.T) {
-				store := memStore(t, agentmemory.Entry{Scope: "user", Name: "go-version", Content: content})
-				sessions := agentsession.NewMemoryStore()
-				build := func(model agentturn.Model, sess agentkit.Option) *agentkit.Kit {
-					kit, err := agentkit.New(t.Context(),
-						agentkit.WithModel(model, "m"),
-						agentkit.WithInstructions(prompt),
-						agentkit.WithMemory(store, "user"),
-						agentkit.WithInstructionBudget(int64(len(prompt)+len(agentkit.Separator)+40)),
-						agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{Execute: []string{name}}), nil),
-						sess,
-					)
-					if err != nil {
-						t.Fatal(err)
-					}
-					t.Cleanup(func() { _ = kit.Close() })
-					return kit
+	for name, args := range writes {
+		t.Run(name, func(t *testing.T) {
+			store := memStore(t, agentmemory.Entry{Scope: "user", Name: "go-version", Content: content})
+			sessions := agentsession.NewMemoryStore()
+			model := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn(name, args), textTurn("ok")}}
+			kit, err := agentkit.New(t.Context(),
+				agentkit.WithModel(model, "m"),
+				agentkit.WithInstructions(prompt),
+				agentkit.WithMemory(store, "user"),
+				agentkit.WithMemoryTools(agentmemory.WithInsert("user")),
+				agentkit.WithInstructionBudget(int64(len(prompt)+len(agentkit.Separator)+40)),
+				agentkit.WithPolicy(agentpolicy.Suggest(agentpolicy.Tools{Execute: []string{name}}), nil),
+				agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer kit.Close()
+			if got := kit.Config().Instructions; got != prompt {
+				t.Fatalf("instructions = %q, want the block dropped", got)
+			}
+			agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
+			defer kit.Attach(agent)()
+			end, err := agent.Prompt(t.Context(), openresponses.UserText("bump go"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if end.Reason == agentturn.ReasonInputRequired || len(end.Pending) != 0 {
+				t.Fatalf("reason = %q, pending %d; want the write refused, not held", end.Reason, len(end.Pending))
+			}
+			if out := lastToolOutput(model); !strings.Contains(out, "memory cannot be changed") {
+				t.Fatalf("the %s was told %q, want the refusal", name, out)
+			}
+			entries, err := store.List(t.Context(), "user")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 || entries[0].Content != content {
+				t.Fatalf("after the %s the store holds %d entries; want the entry untouched, the model was shown no block", name, len(entries))
+			}
+			for _, c := range customEntries(kit.Session(), agentpolicy.VerdictNS) {
+				if strings.Contains(string(c.Data), `"action":"defer"`) {
+					t.Fatalf("the session records a question about the %s: %s", name, c.Data)
 				}
-				model := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn(name, args)}}
-				first := build(model, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))
-				if got := first.Config().Instructions; got != prompt {
-					t.Fatalf("instructions = %q, want the block dropped", got)
-				}
-				agent := agentturn.New(first.Config(), first.AgentOptions()...)
-				unsubscribe := first.Attach(agent)
-				end, err := agent.Prompt(t.Context(), openresponses.UserText("bump go"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if end.Reason != agentturn.ReasonInputRequired {
-					t.Fatalf("reason = %q, want the write held", end.Reason)
-				}
-				kit := first
-				if restart {
-					unsubscribe()
-					model = &scriptModel{}
-					kit = build(model, agentkit.WithResumedSession(sessions, first.SessionID()))
-					agent = agentturn.New(kit.Config(), kit.AgentOptions()...)
-					unsubscribe = kit.Attach(agent)
-				}
-				defer unsubscribe()
-				pending := agent.State().Pending
-				if len(pending) != 1 {
-					t.Fatalf("pending = %+v, want the held write", pending)
-				}
-				answers := []agentturn.Answer{agentturn.Approve(pending[0].Call.CallID).WithBy(agentpolicy.ByHuman)}
-				if !restart {
-					// A front answers through the engine, which records who
-					// approved; after a restart the engine holds nothing and
-					// the answer goes to the seeded agent.
-					if answers, err = kit.Engine().Release(t.Context(), end, answers...); err != nil {
-						t.Fatal(err)
-					}
-				}
-				if _, err := agent.Resume(t.Context(), answers...); err != nil {
-					t.Fatal(err)
-				}
-				got, err := store.Get(t.Context(), "user", "go-version")
-				if err != nil {
-					t.Fatalf("after the approved %s the entry is gone, %v; want it untouched, the model was shown no block", name, err)
-				}
-				if got.Content != content {
-					t.Fatalf("after the approved %s the entry holds %.40q; want it untouched, the model was shown no block", name, got.Content)
-				}
-				if out := lastToolOutput(model); !strings.Contains(out, "memory cannot be changed") {
-					t.Fatalf("the approved %s was told %q, want the refusal", name, out)
-				}
-			})
-		}
+			}
+		})
 	}
 }
 

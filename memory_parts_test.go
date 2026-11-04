@@ -80,3 +80,28 @@ func TestAnOmittedMemoryEntrysSizeIsThePartsBytes(t *testing.T) {
 		t.Fatal("no memory entry was omitted")
 	}
 }
+
+// A block the budget drops over an empty store is recorded as dropped,
+// agentmemory's LeftOut, so the manifest says the block was left out
+// and a write composed from it is refused after a restart too: with no
+// entry to list as omitted, the drop was the empty manifest of a block
+// shown empty. (agentmemory RFC 0001 §7.6, #95)
+func TestADroppedBlockOverAnEmptyStoreSaysSo(t *testing.T) {
+	const prompt = "be brief"
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithInstructions(prompt),
+		agentkit.WithMemory(agentmemory.NewMemStore(), "user"),
+		agentkit.WithInstructionBudget(int64(len(prompt)+len(agentkit.Separator)+40)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	if got := kit.Config().Instructions; got != prompt {
+		t.Fatalf("instructions = %q, want the block dropped", got)
+	}
+	if man := kit.MemoryManifest(); !man.LeftOut || !man.Dropped() {
+		t.Fatalf("manifest = %+v, want it to say the block was left out", man)
+	}
+}

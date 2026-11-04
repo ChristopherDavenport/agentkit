@@ -523,11 +523,12 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 // and the paragraph, and that request is not offered memory_save,
 // memory_patch, memory_forget or memory_insert: the model would be writing over
 // entries it was never shown, with no word on the tools. A write the
-// model makes anyway in that run is refused, and so is one a policy
-// held and a person approved, which runs in a Resume: the render kept
-// for the call says the block was dropped, and after a restart the
-// manifest recorded at the call does, where it shows no entry and lists
-// one the block held among the omitted. memory_search stays
+// model makes anyway in that run is refused where it is decided, by the
+// kit's first BeforeToolCall hook, so no policy asks a person about a
+// call no answer could let through. One decided before the drop is
+// refused when it runs, which may be in a Resume: the render kept for
+// the call says the block was dropped, and after a restart the manifest
+// recorded at the call does ([agentmemory.Manifest.Dropped]). memory_search stays
 // offered, and [Kit.Omitted] lists every entry the drop left out. The
 // block, and the writes, come back on the first render that fits.
 //

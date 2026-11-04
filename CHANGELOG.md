@@ -43,6 +43,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A memory write in a run whose memory block the budget dropped is
+  refused where it is decided, before any policy asks a person (#95,
+  agentmemory RFC 0001 §6.8). The kit's first `BeforeToolCall` hook
+  blocks it, so the chain ends there; it was held, a person was asked,
+  and the write was refused when it ran whatever they answered. The
+  refusal reads as agentmemory's `ErrBlockDropped`, the text its tools
+  give. The dropped render's manifest is
+  `agentmemory.Manifest.LeaveOut()`, which records `dropped`, so a
+  block dropped over an empty store is told from one shown empty and a
+  write composed from it is refused after a restart too; the kit reads
+  a drop with `Manifest.Dropped()`.
 - The kit's engine decides every call under `Kit.GrantScope`, with
   skill grants or without (#94). It added the scope only under
   `WithSkillGrants`, so in a kit without skills a set a front activated

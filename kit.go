@@ -1049,19 +1049,17 @@ func (k *Kit) refuseWhenDropped(t agenttool.Tool) agenttool.Tool {
 	})
 }
 
-// droppedRender reports whether m is the manifest [memoryPart] makes
-// for a render the budget dropped: no entry shown, and among the omitted
-// one with [agentmemory.OmitBlock] for its reason, which every entry the
-// store held carries when the block is dropped whole. A block that fit
-// its floor and no entry shows a block and omits every entry with
-// [agentmemory.OmitBudget], so it is not one, and the reason tells it
-// from one. The render of an empty store omits nothing, so a drop of
-// one is not told apart from a block that held nothing, and a write
-// composed from it is refused in the process that rendered it, which
-// kept the flag. A session a kit before agentkit v0.0.7 recorded wrote
-// the drop's entries with no reason, and is not read as one.
+// droppedRender reports whether m is the manifest of a render that left
+// the block out, [agentmemory.Manifest.Dropped]: the manifest
+// [memoryPart] makes for a drop is [agentmemory.Manifest.LeaveOut]'s, so
+// it says so even over an empty store, and a session a kit before
+// agentmemory v0.0.12 recorded is read by the older shape, no entry
+// shown and every omitted one with [agentmemory.OmitBlock]. A block that
+// fit its floor and no entry omits them with [agentmemory.OmitBudget],
+// so it is not one. A session a kit before agentkit v0.0.7 recorded
+// wrote the drop's entries with no reason, and is not read as one.
 func droppedRender(m agentmemory.Manifest) bool {
-	return len(m.Entries) == 0 && slices.ContainsFunc(m.Omitted, func(e agentmemory.ManifestEntry) bool { return e.Reason == agentmemory.OmitBlock })
+	return m.Dropped()
 }
 
 // saveAsRendered runs a memory_save call against a memory_save based on
@@ -2035,13 +2033,20 @@ func (k *Kit) failOnLostVerdict(ctx context.Context, run string) error {
 // keepSaveBase is the BeforeToolCall hook the kit puts first whenever
 // memory is configured: for a memory write, one of [memoryWrites],
 // decided in a run that rendered, it keeps that run's render, the
-// manifest and whether the budget dropped the block, under the call, and
-// decides nothing. Whoever then holds the call, the kit's engine, one the
-// product built, or a hook of the product's, the render is kept for the
-// Resume that runs it: a save's base, and the drop that refuses any of
-// the four. A Resume decides a call again before any render, and that
-// decision keeps nothing, so the render the held call was decided under
-// stands.
+// manifest and whether the budget dropped the block, under the call.
+// Whoever then holds the call, the kit's engine, one the product built,
+// or a hook of the product's, the render is kept for the Resume that
+// runs it: a save's base. A Resume decides a call again before any
+// render, and that decision keeps nothing, so the render the held call
+// was decided under stands.
+//
+// When that render dropped the block, it blocks the call, so the chain
+// ends here and no engine or hook after it asks anyone: the model was
+// shown no block, so no answer could let the write through, and a
+// person asked about it would be asked a question with no answer
+// (agentmemory RFC 0001 §6.8). Otherwise it decides nothing. A call
+// decided before the block was dropped is refused when it runs,
+// [Kit.refuseWhenDropped].
 func (k *Kit) keepSaveBase(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
 	if info.Call == nil || !memoryWrites[info.Call.Name] || info.Call.CallID == "" {
 		return nil, nil
@@ -2052,9 +2057,14 @@ func (k *Kit) keepSaveBase(ctx context.Context, info agentturn.ToolCallInfo) (*a
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if r, ok := k.rendered.get(run); ok {
-		k.saveBase.put(saveKey(ctx, info.Call.CallID), r)
+	r, ok := k.rendered.get(run)
+	if !ok {
+		return nil, nil
 	}
+	if r.dropped {
+		return &agentturn.ToolDecision{Action: agentturn.Block, Reason: errMemoryDropped.Error(), By: agentsession.ByPolicy}, nil
+	}
+	k.saveBase.put(saveKey(ctx, info.Call.CallID), r)
 	return nil, nil
 }
 
