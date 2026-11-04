@@ -467,8 +467,11 @@ Two things the kit adds that the `append` above does not:
   union and the libraries the tools came from did not. `Kit.Tools()`
   returns the same labels once, beside each tool's name, for a product
   naming the libraries' tools to its policy: the union through the
-  filter and the duplicate check, each MCP server's `remote.Tools()` as
-  it lists now, and a provider's tools as they were at `New`.
+  filter, the wrappers and the duplicate check, run again on each call,
+  each MCP server's `remote.Tools()` as it lists now, a provider's tools
+  as they were at `New`, and through `engine.ToolProvider`'s filter
+  under `kit.GrantScope` of a bare context, so a tool a bare deny takes
+  off the offer is not listed.
 
 ## `BeforeModelCall`, in full
 

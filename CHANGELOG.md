@@ -170,7 +170,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   so after a server's `tools/list_changed` or a `WithReconnect` restart
   it kept a removed tool and left out an added one. A provider's tools
   are still those it gave at `New`, and after `Close` the servers' are
-  gone.
+  gone. The list also goes through the engine's offer filter, under the
+  grant scope of the kit's own conversation, so a tool a bare deny takes
+  off the offer is not listed, and the filter and wrappers run on every
+  call of `Kit.Tools`.
 - A sidecar session (`agentsession.Header.Media` `sidecar`) can be
   resumed and moved in. agentturn/session v0.0.35 refuses to read a
   sidecar session's media without a blob reader

@@ -2577,9 +2577,9 @@ func (k *Kit) LookupTool(name string) (agenttool.Tool, bool) {
 	return t, ok
 }
 
-// Tools lists the tools in the union at [New], after [WithToolFilter]
-// and [WithToolWrap] and before the policy's filter, each with the
-// source it came from. It is how a product names the tools a library
+// Tools lists the tools the kit offers, after [WithToolFilter],
+// [WithToolWrap] and the policy's offer filter, each with the source it
+// came from. It is how a product names the tools a library
 // made, the skill tool, the memory tools, an MCP server's, a child's,
 // to a policy whose default asks, since the engine is built before the
 // union exists:
@@ -2599,6 +2599,13 @@ func (k *Kit) LookupTool(name string) (agenttool.Tool, bool) {
 // brings is here and one it removed is not; after [Kit.Close] they are
 // gone. A provider's list is fetched each turn too and is listed as it
 // was at New, so a tool a [WithToolProvider] adds later is not here.
+// The filter, the product's wrapper and the kit's own run on every
+// listing, under context.Background, so a wrapper with side effects has
+// them here too. A tool the engine takes off the offer, by a bare deny
+// of the policy or of a set activated under the grant scope of the
+// kit's own conversation, [Kit.GrantScope] of a context naming none, is
+// not listed; a set a front activated under another conversation's
+// scope does not change the listing.
 func (k *Kit) Tools() []ToolOrigin {
 	k.mcpMu.Lock()
 	snapshot := append([]ToolOrigin(nil), k.origins...)
@@ -2620,7 +2627,34 @@ func (k *Kit) Tools() []ToolOrigin {
 			out = append(out, o)
 		}
 	}
-	return out
+	if k.engine == nil {
+		return out
+	}
+	// The engine's offer reads names alone, so each listed name stands
+	// in for its tool, under the scope a run on a bare context is
+	// offered under.
+	named := make([]agenttool.Tool, len(out))
+	for i, o := range out {
+		named[i] = offerName(o.Name)
+	}
+	ctx := context.Background()
+	offered := k.engine.ToolProvider(func(context.Context) []agenttool.Tool { return named })(agentpolicy.ContextWithGrantScope(ctx, k.GrantScope(ctx)))
+	kept := make(map[string]bool, len(offered))
+	for _, t := range offered {
+		kept[t.Name()] = true
+	}
+	return slices.DeleteFunc(out, func(o ToolOrigin) bool { return !kept[o.Name] })
+}
+
+// offerName is a tool by its name alone, for asking the engine's offer
+// filter about a name [Kit.Tools] lists. It is never offered or run.
+type offerName string
+
+func (n offerName) Name() string              { return string(n) }
+func (offerName) Description() string         { return "" }
+func (offerName) Parameters() json.RawMessage { return nil }
+func (n offerName) Execute(context.Context, agenttool.Call) (agenttool.Result, error) {
+	return agenttool.Result{}, fmt.Errorf("agentkit: %s stands for a tool's name and runs nothing", string(n))
 }
 
 // RegrantSkills grants again, under [WithSkillGrants], what the skill
