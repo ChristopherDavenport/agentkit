@@ -68,6 +68,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   reaches a server's resources, prompts and instructions as a product
   that dialed it by hand does. The remotes stay the kit's to close.
 
+- `WithMCPResourceTools()` (#115): each MCP server that advertises
+  resources is offered agenttool v0.0.27's `Remote.ResourceTools()`,
+  `list_resources` and `read_resource` under its prefix, beside its
+  tools, so the model can follow a `resource_link`. They are the
+  server's tools to `Kit.Tools`, `WithToolFilter`, the policy's offer,
+  conflict detection and the record, for New's servers and added ones,
+  and leave with `RemoveMCP`.
+
 ### Fixed
 
 - A memory write in a run whose memory block the budget dropped is

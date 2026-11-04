@@ -85,9 +85,11 @@ type settings struct {
 	deferTools []deferred
 	mcp        []mcpDial
 	mcpStderr  io.Writer
-	conflict   func(Conflict)
-	toolFilter func(source string, t agenttool.Tool) bool
-	toolWrap   func(source string, t agenttool.Tool) agenttool.Tool
+	// mcpResources is WithMCPResourceTools.
+	mcpResources bool
+	conflict     func(Conflict)
+	toolFilter   func(source string, t agenttool.Tool) bool
+	toolWrap     func(source string, t agenttool.Tool) agenttool.Tool
 
 	engine      *agentpolicy.Engine
 	policy      agentpolicy.Policy
@@ -722,6 +724,23 @@ func WithMCPTransport(t sdk.Transport, opts ...mcpclient.Option) Option {
 	return func(s *settings) {
 		s.mcp = append(s.mcp, mcpDial{transport: t, opts: opts})
 	}
+}
+
+// WithMCPResourceTools offers, beside each MCP server's tools, the two
+// tools [mcpclient.Remote.ResourceTools] builds for a server that
+// advertises resources, list_resources and read_resource, under the
+// server's prefix, so the model can list the server's resources and
+// follow a resource_link a tool of it returned. A server that
+// advertises none adds nothing, and a tool of the server's own by
+// either name wins. They are the server's tools in every other way: its
+// label in [Kit.Tools] and a [Conflict], [WithToolFilter], the policy's
+// offer and the record, for New's servers and those [Kit.AddMCP]
+// connects, and they leave with [Kit.RemoveMCP]. Two servers with
+// resources both offer the two names, so each takes a prefix,
+// [mcpclient.WithPrefix], or New refuses the second as it refuses any
+// repeated name.
+func WithMCPResourceTools() Option {
+	return func(s *settings) { s.mcpResources = true }
 }
 
 // WithMCPStderr sends the stderr of every server [WithMCP] starts to w,

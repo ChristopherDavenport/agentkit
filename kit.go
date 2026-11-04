@@ -119,6 +119,9 @@ type Kit struct {
 	// AddMCP dials the same way.
 	mcpStderr io.Writer
 	mcpElicit bool
+	// mcpResources is WithMCPResourceTools: each server's source offers
+	// its ResourceTools beside its Tools.
+	mcpResources bool
 	// mcpMu guards remotes, the servers New dialed, added, the servers
 	// AddMCP connected and RemoveMCP has not removed, mcpNext, the
 	// number the next one is labelled with, and origins, which Kit.Tools
@@ -592,6 +595,7 @@ func (k *Kit) dial(ctx context.Context, s *settings) error {
 		k.mcpStderr = &lockedWriter{w: s.mcpStderr}
 	}
 	k.mcpElicit, k.mcpNext = s.elicitor != nil || s.questionEvents, len(s.mcp)
+	k.mcpResources = s.mcpResources
 	for i, d := range s.mcp {
 		remote, err := k.connect(ctx, d, i)
 		if err != nil {
@@ -653,6 +657,11 @@ func (k *Kit) remoteSource(label string, remote *mcpclient.Remote) source {
 		// offering it nothing: the call reaches the loop and fails there.
 		if k.closed.Load() {
 			return nil
+		}
+		if k.mcpResources {
+			// Under WithMCPResourceTools: none for a server without
+			// resources, and the server's own tool of either name wins.
+			return slices.Concat(remote.Tools(), remote.ResourceTools())
 		}
 		return remote.Tools()
 	}}
