@@ -217,7 +217,17 @@ kit.Engine().Resumed(ctx, end, answers, next)
 ```
 
 `Kit.Control(agent)` does this for a front, from the calls the agent
-has pending.
+has pending. The Control also delivers, `Control.Deliver`, which makes
+it an `agentturn.Deliverer`: a message joins the run in flight, or
+starts a run once that one has ended, and with a session is recorded
+before the agent takes it. `Control.Compact(ctx, instructions)` folds
+the next model call whatever the budget, a product's `/compact`, under
+`WithCompaction`.
+
+`kit.MCPServers()` and `kit.MCP(label)` hand back the MCP servers the
+kit dialed, by the label `kit.Tools()` names them with, for what a
+server offers beside its tools: resources, prompts, instructions. The
+remotes stay the kit's to close.
 
 A host that wants its own run's memory writes to name its session puts
 the ID on the context it prompts with,

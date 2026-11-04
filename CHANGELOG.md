@@ -42,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The text the model reads when a memory write is refused because the
   memory block was left out is agentmemory's `ErrBlockDropped`, which
   no longer says the instruction budget was the reason (#95).
+- Docs: the README names `Control.Deliver`, `Control.Compact`,
+  `Kit.MCPServers` and `Kit.MCP`, and `docs/manual.md` names the read
+  options `Kit.RegrantSkills` reads with.
 - Docs: `docs/manual.md`'s `ToolElicitor` row says the loop asks the
   kit's elicitor about a nested call (`agenttool.Invoke`) the policy
   defers, and never an elicitor the invoking tool installed, as of

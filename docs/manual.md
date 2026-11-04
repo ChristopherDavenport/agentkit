@@ -1246,8 +1246,11 @@ Eleven things, all outside `agentturn.Config`:
   `Engine.RevokeScope` records.
 - With `WithSkillGrants` and a session `New` opened, `New` grants
   again what the session's journal left in force, and
-  `Kit.RegrantSkills(ctx, sess)` does the same for a session a front
-  resumed itself. It replays the path forward: an `agentskill:read`
+  `Kit.RegrantSkills(ctx, sess, opts...)` does the same for a session a
+  front resumed itself, reading it with the `ReadOptions()` of the
+  recorder that writes it and then `opts`, such as
+  `session.WithBlobs(br)` for a sidecar session resumed without that
+  recorder on ctx. It replays the path forward: an `agentskill:read`
   record of a skill's own instructions makes that skill's source live,
   and a verdict whose reason is `revoked the rules granted by <source>`
   ends it. `agentpolicy.Engine.Revoke` records that verdict when it
