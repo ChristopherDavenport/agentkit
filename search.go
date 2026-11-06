@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -78,6 +79,13 @@ func SearchOmitRedacted() SearchOption {
 // add to q.Exclude, or set q.Readable, from the caller the context
 // names. An error from scope fails the call, and nothing is searched.
 // Several are run in the order given.
+//
+// q is the call's own, built afresh for it: its Filter.Extra a copy of
+// [SearchFilter]'s, nil when that gives none, and its Exclude a slice of
+// its own, so a hook may write into them while other calls run. A hook
+// narrows the fields it needs and does not replace q.Filter whole,
+// which would drop the cap on the sessions read
+// ([DefaultSearchSessions]) and the bound end_date put on them.
 //
 // The tool searches every session its options select, all a store
 // connection can read. A store authenticated per caller (RFC 0002: a
@@ -216,6 +224,10 @@ func (o searchSettings) search(ctx context.Context, recorderFor func(context.Con
 		return "", errNoSearchStore
 	}
 	q := agentsession.Query{Text: args.Query, Filter: o.filter, OmitRedacted: o.omitRedacted, Limit: o.hits}
+	// The query is this call's own: a SearchScope hook writing into the
+	// filter's Extra must not write into the option's map, which every
+	// call shares. Exclude and Roles are built afresh below.
+	q.Filter.Extra = maps.Clone(o.filter.Extra)
 	if !o.own {
 		q.Exclude = []string{rec.SessionOf(ctx)}
 	}

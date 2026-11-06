@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -257,5 +259,77 @@ func TestConversationSearchEndDateBoundsTheSessionsRead(t *testing.T) {
 	}
 	if !strings.Contains(res.Output.Text, old) {
 		t.Errorf("output %q: want the session from before end_date, read within the cap", res.Output.Text)
+	}
+}
+
+// A hook that writes into the filter's Extra, the natural way to add the
+// caller to a product's own selection, writes into its call's own query:
+// neither the option's map nor another call's, so concurrent callers
+// never search with each other's identity. CI runs it under -race. (#108)
+func TestConversationSearchScopeWritesItsCallsOwnQuery(t *testing.T) {
+	store := agentsession.NewMemoryStore()
+	at := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	header := func(name string) agentsession.Header {
+		return agentsession.Header{Extra: map[string]json.RawMessage{
+			"platform": json.RawMessage(`"chat"`),
+			"user":     json.RawMessage(strconv.Quote(name)),
+		}}
+	}
+	ids := map[string]string{
+		"alice": headerSession(t, store, header("alice"), at, openresponses.UserText("the release plan")),
+		"bob":   headerSession(t, store, header("bob"), at, openresponses.UserText("the release plan")),
+	}
+	extra := map[string]json.RawMessage{"platform": json.RawMessage(`"chat"`)}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithSession(store, agentsession.Header{}),
+		agentkit.WithSessionSearch(
+			agentkit.SearchFilter(agentsession.ListFilter{Extra: extra}),
+			agentkit.SearchScope(func(ctx context.Context, q *agentsession.Query) error {
+				if _, ok := q.Filter.Extra["user"]; ok {
+					return errors.New("the query arrived holding another call's user")
+				}
+				q.Filter.Extra["user"] = json.RawMessage(strconv.Quote(ctx.Value(principalKey{}).(string)))
+				return nil
+			})),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	tool, _ := kit.LookupTool(agentkit.ConversationSearchTool)
+	search := func(who string) error {
+		ctx := context.WithValue(t.Context(), principalKey{}, who)
+		res, err := tool.Execute(ctx, agenttool.Call{ID: "c", Args: []byte(`{"query":"release plan"}`)})
+		if err != nil {
+			return err
+		}
+		for name, id := range ids {
+			if strings.Contains(res.Output.Text, id) != (name == who) {
+				return fmt.Errorf("%s's search %q: want %s's session alone", who, res.Output.Text, who)
+			}
+		}
+		return nil
+	}
+	for _, who := range []string{"alice", "bob"} {
+		if err := search(who); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(extra) != 1 {
+		t.Fatalf("the option's Extra was written: %v", extra)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 20)
+	for i := range 20 {
+		who := []string{"alice", "bob"}[i%2]
+		wg.Go(func() { errs <- search(who) })
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Error(err)
+		}
 	}
 }

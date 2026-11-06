@@ -165,8 +165,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   into `Query`'s exclusive bounds, and `end_date` also bounds the
   sessions read by `created_at`, so the cap is spent on sessions that
   can match. `SearchScope(func(ctx, *agentsession.Query) error)`
-  adjusts each call's query from its context, an error failing the
-  call: a product serving several principals over one store sets one
+  adjusts each call's query, the call's own copy, from its context, an
+  error failing the call: a product serving several principals over one store sets one
   that confines each call to its caller, or does not offer the tool to
   them. Each hit names its session, the
   session's name, the message's time and role and its snippet, and the
