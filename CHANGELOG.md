@@ -162,7 +162,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `SearchOmitRedacted()` and `SearchLimit(n)` (`DefaultSearchHits`, at
   most `MaxSearchHits` a call) shape the rest. `start_date` and
   `end_date` are inclusive, a UTC day or an RFC 3339 instant, turned
-  into `Query`'s exclusive bounds. Each hit names its session, the
+  into `Query`'s exclusive bounds, and `end_date` also bounds the
+  sessions read by `created_at`, so the cap is spent on sessions that
+  can match. `SearchScope(func(ctx, *agentsession.Query) error)`
+  adjusts each call's query from its context, an error failing the
+  call: a product serving several principals over one store sets one
+  that confines each call to its caller, or does not offer the tool to
+  them. Each hit names its session, the
   session's name, the message's time and role and its snippet, and the
   tool states its flow as reading untrusted content. The tool joins
   the set after the memory tools, labelled `WithSessionSearch`;

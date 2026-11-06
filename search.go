@@ -43,6 +43,7 @@ type searchSettings struct {
 	own          bool
 	omitRedacted bool
 	hits         int
+	scopes       []func(context.Context, *agentsession.Query) error
 }
 
 // SearchFilter selects the sessions searched, as it selects what a
@@ -70,6 +71,33 @@ func SearchOmitRedacted() SearchOption {
 	return func(o *searchSettings) { o.omitRedacted = true }
 }
 
+// SearchScope adjusts each call's query from the call's context, after
+// the tool has built it from its options and the call's arguments and
+// before the store is searched: scope may narrow q.Filter (its Extra
+// selecting a user or platform the product writes into each header),
+// add to q.Exclude, or set q.Readable, from the caller the context
+// names. An error from scope fails the call, and nothing is searched.
+// Several are run in the order given.
+//
+// The tool searches every session its options select, all a store
+// connection can read. A store authenticated per caller (RFC 0002: a
+// store serving several principals MUST search only the sessions the
+// caller may read) scopes the call itself, through the context. But a
+// product that serves several principals over one store connection,
+// such as a front answering remote peers in sessions of its user's own
+// store, MUST either set a SearchScope that confines each call to what
+// its caller may read, or not offer the tool to those callers (leave
+// it out, or deny it by policy): without one, a peer's model searches
+// every conversation in the store. The kit ships the hook; who may read
+// what is the product's to decide.
+func SearchScope(scope func(ctx context.Context, q *agentsession.Query) error) SearchOption {
+	return func(o *searchSettings) {
+		if scope != nil {
+			o.scopes = append(o.scopes, scope)
+		}
+	}
+}
+
 // SearchLimit sets how many messages a call that names no limit
 // returns; the default is [DefaultSearchHits], and a value under one
 // means the default. No call returns more than [MaxSearchHits].
@@ -87,7 +115,9 @@ func SearchLimit(n int) SearchOption {
 // the source label "WithSessionSearch"; the policy decides it as any
 // other tool, and the kit does not allow it. A run with no recorder, a
 // kit with no session whose front put none on the context, has no store
-// to search, and the call fails saying so.
+// to search, and the call fails saying so. A product serving several
+// principals over one store, such as remote peers answered in its
+// user's store, sets a [SearchScope] or offers them no search.
 func WithSessionSearch(opts ...SearchOption) Option {
 	return func(s *settings) {
 		s.search = true
@@ -118,7 +148,13 @@ type sessionSearchArgs struct {
 //   - roles keeps messages of those roles; start_date and end_date bound
 //     each message's time, both inclusive: a day is a UTC day and an
 //     RFC 3339 time an instant, turned into the exclusive bounds
-//     agentsession's Query takes;
+//     agentsession's Query takes. end_date also bounds the sessions
+//     read, by created_at, unless the filter's own Before is earlier:
+//     a session's messages are written once it is created, so the cap
+//     is spent on sessions that can match. A session whose messages are
+//     dated before its created_at, as an import may write, is not found
+//     by a range that ends before it was created;
+//   - [SearchScope] then adjusts the query from the call's context;
 //   - limit caps the messages, [DefaultSearchHits] when the call names
 //     none and never more than [MaxSearchHits].
 //
@@ -129,6 +165,18 @@ type sessionSearchArgs struct {
 // (agenttool RFC 0001, flow), since what it returns is what earlier
 // models, tools and pages wrote, and a policy that guards against
 // injection treats its output so. It is read-only and safe to replay.
+//
+// A child agent's call goes to the child's own session, so the
+// conversation that spawned it is among the sessions it searches: the
+// same person's conversation, so no boundary the child did not already
+// cross, since it reaches every other session too, and a child gets the
+// tool only when its own configuration offers it. [SearchFilter]'s
+// TopLevel leaves the subsessions calls spawned out of a search, and a
+// [SearchScope] may exclude more.
+//
+// The search reaches every session the store connection can read; a
+// product serving several principals over one store sets a
+// [SearchScope] or does not offer the tool, as SearchScope says.
 func SessionSearchTool(recorderFor func(context.Context) *session.Recorder, opts ...SearchOption) agenttool.Tool {
 	var o searchSettings
 	for _, opt := range opts {
@@ -207,6 +255,18 @@ func (o searchSettings) search(ctx context.Context, recorderFor func(context.Con
 	}
 	if !q.After.IsZero() && !q.Before.IsZero() && !q.After.Add(time.Nanosecond).Before(q.Before) {
 		return "", errors.New("start_date is after end_date")
+	}
+	// A session's messages are written once it is created, so one
+	// created at or after the end holds none before it: bound the
+	// sessions read too, so the cap is spent on sessions that can match.
+	// The start bounds nothing here, as an old session goes on.
+	if !q.Before.IsZero() && (q.Filter.Before.IsZero() || q.Before.Before(q.Filter.Before)) {
+		q.Filter.Before = q.Before
+	}
+	for _, scope := range o.scopes {
+		if err := scope(ctx, &q); err != nil {
+			return "", err
+		}
 	}
 	var b strings.Builder
 	n := 0

@@ -1,6 +1,10 @@
 package agentkit_test
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -12,12 +16,12 @@ import (
 	"github.com/ChristopherDavenport/openresponses"
 )
 
-// pastSession writes a session holding msgs into store, each message at
-// at, named name.
+// pastSession writes a session created at at holding msgs into store,
+// each message at at, named name.
 func pastSession(t *testing.T, store agentsession.Store, name string, at time.Time, msgs ...*openresponses.Message) string {
 	t.Helper()
 	ctx := t.Context()
-	s, err := store.Create(ctx, agentsession.Header{})
+	s, err := store.Create(ctx, agentsession.Header{CreatedAt: at})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,5 +163,99 @@ func TestConversationSearchDatesAreInclusive(t *testing.T) {
 		if _, err := run(args); err == nil {
 			t.Errorf("%s: no error", args)
 		}
+	}
+}
+
+// headerSession writes a session with header h holding msgs into store,
+// each message at at.
+func headerSession(t *testing.T, store agentsession.Store, h agentsession.Header, at time.Time, msgs ...*openresponses.Message) string {
+	t.Helper()
+	s, err := store.Create(t.Context(), h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range msgs {
+		e := agentsession.NewItemEntry(m)
+		e.Timestamp = at
+		if _, err := store.Append(t.Context(), s.ID(), e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return s.ID()
+}
+
+// principalKey carries the caller a test front serves.
+type principalKey struct{}
+
+// A front serving several principals over one store, as dax's A2A peers
+// share the user's, scopes each call by the caller its context names: a
+// hook narrowing by that principal hides the others' sessions, and a
+// hook that cannot tell who calls fails the call rather than search
+// everything. The kit ships the hook; the product decides who may read
+// what. (#108)
+func TestConversationSearchScopeNarrowsByCaller(t *testing.T) {
+	store := agentsession.NewMemoryStore()
+	at := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	user := func(name string) agentsession.Header {
+		return agentsession.Header{Extra: map[string]json.RawMessage{"user": json.RawMessage(strconv.Quote(name))}}
+	}
+	alice := headerSession(t, store, user("alice"), at, openresponses.UserText("the release plan for alice"))
+	bob := headerSession(t, store, user("bob"), at, openresponses.UserText("the release plan for bob"))
+	errNoCaller := errors.New("no caller on the context")
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithSession(store, agentsession.Header{}),
+		agentkit.WithSessionSearch(agentkit.SearchScope(func(ctx context.Context, q *agentsession.Query) error {
+			who, ok := ctx.Value(principalKey{}).(string)
+			if !ok {
+				return errNoCaller
+			}
+			q.Filter.Extra = map[string]json.RawMessage{"user": json.RawMessage(strconv.Quote(who))}
+			return nil
+		})),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	tool, _ := kit.LookupTool(agentkit.ConversationSearchTool)
+	ctx := context.WithValue(t.Context(), principalKey{}, "alice")
+	res, err := tool.Execute(ctx, agenttool.Call{ID: "c", Args: []byte(`{"query":"release plan"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := res.Output.Text; !strings.Contains(out, alice) || strings.Contains(out, bob) {
+		t.Errorf("alice's search %q: want her session and not bob's", out)
+	}
+	if _, err := tool.Execute(t.Context(), agenttool.Call{ID: "c", Args: []byte(`{"query":"release plan"}`)}); !errors.Is(err, errNoCaller) {
+		t.Errorf("a call the hook refused: err = %v, want %v", err, errNoCaller)
+	}
+}
+
+// A session created after end_date holds no message before it, so the
+// sessions a search reads are bounded by end_date too: the cap is spent
+// on sessions that can match, and a range older than the newest
+// sessions still finds its messages. (#108)
+func TestConversationSearchEndDateBoundsTheSessionsRead(t *testing.T) {
+	store := agentsession.NewMemoryStore()
+	day := func(d int) time.Time { return time.Date(2026, 10, d, 12, 0, 0, 0, time.UTC) }
+	old := headerSession(t, store, agentsession.Header{CreatedAt: day(2)}, day(2), openresponses.UserText("the old migration plan"))
+	headerSession(t, store, agentsession.Header{CreatedAt: day(20)}, day(20), openresponses.UserText("nothing here"))
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithSession(store, agentsession.Header{}),
+		agentkit.WithSessionSearch(agentkit.SearchFilter(agentsession.ListFilter{Limit: 1})),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	tool, _ := kit.LookupTool(agentkit.ConversationSearchTool)
+	res, err := tool.Execute(t.Context(), agenttool.Call{ID: "c", Args: []byte(`{"query":"migration","end_date":"2026-10-05"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Output.Text, old) {
+		t.Errorf("output %q: want the session from before end_date, read within the cap", res.Output.Text)
 	}
 }

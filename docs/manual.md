@@ -329,8 +329,19 @@ every word of its query, leaves out `rec.SessionOf(ctx)` unless
 `agentkit.SearchOwnSession()` is given, reads at most the
 `agentkit.SearchFilter`'s `Limit` sessions (`DefaultSearchSessions`
 when it gives none), turns the inclusive `start_date` and `end_date`
-into the exclusive bounds `agentsession.Query` takes, and states its
-flow as reading untrusted content.
+into the exclusive bounds `agentsession.Query` takes (`end_date`
+bounding the sessions read by `created_at` too), runs each
+`agentkit.SearchScope` hook on the query with the call's context, an
+error failing the call, and states its flow as reading untrusted
+content. The search reaches every session the store connection can
+read, so a product serving several principals over one store, such as
+remote peers answered in its user's store, passes a `SearchScope` that
+confines each call to its caller (narrowing `q.Filter.Extra` or setting
+`q.Readable`) or does not offer the tool to them: the kit ships the
+hook, the product decides who may read what. A child agent's search
+starts from the child's own session, so it finds the conversation that
+spawned it, the same person's; `SearchFilter`'s `TopLevel` leaves
+subsessions out.
 
 `grant` is `WithSkillGrants`, under "What the kit does" below. The
 product's wrapper runs inside it, so what `grant` wraps is the tool the
