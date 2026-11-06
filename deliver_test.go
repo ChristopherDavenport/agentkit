@@ -6,10 +6,12 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ChristopherDavenport/agentkit"
 	"github.com/ChristopherDavenport/agentpolicy"
 	"github.com/ChristopherDavenport/agentsession"
+	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
@@ -137,5 +139,98 @@ func TestControlDeliversThroughTheConversationsRecorder(t *testing.T) {
 	}
 	if !delivered || !queued {
 		t.Fatalf("the conversation's session records the delivery %v and the queued item %v; want both before a run takes them", delivered, queued)
+	}
+}
+
+// A view forwarding a person's steers takes each accept and answers at
+// once: Control.Accept returns once the agent has queued the items, so
+// two steers sent while a quiet tool runs both return before the tool
+// does, and each is on the record, a queued entry carrying deliver,
+// before the run takes it. Control had Deliver and Queue and no Accept,
+// so a view such as agentconsole's client.Direct could not do this
+// through the kit. (agentturn#302, #125)
+func TestControlAcceptsTwoSteersDuringAQuietTool(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	quiet := agenttool.New("quiet", "takes its time", func(context.Context, agenttool.NoArgs) (string, error) {
+		close(started)
+		<-release
+		return "finished", nil
+	})
+	store := agentsession.NewMemoryStore()
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(&scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("quiet", `{}`)}}, "m"),
+		agentkit.WithTools(quiet),
+		agentkit.WithSession(store, agentsession.Header{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
+	defer kit.Attach(agent)()
+	ctl, err := kit.Control(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acc, ok := any(ctl).(agentturn.Accepter)
+	if !ok {
+		t.Fatal("Control is not an agentturn.Accepter")
+	}
+	ended := make(chan *agentturn.RunEnd, 1)
+	go func() {
+		end, _ := ctl.Prompt(context.Background(), openresponses.UserText("go"))
+		ended <- end
+	}()
+	<-started
+
+	accepted := make(chan []*agentturn.Delivery, 1)
+	go func() {
+		var ds []*agentturn.Delivery
+		for _, text := range []string{"steer one", "steer two"} {
+			d, err := acc.Accept(context.Background(), openresponses.UserText(text))
+			if err != nil {
+				t.Error(err)
+				break
+			}
+			ds = append(ds, d)
+		}
+		accepted <- ds
+	}()
+	var ds []*agentturn.Delivery
+	select {
+	case ds = <-accepted:
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("Accept waited on the quiet tool")
+	}
+	live, err := store.Open(t.Context(), kit.SessionID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded := 0
+	for _, e := range live.Entries() {
+		if q, ok := e.(*agentsession.QueuedEntry); ok {
+			line, _ := agentsession.MarshalEntry(q)
+			if strings.Contains(string(line), "steer ") && strings.Contains(string(line), `"deliver":true`) {
+				recorded++
+			}
+		}
+	}
+	close(release)
+	if recorded != 2 {
+		t.Errorf("the session records %d delivered steers while the tool runs, want both", recorded)
+	}
+	if len(ds) != 2 {
+		t.Fatalf("accepted %d steers, want two", len(ds))
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	for _, d := range ds {
+		if joined, end, err := d.Wait(ctx); err != nil || !joined && end == nil {
+			t.Errorf("delivery settled joined %v, end %+v, err %v; want it taken", joined, end, err)
+		}
+	}
+	if end := <-ended; end == nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("the run ended %+v, want done", end)
 	}
 }

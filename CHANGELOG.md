@@ -3,6 +3,199 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- **Breaking**: requires agentturn and agentturn/session v0.0.38, up
+  from v0.0.36, agentsession v0.0.38, up from v0.0.37, agentpolicy
+  v0.0.20, up from v0.0.19, agenttool and agenttool/mcpclient v0.0.30,
+  up from v0.0.29, and openresponses v0.0.19, up from v0.0.18, in the
+  root and in `examples/a2a` (front/a2a and tools/a2a v0.0.38 there).
+  Sessions are written as `agentsession/0.21`, which agentsession
+  v0.0.37 and earlier refuse: upgrade every reader of a store first.
+  Under `WithCompaction` a fold now keeps the person's own messages
+  verbatim after the summary (agentturn's `compact` default), and
+  `Kit.AgentOptions` seeds them from the record, so a product that
+  wants every message folded passes `compact.WithPersonBound(0)` in
+  its compaction options. agentpolicy's rule changes, a skill read's
+  `GrantSet` and a revocation among them, now return once their
+  verdicts have reached the observers, and the kit holds its grant
+  lock across them: a `WithVerdictObserver` or `WithSkillGrantReport`
+  function must not call `Kit.RevokeSkillGrants`, `Kit.RegrantSkills`
+  or `Control.ContinueFrom`, or it may wait forever on the call it
+  is reporting. Nothing in the kit's own observer takes that lock.
+  `openresponses`' `insufficient_quota` is no longer retried by the
+  loop's default.
+
+- **Breaking**: `Kit.RevokeSkillGrants(ctx)` returns `(int, error)`,
+  where it returned the count alone (#117), and ends the grant scopes
+  of the conversation's child agents with or without `WithSkillGrants`
+  (#121). The error is the first revocation verdict the conversation's
+  session would not record, the engine's or the kit's own for a skill
+  set that held no rule, gathered through a sink on the call's context,
+  and else one the session lost between runs since; the engine has
+  revoked all the same. A verdict write that fails outside any run and
+  outside such a call, a product's own rule change between runs or a
+  revocation reported after the call returned, was dropped; it is kept
+  for its session, and the next run recorded there fails on it at its
+  first hook, or the next `RevokeSkillGrants` returns it. The registry
+  of child scopes moved from the skill grants into the kit, so a child
+  `WithChildAgent` runs or `Kit.StartChild` starts is linked to its
+  conversation whenever the kit has an engine, and a set a front
+  activated under a child's scope without skill grants is ended by
+  `RevokeSkillGrants`, recorded as a `revoke_scope` verdict, where it
+  outlived the conversation. A caller adds the error; one that wants
+  the old behaviour ignores it. The docs that said the kit puts no
+  scope on a child without skill grants, stale since #109, say what it
+  does.
+
+- **Breaking**: `WithChildAgent(cfg, ...ChildOption)` takes the kit's
+  choices for the child, `ChildParts`, `ShareGrantScope` and
+  `ChildAgentOptions`, where it took agentturn/tools/agent's
+  `childagent.Option`s; those go in through
+  `agentkit.ChildAgentOptions(...)`, still applied after the kit's own.
+  A caller that passed options wraps them:
+  `WithChildAgent(cfg, childagent.WithAskParent())` becomes
+  `WithChildAgent(cfg, agentkit.ChildAgentOptions(childagent.WithAskParent()))`;
+  one that passed none is unchanged (#122, #120).
+
+- `Control.ContinueFrom` moves the head with agentturn/session's
+  `session.MoveTo`, which holds the agent through `Agent.WhileIdle`
+  while it rebases the record and sets the agent's state, so a run that
+  starts after the check no longer runs during the move (#116). The
+  move now also reserves the session's call IDs and gives the agent the
+  branch's reasoning models and the person's messages, which
+  `Control` carried on each run's context and lost respectively; the
+  kit's revocation stays outside the hold, and its regrant and leaf
+  label run under a second one, so a run that starts between the two
+  fails the move with `agentturn.ErrRunning` rather than have the label
+  appended in its middle. A revocation the session would not record
+  fails the move and puts the grants back (#117), and so does an older
+  verdict write the session lost between runs, which
+  `RevokeSkillGrants` now names as lost between runs before the
+  revocation. A failure after the move goes back with
+  `session.MoveTo` to the leaf it left, which reads the agent's state
+  there from the record.
+
+### Added
+
+- `Kit.ChildConfig(cfg, ids...)` composes a child agent's instructions
+  from parts: the child's own prompt as the `product` part, then the
+  kit's parts of the groups `ids` names, such as `PartMemory` or
+  `agentsmd.PartID`, as the input guards left them, each with its
+  source and trust. The config's `BeforeModelCall` renders them again
+  for each of the child's requests, and `Kit.PartsFor` knows both the
+  config's text and each render, so a child recorded through the kit's
+  recorder writes its config entries as parts and a memory entry's
+  `untrusted` label reaches its path trust, as agentsession RFC 0001
+  0.21 asks of a writer composing instructions from a layer of known
+  trust. The kit keeps every composition made during `New` and the 64
+  runtime ones asked for most recently, so calls with ever-new prompts
+  do not make a `WithChildAgent` child's run record one string.
+  The child's own prompt passes the input guards, in the config text
+  and each request, and under `WithInstructionBudget` the memory block
+  and the servers' instructions are sized against the child's
+  instructions, not the parent's.
+  `WithChildAgent(cfg, agentkit.ChildParts(ids...))` offers such a
+  child (#122).
+
+- `ShareGrantScope()`, a `WithChildAgent` option, runs the child under its
+  conversation's grant scope rather than one of its own, keeping the
+  kit's recorder, memory session and user-message mark bindings, which
+  a product's own `childagent.WithRunContext` drops, and links no child
+  scope. agentpolicy has no scope inheritance, so the scope is shared
+  both ways: the conversation's sets decide the child's calls, and a
+  skill the child reads grants to the conversation; that read is
+  recorded in the child's session, so a restart does not regrant it,
+  which fails closed (#120).
+
+- `Kit.TeamConfig`, `Kit.Offer` and `TeamOffer(kits...)` put an
+  agentturn `handoff.Team` of kits through the kit's tool pipeline:
+  `team.Offer = agentkit.TeamOffer(triage, billing)` sends each agent's
+  transfers, under the source `HandoffSource` ("handoff"), through the
+  kit's `WithToolFilter`, `WithToolWrap`, duplicate check and policy
+  filter beside its own tools, once, since `TeamConfig` is the kit's
+  config without its `ToolProvider`. A transfer the policy denies is no
+  longer offered, and a wrapper reaches it (agentturn#307, #118). A
+  transfer keeps its name over a kit tool that claims it too, such as a
+  runtime MCP tool: the kit tool is dropped from that agent's offer and
+  reported as a `Conflict` kept by `"handoff"` (#118).
+
+- A `WithChildAgent` child resumes after a restart. Under a kit with a
+  recorder of its own the child is given that recorder's loader,
+  agentturn v0.0.38's `childagent.WithRecord` with
+  `session.Recorder.ChildRecord`, read from the recorder the parent's
+  run records into, so the child's tool reports itself keyed: a call in
+  flight when the process stopped is run again under its key (the
+  answers `session.ReplayAnswers` gives, passed to `Control.Resume`),
+  the child continues its session from the record, and under
+  `childagent.WithAskParent` its open question is asked again under the
+  same parent call; its grant scope is linked to the conversation
+  again. A call whose child the record does not hold now fails with
+  `childagent.ErrNoRecord`, the outcome unknown, where before the
+  replay rule answered it as not run again. A kit with no recorder of
+  its own binds no loader (#124).
+
+- `Control.Accept`, so a `Control` is an `agentturn.Accepter`: agentturn
+  v0.0.38's delivery in two steps, under `RunContext`, through
+  `session.Recorder.Accept` of the kit's recorder or the conversation's
+  on the context, which writes each item's queued entry before the
+  agent accepts it. It returns once the items are queued, with the
+  `Delivery` whose `Wait` gives what `Deliver` returns, so a view
+  forwarding a person's steer, such as agentconsole's `client.Direct`,
+  answers at once and a second steer sent while a quiet tool runs is
+  not held behind the first. `Control.Queue`'s doc no longer says the
+  agent's queued event waits for the run's next event, which agentturn
+  v0.0.38 changed (#125).
+
+- `WithSessionSearch(opts...)` offers `conversation_search(query, roles,
+  limit, start_date, end_date)` (`ConversationSearchTool`), so a
+  kit-built agent finds what an earlier conversation said without the
+  product writing a scan over `List` and `Reader`. It searches the
+  store of the run's recorder with agentsession v0.0.38's `Search` (RFC
+  0002, Search), through the store's `Searcher` when it has one, and
+  leaves out the calling session (`Recorder.SessionOf`) unless
+  `SearchOwnSession()` is given. `SearchFilter(agentsession.ListFilter)`
+  selects the sessions, and its `Limit` caps those read,
+  `DefaultSearchSessions` (100) when it gives none;
+  `SearchOmitRedacted()` and `SearchLimit(n)` (`DefaultSearchHits`, at
+  most `MaxSearchHits` a call) shape the rest. `start_date` and
+  `end_date` are inclusive, a UTC day or an RFC 3339 instant, turned
+  into `Query`'s exclusive bounds, and `end_date` also bounds the
+  sessions read by `created_at`, so the cap is spent on sessions that
+  can match. `SearchScope(func(ctx, *agentsession.Query) error)`
+  adjusts each call's query, the call's own copy, from its context, an
+  error failing the call: a product serving several principals over one store sets one
+  that confines each call to its caller, or does not offer the tool to
+  them. Each hit names its session, the
+  session's name, the message's time and role and its snippet, and the
+  tool states its flow as reading untrusted content. The tool joins
+  the set after the memory tools, labelled `WithSessionSearch`;
+  `SessionSearchTool(recorderFor, opts...)` builds it without the kit
+  (#108).
+
+### Fixed
+
+- `Kit.ReloadSkills`'s doc said the new catalogue reached the run in
+  flight only under `WithMemory` or `WithGuards`. The kit renders its
+  instructions each request whenever MCP servers' instructions are on,
+  the default, as well as under `WithMemory`, a `WithPart` part or
+  guards, so a reload reaches the next request of the run; only a kit
+  under `WithoutMCPInstructions` with none of the others waits for
+  `SetConfig`. The doc and the manual say both (#123).
+- With #121's registry on every engine, a `WithChildAgent` child's
+  scope was kept for every child run until `RevokeSkillGrants`, so a
+  front that offers child agents and never ends its conversation grew
+  an entry per call for the life of the process. The kit forgets a
+  child's scope when its call is over, its runs ended and the last not
+  stopped on a held call, unless the engine holds a set under it or a
+  grandchild's is linked under it; a child run again links it again.
+  The child's tool is wrapped with `agenttool.Wrap` for this, so every
+  property it declares is reported as before. A set a front makes under
+  a child's scope after the child's call is over is the front's to
+  revoke with `engine.RevokeScope` (#121).
+
 ## v0.0.16 - 2026-11-03
 
 ### Changed

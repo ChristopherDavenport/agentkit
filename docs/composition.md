@@ -77,7 +77,8 @@ skill, the session of the run's recorder or the session ID the run's
 context names, `kit.GrantScope(ctx)`, and it decides no other
 conversation's calls. A front that ends a conversation calls
 `kit.RevokeSkillGrants(ctx)` with its context, so nothing the
-conversation opened outlives it, and `WithSkillGrantReport` hears every
+conversation or its child agents opened outlives it, and hears from
+its error when the session would not record a revocation, and `WithSkillGrantReport` hears every
 conversation's reads with `SkillGrant.Scope` saying whose. An MCP
 server's connection stays the kit's: it is dialed once at `New`, and its
 identity, an OAuth token among it, every conversation shares. A front
@@ -141,32 +142,88 @@ childagent.WithRunContext(func(ctx context.Context, callID string) context.Conte
 	parent := kit.GrantScope(ctx)
 	ctx = rec.ChildContext(ctx, callID)
 	ctx = agentmemory.WithSession(ctx, session.SessionIDFromContext(ctx))
-	// Under WithSkillGrants only: the child's own grant scope, under its
-	// conversation's. The kit also records whose child it is and which user
-	// message its grants are bound to, for the conversation's next message.
+	// Whenever the kit has an engine: the child's own grant scope, under
+	// its conversation's. The kit also records whose child it is, for
+	// kit.RevokeSkillGrants, and under WithSkillGrants which user message
+	// its grants are bound to, for the conversation's next message.
 	return agentpolicy.ContextWithGrantScope(ctx, parent+"/"+session.SessionIDFromContext(ctx))
 })
 ```
 
+With a recorder of the kit's own the child also gets the recorder's
+loader, `childagent.WithRecord` with `ChildRecord`, so a restart does
+not lose a child's open question. A call the process stopped in is
+run again under its key, `session.ReplayAnswers` given to
+`Control.Resume`, and the child continues its session from the record:
+the call its policy was deciding goes back to its `BeforeToolCall`, so
+under `childagent.WithAskParent` the person is asked again under the
+same parent call, and the child runs under its own scope again. A
+child that had answered returns that answer and runs nothing.
+
 The grant scope is the third binding. A skill a conversation read grants
 its tools to that conversation's calls, and a child run from a tool call
 inherits its parent's context, so without a scope of its own it would
-run under what its parent was granted. Under `WithSkillGrants` the kit
-gives the child's context one, the child's session ID under its
+run under what its parent was granted. Whenever the kit has an engine
+it gives the child's context one, the child's session ID under its
 conversation's, or the call's ID and a number when there is no
-recording; a skill the child reads is the child's alone, and the
-conversation's next message, or `kit.RevokeSkillGrants`, ends it with
-the conversation's own. Without skill grants the kit puts no scope on
-the child's context, and a scope the product put on the host's, with
-grants of its own under it, is the child's.
+recording, and records it as the conversation's child, with skill
+grants or without; a set granted under the conversation's scope, a
+person's "allow for this session", does not decide the child's calls.
+`kit.RevokeSkillGrants` ends every set under the child's scope with the
+conversation's, a front's as well as a skill's, and under
+`WithSkillGrants` so does the conversation's next message; a skill the
+child reads is the child's alone. The kit forgets a child's scope again
+when its call is over, its runs ended and the last not stopped on a
+held call, unless the engine holds a set under it or a grandchild's is
+linked under it: a front that never ends its conversation does not keep
+one per child run, and a set it makes under a scope after that is its
+own to revoke with `engine.RevokeScope`.
+
+A child that should act on the conversation's grants is offered with
+`WithChildAgent(cfg, agentkit.ShareGrantScope())`: it runs under the
+conversation's scope, with the recorder, memory and mark bindings kept,
+and no scope of its own is linked. agentpolicy decides a call against
+the unscoped sets and its context's scope alone, with no inheritance,
+so the share runs both ways: the child takes the person's "allow for
+this session" and the skills its parent read, and a skill the child
+reads grants its tools to the conversation, the parent included, until
+the conversation's next message under `WithSkillGrantScope`. A child
+that sees its parent's grants and keeps its own reads to itself needs
+scope inheritance in agentpolicy first. The child's read is recorded in
+the child's session, so a restart, which regrants from the
+conversation's own path, does not restore what it granted: that fails
+closed until the skill is read again.
+
+The child's instructions are its config's own string unless it asks
+for the kit's parts. `WithChildAgent` takes the kit's choices for the
+child, and agentturn's own options through `ChildAgentOptions`;
+`ChildParts` composes the
+child's prompt and the parts it names with `Kit.ChildConfig`, so a
+child that should know the conversation's memory or its AGENTS.md
+gets them rendered for each of its requests and recorded as parts,
+each with its source and trust:
+
+```go
+agentkit.WithChildAgent(exploreCfg,
+	agentkit.ChildParts(agentkit.PartMemory, agentsmd.PartID),
+	agentkit.ChildAgentOptions(childagent.WithAskParent()))
+```
+
+A memory entry the child is shown is then on its path as an
+`agentmemory` part labelled `untrusted`, as on the parent's, where a
+string the product copied in would carry no label. Under
+`WithInstructionBudget` the block is sized against the child's prompt
+and the groups it takes, not the parent's, and the child's prompt
+passes the input guards as the parent's does.
 
 The recorder does not exist until `New` has opened the session, so
 those bindings are not something a product can do in the option list
 — which is the whole reason this is an option and a peer is not. The
-caller's own `childagent.Option`s are applied after the kit's, so
-passing an observer or a run context still wins.
+caller's own `childagent.Option`s, given through
+`agentkit.ChildAgentOptions`, are applied after the kit's, so passing
+an observer or a run context still wins.
 
-Without a session, or without the recording, and without skill grants,
+Without a session, or without the recording, and without an engine,
 a child is an ordinary tool and needs no option:
 
 ```go
@@ -204,11 +261,43 @@ parent's recorder rather than opening a session of its own. Writing the child ag
 is exactly what `WithChildAgent` does, so reach for it only when the
 tool is not a child.
 
+## A handoff team
+
+agentturn's `handoff.Team` switches one agent between configurations
+and adds a transfer tool to each agent's offer per handoff. When the
+agents are kits, the transfers have to meet the kit's tool pipeline as
+the agents' own tools do, or a transfer the policy denies is still
+offered and a product's wrapper never sees one. The team's `Offer` is
+where that happens, once:
+
+```go
+team, err := handoff.New(
+	handoff.Agent{Config: triage.TeamConfig(), Handoffs: []handoff.To{{Agent: "Billing agent"}}},
+	handoff.Agent{Config: billing.TeamConfig()},
+)
+team.Offer = agentkit.TeamOffer(triage, billing)
+```
+
+`TeamConfig` is the kit's config with no tool provider, so the list the
+team hands `Offer` is the transfers alone, and `Kit.Offer` unions them
+with the kit's own sources, labelled `handoff`, through the filter, the
+wrappers, the duplicate check and the policy. A transfer keeps its
+name over a kit tool that claims it too, a remote server's tool that
+appears at runtime: the kit tool is dropped from that agent's offer and
+reported through `WithToolConflict`. Built from `Config()`
+instead, the kit's tools would pass the pipeline in the provider and
+again in `Offer`: offered once, the kit's copies reported as
+conflicts, but filtered, wrapped and decided twice per request. A
+recorder the kits share takes
+`agentkit.PartsFrom(&triage, &billing)`, so each agent's instructions
+are recorded as its own parts.
+
 ## What the kit does own about all of this
 
 The tool namespace. Whatever the source, every tool goes through the
 same union: stable order, a duplicate name refused at `New` with a
 `Conflict` naming both sources, a later duplicate dropped and reported
-through `WithToolConflict`, and `agentpolicy`'s filter in front of the
+through `WithToolConflict` (a handoff transfer is kept over any of the
+kit's), and `agentpolicy`'s filter in front of the
 result. A peer, a child, an MCP tool and a built-in are the same kind
 of thing to the kit, and that is the only claim it makes about them.

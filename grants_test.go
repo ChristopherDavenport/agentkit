@@ -271,7 +271,7 @@ func TestASkillReadAfterARevokeIsGrantedAgain(t *testing.T) {
 	if got := len(kit.Engine().Grants()); got != 1 {
 		t.Fatalf("grants after the read = %d, want 1", got)
 	}
-	if n := kit.RevokeSkillGrants(t.Context()); n != 1 {
+	if n, _ := kit.RevokeSkillGrants(t.Context()); n != 1 {
 		t.Fatalf("RevokeSkillGrants removed %d rules, want the skill's one", n)
 	}
 	if got := len(kit.Engine().Grants()); got != 0 {
@@ -660,8 +660,10 @@ func TestARestartRegrantsOnlyWhatTheJournalLeftInForce(t *testing.T) {
 		if _, err := agent.Prompt(t.Context(), openresponses.UserText("cut the release")); err != nil {
 			t.Fatal(err)
 		}
-		if revoke && kit.RevokeSkillGrants(t.Context()) == 0 {
-			t.Fatal("the revoke removed nothing")
+		if revoke {
+			if n, err := kit.RevokeSkillGrants(t.Context()); err != nil || n == 0 {
+				t.Fatalf("the revoke removed %d rules (%v), want some", n, err)
+			}
 		}
 		return kit.SessionID()
 	}
@@ -717,7 +719,7 @@ func TestARevokeOfASetWithNoRulesSurvivesARestart(t *testing.T) {
 	if _, err := agent.Prompt(t.Context(), openresponses.UserText("cut the release")); err != nil {
 		t.Fatal(err)
 	}
-	first.RevokeSkillGrants(t.Context())
+	_, _ = first.RevokeSkillGrants(t.Context())
 	unsubscribe()
 	// The kit's revocation is recorded as the engine records one, with
 	// agentpolicy v0.0.19's members: the kind, the source and the scope.
@@ -870,7 +872,7 @@ func TestASkillGrantDoesNotReachAnotherConversation(t *testing.T) {
 	}
 
 	// Ending one conversation ends its grants and no other's.
-	if n := kit.RevokeSkillGrants(inCtx(alice)); n != 1 {
+	if n, _ := kit.RevokeSkillGrants(inCtx(alice)); n != 1 {
 		t.Fatalf("RevokeSkillGrants removed %d rules, want the one conversation's one", n)
 	}
 	if a, c := grantsOf(alice), grantsOf(carol); a != 0 || c != 1 {
@@ -1424,7 +1426,7 @@ func TestAScopeIsNotTheParentOfAScopeItsNameBeginsWith(t *testing.T) {
 		t.Fatalf("grants in force after a message in user/4 = %v, want 0, 1, 1", got)
 	}
 	// Ending user/42 ends user/42's grant alone, and a message in it too.
-	if n := kit.RevokeSkillGrants(ctxOf("user/42")); n != 1 {
+	if n, _ := kit.RevokeSkillGrants(ctxOf("user/42")); n != 1 {
 		t.Fatalf("RevokeSkillGrants(user/42) removed %d rules, want its own one", n)
 	}
 	if got := inForce(); !slices.Equal(got, []int{0, 0, 1}) {
@@ -1493,7 +1495,7 @@ func TestAMessageTheTailMissesEndsTheChildrensGrants(t *testing.T) {
 			ctx := agentkit.ContextWithRecorder(session.ContextWithSessionID(t.Context(), kit.SessionID()), kit.Recorder())
 			if byCall {
 				// Ending the conversation ends its children's grants too.
-				if n := kit.RevokeSkillGrants(ctx); n != 1 {
+				if n, _ := kit.RevokeSkillGrants(ctx); n != 1 {
 					t.Fatalf("RevokeSkillGrants removed %d rules, want the child's one", n)
 				}
 			} else {
@@ -2754,6 +2756,70 @@ func TestAReadThatGrantsNothingStillEndsTheRefusal(t *testing.T) {
 			refused := outputsSaying(agent.State().Transcript, "ended with the user's last message")
 			if end.Reason != agentturn.ReasonInputRequired || len(refused) != 0 || runs != 1 {
 				t.Fatalf("run ended %q, refusals %q, act ran %d; want the engine's ask after the skill was read again and grants nothing", end.Reason, refused, runs)
+			}
+		})
+	}
+}
+
+// ReloadSkills reaches the next request of the run that reloaded when the
+// kit renders its instructions each request, which a kit offering MCP
+// servers' instructions does by default, and a kit that does not waits
+// for SetConfig between runs. (#123)
+func TestReloadSkillsReachesTheNextRequestOfTheRun(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		opts     []agentkit.Option
+		inTheRun bool
+	}{
+		{"by default", nil, true},
+		{"WithoutMCPInstructions", []agentkit.Option{agentkit.WithoutMCPInstructions()}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "existing", "Read")
+			var kit *agentkit.Kit
+			learn := agenttool.New("learn", "writes a skill", func(ctx context.Context, _ struct{}) (string, error) {
+				skillWithTools(t, skills, "learned-deploy", "Read")
+				if err := kit.ReloadSkills(ctx); err != nil {
+					return "", err
+				}
+				return "learned", nil
+			})
+			model := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("learn", `{}`)}}
+			var err error
+			kit, err = agentkit.New(t.Context(), append([]agentkit.Option{
+				agentkit.WithModel(model, "m"),
+				agentkit.WithSkills(skills),
+				agentkit.WithTools(learn),
+			}, tc.opts...)...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer kit.Close()
+			agent := agentturn.New(kit.Config())
+			if _, err := agent.Prompt(t.Context(), openresponses.UserText("learn a skill")); err != nil {
+				t.Fatal(err)
+			}
+			reqs := model.requests()
+			if len(reqs) != 2 {
+				t.Fatalf("%d requests, want 2", len(reqs))
+			}
+			if strings.Contains(reqs[0].Instructions, "learned-deploy") {
+				t.Fatal("the first request names a skill written after it")
+			}
+			if got := strings.Contains(reqs[1].Instructions, "learned-deploy"); got != tc.inTheRun {
+				t.Fatalf("the next request of the run names the reloaded skill: %v, want %v", got, tc.inTheRun)
+			}
+			if tc.inTheRun {
+				return
+			}
+			if err := agent.SetConfig(kit.Config()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := agent.Prompt(t.Context(), openresponses.UserText("again")); err != nil {
+				t.Fatal(err)
+			}
+			if reqs := model.requests(); !strings.Contains(reqs[len(reqs)-1].Instructions, "learned-deploy") {
+				t.Fatal("after SetConfig the next run does not name the reloaded skill")
 			}
 		})
 	}

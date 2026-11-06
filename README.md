@@ -154,14 +154,16 @@ same verdicts.
 ### 3. The tool set
 
 A run's tools come from the product, `agentskill.Catalog.Tool()`,
-`agentmemory.Tools`, `mcpclient`, and `agentturn/tools/agent` for a
-child. Five sources, one namespace, and nothing below the kit detects a
+`agentmemory.Tools`, `mcpclient`, `agentturn/tools/agent` for a
+child, and `SessionSearchTool`, `conversation_search` over
+`agentsession.Search`, under `WithSessionSearch`. Six sources, one
+namespace, and nothing below the kit detects a
 collision: two tools with one name reach the model as two entries and
 the loop dispatches whichever the set returns first.
 
 The kit unions them in a stable order — product tools, then child
-agents and other deferred sources, then skills, then memory, then MCP,
-then any provider the product gave — refuses a duplicate present at
+agents and other deferred sources, then skills, then memory, then
+session search, then MCP, then any provider the product gave — refuses a duplicate present at
 `New` with a `Conflict` naming both sources, drops the later of one
 that appears at turn time and tells `WithToolConflict`, and puts
 `agentpolicy`'s `ToolProvider` in front of the result so a tool a bare
@@ -226,7 +228,10 @@ kit.Engine().Resumed(ctx, end, answers, next)
 has pending. The Control also delivers, `Control.Deliver`, which makes
 it an `agentturn.Deliverer`: a message joins the run in flight, or
 starts a run once that one has ended, and with a session is recorded
-before the agent takes it. `Control.Compact(ctx, instructions)` folds
+before the agent takes it. `Control.Accept` is the same delivery in two
+steps, an `agentturn.Accepter`: it returns once the agent has queued
+the items, recorded first, so a view forwarding a person's steers
+answers at once. `Control.Compact(ctx, instructions)` folds
 the next model call whatever the budget, a product's `/compact`, under
 `WithCompaction`.
 
@@ -274,7 +279,9 @@ conversations and a child agent runs under a scope of its own.
 `WithSkillGrantScope` ends each grant when the user's next message in
 its conversation arrives, whichever agent's run received it, as Claude
 Code clears `allowed-tools` at the next message, and
-`kit.RevokeSkillGrants(ctx)` ends a conversation's when a front says; a
+`kit.RevokeSkillGrants(ctx)` ends a conversation's, and every set under
+its child agents' scopes, when a front says, returning the error of a
+revocation the session would not record; a
 skill read again is granted again, and under the scope the model is told
 which grants a message ended and that a read restores them, and a call
 only an ended grant allowed is refused, inside the engine, naming the
@@ -349,14 +356,14 @@ a2a.
 
 | library | version |
 |---|---|
-| `openresponses` | v0.0.18 |
-| `agenttool`, `agenttool/mcpclient` | v0.0.29 |
-| `agentturn`, `agentturn/session` | v0.0.36 |
-| `agentsession` | v0.0.37 |
+| `openresponses` | v0.0.19 |
+| `agenttool`, `agenttool/mcpclient` | v0.0.30 |
+| `agentturn`, `agentturn/session` | v0.0.38 |
+| `agentsession` | v0.0.38 |
 | `agentsmd` | v0.0.4 |
 | `agentskill` | v0.0.12 |
 | `agentmemory` | v0.0.12 |
-| `agentpolicy` | v0.0.19 |
+| `agentpolicy` | v0.0.20 |
 
 Every sibling is required at a released version with no `replace`, and
 `make no-replace` enforces it: the kit is the module that proves the

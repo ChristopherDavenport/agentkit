@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"sync"
 
 	"github.com/ChristopherDavenport/agentmemory"
 	"github.com/ChristopherDavenport/agentsession"
@@ -31,9 +30,10 @@ import (
 //     held beside another call's ask is released with the batch, and
 //     tells the engine how the resumed run went
 //     ([agentpolicy.Engine.Resumed]);
-//   - Queue writes the queued entry before it returns
-//     ([session.Recorder.Queue]), so a steer is on the record before a
-//     quiet tool's next event would write it;
+//   - Queue, Deliver and Accept write the queued entry before the agent
+//     takes the item ([session.Recorder.Queue], [session.Recorder.Deliver],
+//     [session.Recorder.Accept]), so it is on the record before they
+//     return, an input to an idle agent included;
 //   - under [WithQuestionEvents], a question asked while a call of one
 //     of its runs goes, a tool's own, a nested call the policy asks
 //     about and an MCP server's, is an [agentturn.Question] event to
@@ -53,9 +53,6 @@ type Control struct {
 	// agent reports no run until its first, and the engine keeps what it
 	// held under the run that deferred it.
 	seedRun string
-
-	mu     sync.Mutex
-	models agentturn.ReasoningModels // of the branch the head was moved to
 }
 
 var _ agentturn.Control = (*Control)(nil)
@@ -242,25 +239,16 @@ func QuestionsFromContext(ctx context.Context) (agenttool.Elicitor, bool) {
 // Control itself ([ContextWithControl]) and its elicitor
 // ([ContextWithQuestions]), so the run's questions reach this
 // conversation's subscribers; the kit's recorder, the session's
-// ID for the model calls and for memory a run writes; and the reasoning
-// attribution of the branch the head was last moved to. Prompt, Resume,
-// Queue and ContinueFrom use it; a front that starts a run of its own
+// ID for the model calls and for memory a run writes. Prompt, Resume,
+// Queue, Deliver, Accept and ContinueFrom use it; a front that starts a run of its own
 // on the agent does too. With a recorder of the kit's own it replaces
 // any recorder the caller put on ctx; without one it adds the Control
-// and the attribution alone, and a recorder the caller put there
+// and its elicitor alone, and a recorder the caller put there
 // ([ContextWithRecorder]) stays, which is how one kit with no session
 // serves several conversations, each recorded in its own.
 func (c *Control) RunContext(ctx context.Context) context.Context {
 	ctx = ContextWithControl(ctx, c)
 	ctx = ContextWithQuestions(ctx, c.Elicitor())
-	c.mu.Lock()
-	models := c.models
-	c.mu.Unlock()
-	if models != nil {
-		// Agent.SetTranscript cannot take it: the loop leaves another
-		// model's reasoning out of a request by this one.
-		ctx = agentturn.ContextWithReasoningModels(ctx, models)
-	}
 	rec := c.kit.Recorder()
 	if rec == nil {
 		return ctx
@@ -410,12 +398,37 @@ func (c *Control) Deliver(ctx context.Context, items ...openresponses.Item) (boo
 	return c.agent.Deliver(ctx, items...)
 }
 
+var _ agentturn.Accepter = (*Control)(nil)
+
+// Accept implements [agentturn.Accepter]: [Control.Deliver] in two
+// steps, as agentturn.Agent.Accept is Deliver's. It returns once the
+// agent has queued the items, with the [agentturn.Delivery] whose Wait
+// gives what Deliver returns, and the agent settles it whether or not
+// anyone waits, starting the run that takes the items, when one is
+// needed, on RunContext's values, so that run is recorded and decided
+// as the kit's are. A view forwarding a person's steer answers once
+// the agent has it, and a second steer sent while a quiet tool runs is
+// not held behind the first's outcome. With a recorder, the kit's or
+// the conversation's on ctx as for Deliver, each item is written as a
+// queued entry carrying deliver before the agent accepts it
+// ([session.Recorder.Accept]). An error means nothing was delivered.
+func (c *Control) Accept(ctx context.Context, items ...openresponses.Item) (*agentturn.Delivery, error) {
+	ctx = c.RunContext(ctx)
+	if rec := RecorderFromContext(ctx); rec != nil {
+		return rec.Accept(ctx, c.agent, items...)
+	}
+	return c.agent.Accept(ctx, items...)
+}
+
 // Queue implements [agentturn.Control]: with a recorder, each item is
-// written as a queued entry before the agent takes it
-// ([session.Recorder.Queue]) rather than at the agent's queued event,
-// which the run's next event delivers and a quiet tool can hold off.
-// The recorder is the kit's, or the conversation's on ctx, as for
-// [Control.Deliver].
+// written as a queued entry before the agent takes it, durably, before
+// Queue returns ([session.Recorder.Queue]), rather than at the agent's
+// queued event. A run in flight reports that event promptly since
+// agentturn v0.0.38, but on a goroutine of its own that Queue does not
+// wait for, and an idle agent reports it only when its next run starts,
+// so an input written only at the event could be lost to a process that
+// stops first. The recorder is the kit's, or the conversation's on ctx, as
+// for [Control.Deliver].
 func (c *Control) Queue(ctx context.Context, mode agentturn.QueueMode, items ...openresponses.Item) error {
 	ctx = c.RunContext(ctx)
 	if rec := RecorderFromContext(ctx); rec != nil {
@@ -506,29 +519,38 @@ func (c *Control) Permissions(end *agentturn.RunEnd) []Permission {
 }
 
 // ContinueFrom moves the head to the entry entryID of the kit's
-// session: the recorder is rebased there ([session.Recorder.Rebase]),
-// the agent is given that branch's transcript, pending calls, the
-// notes it owes ([session.OwedNotes]) and reasoning attribution, and a
-// leaf label is appended so the move is on the record, for a follower
-// and for a session reopened later. The
-// conversation's skill grants are ended before the head leaves
-// ([Kit.RevokeSkillGrants]) and granted again from the new branch's
-// reads after ([Kit.RegrantSkills]), so a tool a skill on the old
-// branch allowed is not allowed on the new one.
+// session with [session.MoveTo]: the recorder is rebased there, and the
+// agent is given that branch's transcript, reasoning attribution, the
+// person's messages, pending calls and the notes it owes, with every
+// call ID the session holds reserved, while [agentturn.Agent.WhileIdle]
+// holds it, so no run starts between the check and the move. A leaf
+// label is then appended so the move is on the record, for a follower
+// and for a session reopened later. The conversation's skill grants are
+// ended before the head leaves ([Kit.RevokeSkillGrants]), outside the
+// hold, and granted again from the new branch's reads after
+// ([Kit.RegrantSkills]), so a tool a skill on the old branch allowed is
+// not allowed on the new one. A revocation the session would not record
+// fails the move, since the branch left would say the grant is still in
+// force, and so does an older verdict write the session lost between
+// runs, a product's rule change, which [Kit.RevokeSkillGrants] returns
+// once and names as lost between runs. The new branch's grants and the
+// leaf label are made under a second hold, so a run that starts in
+// between fails the move with [agentturn.ErrRunning].
 //
 // The target is checked before anything changes: a leaf label, an
 // entry on a fork's prefix above its base, and an entry that leaves
 // function calls without an output are refused. A failure after
-// anything moved puts back the leaf, the transcript, the pending calls
-// and the grants it had, so the session stays usable. The run check
-// and the move are not atomic (agentturn#220): a run that starts in
-// between fails the move, and the undo puts it back.
+// anything moved puts back the leaf, the agent's state as the record
+// holds it there, with [session.MoveTo] to the leaf it had, and the
+// grants it had, so the session stays usable. A run that starts after
+// the check and before the move fails the move with
+// [agentturn.ErrRunning], and the grants are put back.
 //
 // A context cancelled before the move is refused before anything
-// moves. The undo is cleanup and runs past a cancel, as the rebase's
-// own appends do: a store that blocks blocks it, and the verdict
-// observer and the skill grant report it calls get a context that is
-// never cancelled.
+// moves. The move and the undo run past a cancel, as the rebase's own
+// appends do: a store that blocks blocks them, and the verdict
+// observer and the skill grant report the undo calls get a context
+// that is never cancelled.
 //
 // It needs a recorder that writes a store it can open the session
 // from, and returns [agentturn.ErrRunning] while a run goes.
@@ -545,7 +567,7 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 		return agentturn.ErrRunning
 	}
 	// A move cancelled before it starts moves nothing: past here the
-	// undo runs past a cancel.
+	// move and the undo run past a cancel.
 	if err := ctx.Err(); err != nil {
 		return fail(err)
 	}
@@ -581,13 +603,7 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 	}
 
 	prevLeaf, prev := s.Leaf(), c.agent.State()
-	c.mu.Lock()
-	prevModels := c.models
-	c.mu.Unlock()
 	ctx = c.RunContext(ctx)
-	// The revocation writes its verdicts to the branch being left, which
-	// moves the leaf, so a failure from here on puts the head back.
-	c.kit.RevokeSkillGrants(ctx)
 	moved := false
 	defer func() {
 		if err == nil {
@@ -601,85 +617,60 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 			// The grants are the new branch's now: end them while the
 			// recorder still writes there, off the path the head goes
 			// back to.
-			c.kit.RevokeSkillGrants(ctx)
+			if _, rerr := c.kit.RevokeSkillGrants(ctx); rerr != nil {
+				errs = append(errs, rerr)
+			}
+			if rerr := session.MoveTo(ctx, c.agent, rec, prevLeaf); rerr != nil {
+				errs = append(errs, rerr)
+			} else if rerr := rehold(); rerr != nil {
+				errs = append(errs, rerr)
+			} else if rerr := c.markHead(ctx, rec, s); rerr != nil {
+				errs = append(errs, rerr)
+			}
 		}
 		// s follows the store's session wherever it can be opened, so
 		// the grants below read the path the head went back to.
 		if rerr := rehold(); rerr != nil {
 			errs = append(errs, rerr)
-		} else if rerr := rec.Rebase(s, prevLeaf); rerr != nil {
-			errs = append(errs, rerr)
-		} else if rerr := rehold(); rerr != nil {
-			errs = append(errs, rerr)
-		} else if rerr := c.markHead(ctx, rec, s); rerr != nil {
+		} else if rerr := c.kit.RegrantSkills(ctx, s); rerr != nil {
 			errs = append(errs, rerr)
 		}
-		if rerr := c.agent.SetTranscript(prev.Transcript); rerr != nil {
-			errs = append(errs, rerr)
-		}
-		if rerr := c.agent.SetPending(prev.Pending); rerr != nil {
-			errs = append(errs, rerr)
-		}
-		if rerr := c.agent.SetNotes(prev.Notes); rerr != nil {
-			errs = append(errs, rerr)
-		}
-		if rerr := c.kit.RegrantSkills(ctx, s); rerr != nil {
-			errs = append(errs, rerr)
-		}
-		c.mu.Lock()
-		c.models = prevModels
-		c.mu.Unlock()
 		if len(errs) > 0 {
 			err = fmt.Errorf("%w (and putting the head back failed: %w)", err, errors.Join(errs...))
 		}
 	}()
-
-	if err := rehold(); err != nil {
-		return fail(err)
+	// The revocation writes its verdicts to the branch being left; one
+	// the session would not record fails the move, and the undo grants
+	// again what that branch holds. So does a verdict write the session
+	// lost between runs before, which the revocation returns once.
+	if _, err := c.kit.RevokeSkillGrants(ctx); err != nil {
+		return fail(fmt.Errorf("the revocation before the move: %w", err))
 	}
-	if err := rec.Rebase(s, entryID); err != nil {
+	if err := session.MoveTo(context.WithoutCancel(ctx), c.agent, rec, entryID); err != nil {
+		// MoveTo leaves the record and the agent as they were.
 		return fail(err)
 	}
 	moved = true
-	if err := rehold(); err != nil {
+	// The grants and the head's mark under a second hold, so a run that
+	// starts after the move begins with them in place rather than have
+	// the mark appended in its middle; one that started between the two
+	// holds fails the move with agentturn.ErrRunning.
+	if err := c.agent.WhileIdle(func() error {
+		if err := rehold(); err != nil {
+			return err
+		}
+		if err := c.kit.RegrantSkills(ctx, s); err != nil {
+			return err
+		}
+		if err := rehold(); err != nil {
+			return err
+		}
+		if err := c.markHead(ctx, rec, s); err != nil {
+			return fmt.Errorf("mark the head: %w", err)
+		}
+		return nil
+	}); err != nil {
 		return fail(err)
-	}
-	// The recorder's read options resolve a sidecar session's media.
-	items, models, err := session.TranscriptModels(s, append(rec.ReadOptions(), session.WithContext(ctx))...)
-	if err != nil {
-		return fail(err)
-	}
-	pending, err := session.Pending(s, append(rec.ReadOptions(), session.WithContext(ctx))...)
-	if err != nil {
-		return fail(err)
-	}
-	if err := c.agent.SetTranscript(items); err != nil {
-		return fail(err)
-	}
-	if err := c.agent.SetPending(pending); err != nil {
-		return fail(err)
-	}
-	// The notes the branch owes after outputs already on it, which a
-	// failed run there could not append; with calls pending, Pending
-	// put them on the last call instead.
-	owed, err := session.OwedNotes(s, append(rec.ReadOptions(), session.WithContext(ctx))...)
-	if err != nil {
-		return fail(err)
-	}
-	if err := c.agent.SetNotes(owed); err != nil {
-		return fail(err)
-	}
-	if err := c.kit.RegrantSkills(ctx, s); err != nil {
-		return fail(err)
-	}
-	c.mu.Lock()
-	c.models = models
-	c.mu.Unlock()
-	if err := rehold(); err != nil {
-		return fail(err)
-	}
-	if err := c.markHead(ctx, rec, s); err != nil {
-		return fail(fmt.Errorf("mark the head: %w", err))
 	}
 	if eng := c.kit.Engine(); eng != nil && len(prev.Pending) > 0 {
 		// The calls the head left behind will not be answered: what

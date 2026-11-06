@@ -144,42 +144,87 @@ type skillGrants struct {
 	// It is one lock for every conversation, so a slow journal write in
 	// one delays a skill read in another; a lock per scope would remove
 	// that.
+	// A rule change returns once its verdicts have reached the engine's
+	// observers, on whichever goroutine is reporting (agentpolicy
+	// v0.0.20), so the verdicts are written while gmu is held, and no
+	// observer, the kit's or the product's, may take it: the change would
+	// wait on the observer and the observer on gmu.
 	gmu sync.Mutex
 
 	// mu guards scopes, the state of each grant scope a read has granted
 	// in.
 	mu     sync.Mutex
 	scopes map[string]*scopeGrants
-	// children is the grant scopes of the child agents run under each
-	// scope, recorded when the child's run context is made,
-	// [Kit.childContext], whether or not the child reads a skill, so a
-	// grandchild's grant is reached through a child that granted nothing,
-	// and a conversation's message ends exactly those and not a scope
-	// whose name merely begins with its own.
+	// children is the kit's registry of child scopes, [childScopes],
+	// which a message's revocation reads to end a child's grants with its
+	// conversation's.
+	children *childScopes
+}
+
+// childScopes is the grant scopes of the child agents run under each
+// scope, recorded when the child's run context is made,
+// [Kit.childContext], whenever the kit has an engine, whether or not the
+// child reads a skill and whether or not the kit has skill grants: a
+// front may grant under a child's scope too, so [Kit.RevokeSkillGrants]
+// ends them with their conversation, a grandchild's is reached through a
+// child that granted nothing, and a conversation ends exactly those and
+// not a scope whose name merely begins with its own. A WithChildAgent
+// child's scope is forgotten again when its call is over and nothing is
+// held under it, [Kit.endChildCall], so a conversation that is never
+// ended does not keep one per child run.
+type childScopes struct {
+	mu       sync.Mutex
 	children map[string]map[string]bool
 }
 
-// link records scope as a child scope of parent. The caller holds mu.
-func (g *skillGrants) link(parent, scope string) {
-	if g.children == nil {
-		g.children = map[string]map[string]bool{}
+// link records scope as a child scope of parent.
+func (c *childScopes) link(parent, scope string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.children == nil {
+		c.children = map[string]map[string]bool{}
 	}
-	if g.children[parent] == nil {
-		g.children[parent] = map[string]bool{}
+	if c.children[parent] == nil {
+		c.children[parent] = map[string]bool{}
 	}
-	g.children[parent][scope] = true
+	c.children[parent][scope] = true
+}
+
+// unlink forgets scope as a child scope of parent, when no scope is
+// linked under it and empty reports that nothing is held under it, and
+// reports whether it did. empty is asked with mu held, so a link under
+// scope does not land between the two.
+func (c *childScopes) unlink(parent, scope string, empty func(string) bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.children[parent][scope] || len(c.children[scope]) > 0 || !empty(scope) {
+		return false
+	}
+	delete(c.children[parent], scope)
+	if len(c.children[parent]) == 0 {
+		delete(c.children, parent)
+	}
+	delete(c.children, scope)
+	return true
 }
 
 // descendants returns every scope run under scope, children and their
-// children, in no order. The caller holds mu.
-func (g *skillGrants) descendants(scope string) []string {
+// children, in no order.
+func (c *childScopes) descendants(scope string) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.under(scope)
+}
+
+// under is descendants with mu held.
+func (c *childScopes) under(scope string) []string {
 	var out []string
 	seen := map[string]bool{scope: true}
 	queue := []string{scope}
 	for len(queue) > 0 {
 		next := queue[0]
 		queue = queue[1:]
-		for child := range g.children[next] {
+		for child := range c.children[next] {
 			if !seen[child] {
 				seen[child] = true
 				out = append(out, child)
@@ -188,6 +233,20 @@ func (g *skillGrants) descendants(scope string) []string {
 		}
 	}
 	return out
+}
+
+// take returns every scope run under scope, sorted, and forgets them and
+// scope's own children.
+func (c *childScopes) take(scope string) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	children := c.under(scope)
+	for _, child := range children {
+		delete(c.children, child)
+	}
+	delete(c.children, scope)
+	sort.Strings(children)
+	return children
 }
 
 // scopeGrants is what the kit keeps of the grants of one grant scope:
@@ -243,9 +302,10 @@ func (g *skillGrants) scopedCtx(ctx context.Context) context.Context {
 // one that ends it.
 func (g *skillGrants) stale(ctx context.Context, now userMark) bool {
 	scope := g.scope(ctx)
+	scopes := append([]string{scope}, g.children.descendants(scope)...)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	for _, sc := range append([]string{scope}, g.descendants(scope)...) {
+	for _, sc := range scopes {
 		st := g.scopes[sc]
 		if st == nil {
 			continue
@@ -948,15 +1008,6 @@ const revokedScopePrefix = "revoked the rules granted under "
 // begin with it.
 const childSep = "/"
 
-// revoke revokes every source a read granted under in the grant scope of
-// ctx, and the grants of the child agents run under it, forgets what the
-// kit kept of the scope, and returns the number of rules the engine
-// removed. It is for a conversation that is over, [Kit.RevokeSkillGrants].
-func (g *skillGrants) revoke(ctx context.Context) int {
-	n, _ := g.revokeLive(ctx, true)
-	return n + g.endChildren(ctx)
-}
-
 // revokeLive revokes the sources a read granted under in the grant scope
 // of ctx, forgetting the scope's state too when drop is set, and returns
 // the number of rules the engine removed and the grants that were in
@@ -1018,34 +1069,14 @@ func (g *skillGrants) revokeLive(ctx context.Context, drop bool) (int, []liveGra
 	return n, ended
 }
 
-// endChildren ends every grant of the child agents run under the grant
-// scope of ctx, [Kit.childContext], and their own children's, and
-// forgets their scopes: a child is one run of a conversation, nothing
-// revokes its grants when it ends, and a scope no run reaches again
-// would be a rule set the engine consults for every decision for as long
-// as it lives. The scopes are those recorded as the conversation's
-// children, and the sets under them are the kit's own, so a product's
-// that it made under one are ended too. It takes gmu as a revocation
-// does, so a read that is granting in a child's scope is not half undone.
-// It returns the number of rules the engine removed.
-func (g *skillGrants) endChildren(ctx context.Context) int {
-	scope := g.scope(ctx)
-	g.gmu.Lock()
-	defer g.gmu.Unlock()
+// forget drops what the kit kept of the grant scopes, the child scopes
+// [Kit.endChildren] ends. The caller holds gmu.
+func (g *skillGrants) forget(scopes []string) {
 	g.mu.Lock()
-	children := g.descendants(scope)
-	for _, child := range children {
-		delete(g.scopes, child)
-		delete(g.children, child)
+	defer g.mu.Unlock()
+	for _, sc := range scopes {
+		delete(g.scopes, sc)
 	}
-	delete(g.children, scope)
-	g.mu.Unlock()
-	sort.Strings(children)
-	n := 0
-	for _, child := range children {
-		n += g.engine.RevokeScope(agentpolicy.ContextWithGrantScope(ctx, child))
-	}
-	return n
 }
 
 func (g *skillGrants) sourceOf(sk *agentskill.Skill) agentpolicy.Source {

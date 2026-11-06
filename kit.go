@@ -114,7 +114,11 @@ type Kit struct {
 
 	// tools is the union the config's ToolProvider reads, which a server
 	// AddMCP connects joins; nil when the kit has no tool source.
-	tools *toolSet
+	// offerTools is the same set, or an empty one with the kit's filter,
+	// wrapper and conflict report when there is no source, which
+	// Kit.Offer unions a team's transfers with.
+	tools      *toolSet
+	offerTools *toolSet
 	// mcpStderr and mcpElicit are how New dialed its servers, which
 	// AddMCP dials the same way.
 	mcpStderr io.Writer
@@ -165,6 +169,10 @@ type Kit struct {
 	runUnions bounded[map[string]agenttool.Tool]
 	// childSeq numbers the scopes of child agents run with no recording.
 	childSeq atomic.Uint64
+	// scopes is the registry of child agents' grant scopes, linked under
+	// their conversation's whenever the kit has an engine, which
+	// RevokeSkillGrants ends with the conversation.
+	scopes childScopes
 
 	// mu guards the skill catalogue and its tool, which ReloadSkills
 	// replaces, and the parts, the memory manifest and the memory
@@ -184,6 +192,15 @@ type Kit struct {
 	// ReloadSkills, newest first, which an agent not yet handed the new
 	// config still starts its runs with.
 	earlier [][]Part
+	// children are the compositions Kit.ChildConfig made, by the child's
+	// prompt and the groups it takes, which PartsFor recognises. Those
+	// made during New are pinned; recent holds the keys of the runtime
+	// ones, least recently asked for first, bounded by childCompositions.
+	children map[string]*childComposition
+	recent   []string
+	// built is set when New returns: a composition made after it is a
+	// runtime one.
+	built bool
 	// reload re-discovers the skills for ReloadSkills, over the sources
 	// New was given; nil without skills.
 	reload func() (*agentskill.Catalog, Part, []Omission, error)
@@ -236,6 +253,18 @@ type Kit struct {
 	// what installs failOnLostVerdict.
 	lostVerdicts    bounded[error]
 	recordsVerdicts bool
+	// betweenRuns is the first verdict write each session refused outside
+	// any run and outside a call that returns the error, keyed by the
+	// session's ID: a revocation reported after RevokeSkillGrants
+	// returned, or a product's own rule change between runs. The next
+	// run recorded there fails on it, or the next RevokeSkillGrants
+	// returns it, whichever comes first.
+	betweenRuns bounded[error]
+
+	// rerender is Kit.render over New's settings and the kit's input
+	// guards, which a child's BeforeModelCall renders its parts with;
+	// set by buildHooks, before any run.
+	rerender func(ctx context.Context, base, own []Part, want map[string]bool) (rendered, error)
 
 	// compact is the compaction transform the kit built, nil without
 	// one; Control.Compact asks it to fold.
@@ -413,6 +442,9 @@ func New(ctx context.Context, opts ...Option) (*Kit, error) {
 		k.grants.regrant(agentpolicy.ContextWithGrantScope(ctx, k.resumeScope(ctx, k.rec, "")), sess, k.grants.scoped, opts...)
 		k.grants.gmu.Unlock()
 	}
+	k.mu.Lock()
+	k.built = true
+	k.mu.Unlock()
 	return k, nil
 }
 
@@ -935,7 +967,11 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 	// Their own source, so a collision with a product tool says which
 	// of the two to rename rather than blaming one name twice.
 	for i, d := range s.deferTools {
-		if tools := d.fn(k); len(tools) > 0 {
+		tools, err := d.fn(k)
+		if err != nil {
+			return fmt.Errorf("agentkit: %s: %w", d.label(i), err)
+		}
+		if len(tools) > 0 {
 			ts.sources = append(ts.sources, source{name: d.label(i), tools: tools})
 		}
 	}
@@ -963,6 +999,7 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 				matchers: s.matchers,
 				scoped:   s.skillGrantScope,
 				hooks:    len(s.beforeToolCall) > 0 || len(s.engineOpts) > 0,
+				children: &k.scopes,
 			}
 			if s.engine == nil {
 				k.grants.observe = k.observeVerdicts(s, false)
@@ -978,6 +1015,12 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 		}
 		ts.sources = append(ts.sources, source{name: "WithMemory", tools: tools})
 	}
+	if s.search {
+		ts.sources = append(ts.sources, source{
+			name:  "WithSessionSearch",
+			tools: []agenttool.Tool{SessionSearchTool(k.recorderFor, s.searchOpts...)},
+		})
+	}
 	for i, remote := range k.remotes {
 		ts.sources = append(ts.sources, k.remoteSource(k.remoteLabels[i], remote))
 	}
@@ -988,13 +1031,15 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 			live: fn,
 		})
 	}
+	ts.prepare()
+	// Kit.Offer unions a team's transfers with the kit's sources, which
+	// may be none.
+	k.offerTools = ts
 	if len(ts.sources) == 0 {
 		// Nothing to union and nothing for a policy to filter, so the
 		// field stays nil and the loop's own empty set applies.
 		return nil
 	}
-
-	ts.prepare()
 	k.tools = ts
 
 	// A collision the kit can see now is an error, because the two
@@ -1335,6 +1380,9 @@ func (k *Kit) buildHooks(s *settings) {
 	if len(s.guards) > 0 {
 		guards = guard.Chain{Guards: s.guards, Observer: k.observeVerdicts(s, true)}
 	}
+	k.rerender = func(ctx context.Context, base, own []Part, want map[string]bool) (rendered, error) {
+		return k.render(ctx, s, guards, base, own, want)
+	}
 
 	// BeforeModelCall: the instructions, memory re-rendered and each
 	// part guarded, then the guards over the whole request, then the
@@ -1538,82 +1586,127 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 			return nil
 		}
 
-		var (
-			man     agentmemory.Manifest
-			memOm   []Omission
-			partOm  []Omission
-			mcpOm   []Omission
-			dropped bool
-			render  = s.memStore != nil
-		)
-		// The product's parts first, so the memory block is bounded by
-		// what they leave of the budget this request.
-		for _, pp := range s.parts {
-			g, om, err := renderPart(ctx, pp)
-			if err != nil {
-				return err
-			}
-			base = withGroup(base, pp.id, g, k.order)
-			partOm = append(partOm, om...)
-		}
-		// The servers' instructions as the kit holds the servers now: an
-		// added server's join, a removed or closed one's leave.
-		if k.mcpParts {
-			var g []Part
-			servers := k.mcpServers()
-			g, mcpOm = mcpGroup(servers, k.mcpTrusted, k.offeredServers(ctx, servers), mcpShare(s.budget, base))
-			base = withGroup(base, PartMCP, g, k.order)
-		}
-		if render {
-			// The same render, the same bound and the same drop as the
-			// first one, so the block cannot grow past the budget
-			// between turns and cannot come back at its floor after the
-			// budget dropped it.
-			group, m, om, drop, err := memoryPart(ctx, s, memoryShare(s.budget, base))
-			if err != nil {
-				return err
-			}
-			base, man, memOm, dropped = withGroup(base, PartMemory, group, k.order), m, om, drop
-			// Recorded before the guards run: the manifest says what the
-			// render put in the block, which a guard that blocks the
-			// request does not change.
-			if err := k.record(ctx, man); err != nil {
-				return err
-			}
-		}
-
-		sent := base
-		if len(guards.Guards) > 0 {
-			var err error
-			if sent, err = guardParts(ctx, guards, base); err != nil {
-				return err
-			}
+		r, err := k.render(ctx, s, guards, base, nil, nil)
+		if err != nil {
+			return err
 		}
 
 		k.mu.Lock()
-		k.base, k.parts = base, sent
+		k.base, k.parts = r.base, r.sent
 		if len(s.parts) > 0 {
-			k.partOmitted = partOm
+			k.partOmitted = r.partOm
 		}
 		if k.mcpParts {
-			k.mcpOmitted = mcpOm
+			k.mcpOmitted = r.mcpOm
 		}
-		if render {
-			k.manifest, k.memOmitted, k.memDropped = man, memOm, dropped
+		if r.memory {
+			k.manifest, k.memOmitted, k.memDropped = r.man, r.memOm, r.dropped
 			if id := agentturn.RunIDFromContext(ctx); id != "" {
-				k.rendered.put(id, memoryRender{man: man, dropped: dropped})
+				k.rendered.put(id, memoryRender{man: r.man, dropped: r.dropped})
 			}
 		}
 		k.mu.Unlock()
 
-		req.Instructions = agentsession.JoinInstructions(sent)
-		if dropped {
+		req.Instructions = agentsession.JoinInstructions(r.sent)
+		if r.dropped {
 			// No block and no word on the tools, so no tool that writes
 			// over what the block would have shown.
 			req.Tools = withoutMemoryWrites(req.Tools)
 		}
 		return nil
 	}
+}
+
+// rendered is one render of the parts for a request: base as the
+// layers rendered them, sent as the guards left them, and what each
+// layer that rendered left out.
+type rendered struct {
+	base, sent           []Part
+	man                  agentmemory.Manifest
+	memOm, partOm, mcpOm []Omission
+	// memory is true when the memory block was rendered, and dropped
+	// when the budget dropped it.
+	memory, dropped bool
+}
+
+// render re-renders the parts that change between requests over base,
+// the [WithPart] parts, the MCP servers' instructions and the memory
+// block, and runs the input guards over each part, as [Kit.instructions]
+// does for the kit's own requests. want, when it is not nil, says which
+// groups a child composed with [Kit.ChildConfig] takes: only those are
+// rendered again, and sent is own, the child's prompt, then them,
+// guarded, and the bounded groups are sized against sent, the child's
+// instructions, not the parent's. When the memory block is rendered
+// its manifest is recorded in the session the run on ctx writes, a
+// child's in its own.
+func (k *Kit) render(ctx context.Context, s *settings, guards guard.Chain, base, own []Part, want map[string]bool) (rendered, error) {
+	takes := func(id string) bool { return want == nil || want[id] }
+	// What the request carries, which the budget bounds: the kit's
+	// parts, or the child's.
+	carried := func() []Part {
+		if want == nil {
+			return base
+		}
+		return append(slices.Clone(own), selectGroups(base, want)...)
+	}
+	var r rendered
+	// The product's parts first, so the memory block is bounded by
+	// what they leave of the budget this request.
+	for _, pp := range s.parts {
+		if !takes(pp.id) {
+			continue
+		}
+		g, om, err := renderPart(ctx, pp)
+		if err != nil {
+			return r, err
+		}
+		base = withGroup(base, pp.id, g, k.order)
+		r.partOm = append(r.partOm, om...)
+	}
+	// The servers' instructions as the kit holds the servers now: an
+	// added server's join, a removed or closed one's leave.
+	if k.mcpParts && takes(PartMCP) {
+		var g []Part
+		servers := k.mcpServers()
+		g, r.mcpOm = mcpGroup(servers, k.mcpTrusted, k.offeredServers(ctx, servers), mcpShare(s.budget, carried()))
+		base = withGroup(base, PartMCP, g, k.order)
+	}
+	if s.memStore != nil && takes(PartMemory) {
+		// The same render, the same bound and the same drop as the
+		// first one, so the block cannot grow past the budget
+		// between turns and cannot come back at its floor after the
+		// budget dropped it.
+		group, m, om, drop, err := memoryPart(ctx, s, memoryShare(s.budget, carried()))
+		if err != nil {
+			return r, err
+		}
+		base, r.man, r.memOm, r.dropped, r.memory = withGroup(base, PartMemory, group, k.order), m, om, drop, true
+		// Recorded before the guards run: the manifest says what the
+		// render put in the block, which a guard that blocks the
+		// request does not change.
+		if err := k.record(ctx, r.man); err != nil {
+			return r, err
+		}
+	}
+	r.base, r.sent = base, carried()
+	if len(guards.Guards) > 0 {
+		var err error
+		if r.sent, err = guardParts(ctx, guards, r.sent); err != nil {
+			return r, err
+		}
+	}
+	return r, nil
+}
+
+// selectGroups is the parts of the groups want names, in their order.
+func selectGroups(parts []Part, want map[string]bool) []Part {
+	var out []Part
+	for _, p := range parts {
+		if want[group(p.ID)] {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // withGroup returns parts with the parts of group id replaced by g, in
@@ -1989,8 +2082,9 @@ var ErrNoChildRecorder = errors.New("agentkit: no recorder writes the conversati
 // whose header names the parent and the spawn: the foreground session's
 // export embeds its steps, and agentsession.DelegatedWork counts it. The
 // context carries the recorder, the child's session ID for the memory
-// journal, and under [WithSkillGrants] a grant scope of the child's own,
-// as a child [WithChildAgent] runs has. A later pass continues the child
+// journal, and, when the kit has an engine, a grant scope of the child's
+// own, linked to the conversation's for [Kit.RevokeSkillGrants], as a
+// child [WithChildAgent] runs has. A later pass continues the child
 // with [Kit.ContinueChild]. The kit that calls it may be another than
 // the one the conversation's agent runs under, a pass's kit built
 // [WithRecorder] the conversation's recorder.
@@ -2003,7 +2097,7 @@ func (k *Kit) StartChild(ctx context.Context, spawnID string) (context.Context, 
 	if err != nil {
 		return ctx, fmt.Errorf("agentkit: starting child %s: %w", spawnID, err)
 	}
-	return k.childRun(ctx, ContextWithRecorder(cctx, rec), rec, spawnID), nil
+	return k.childRun(ctx, ContextWithRecorder(cctx, rec), rec, spawnID, false), nil
 }
 
 // ContinueChild gives the context for a child [Kit.StartChild] started,
@@ -2022,7 +2116,7 @@ func (k *Kit) ContinueChild(ctx context.Context, spawnID string) (context.Contex
 	if err != nil {
 		return ctx, fmt.Errorf("agentkit: continuing child %s: %w", spawnID, err)
 	}
-	return k.childRun(ctx, ContextWithRecorder(cctx, rec), rec, spawnID), nil
+	return k.childRun(ctx, ContextWithRecorder(cctx, rec), rec, spawnID, false), nil
 }
 
 // AttachChild subscribes the recorder of each run's context to a, the
@@ -2161,8 +2255,11 @@ func callIDOf(p agentturn.PendingCall) string {
 // of a decision the run went on under, and a restart regrants skill
 // grants from these verdicts. A write that fails in the last hook a
 // run calls, an output guard's verdict on the final answer or a stop
-// hook's, has no later hook in that run and is lost, and so is one that
-// fails outside any run, a revocation a product makes between runs.
+// hook's, has no later hook in that run and is lost. One made under a
+// call that returns the error, [Kit.RevokeSkillGrants], goes to that
+// call, and one that fails outside any run otherwise, a product's rule
+// change between runs, is kept for its session and fails the next run
+// recorded there, [Kit.loseVerdict].
 // When the engine had deferred the call whose hook fails the run, it
 // keeps what it held of the run until [agentpolicy.Engine.Forget].
 func (k *Kit) observeVerdicts(s *settings, guards bool) func(context.Context, agentpolicy.Verdict) {
@@ -2175,7 +2272,7 @@ func (k *Kit) observeVerdicts(s *settings, guards bool) func(context.Context, ag
 		if rec := k.recorderFor(ctx); rec != nil && (!guards || v.Action != agentturn.Allow || v.Reason != "") {
 			ns, data := v.Record()
 			if _, err := rec.Annotate(ctx, ns, json.RawMessage(data)); err != nil {
-				k.loseVerdict(ctx, v, err)
+				k.loseVerdict(ctx, rec, v, err)
 			}
 		}
 		if product != nil {
@@ -2184,22 +2281,85 @@ func (k *Kit) observeVerdicts(s *settings, guards bool) func(context.Context, ag
 	}
 }
 
-// loseVerdict keeps the failed write of v for the run on ctx, the first
-// one only, for failOnLostVerdict.
-func (k *Kit) loseVerdict(ctx context.Context, v agentpolicy.Verdict, err error) {
-	run := agentturn.RunIDFromContext(ctx)
-	if run == "" {
+// verdictSink collects the verdict writes a call that returns their
+// error lost, [Kit.RevokeSkillGrants]: it rides on the call's context,
+// which the engine hands its observers with a change's verdicts on
+// whichever goroutine reports them, and is closed when the call
+// returns, after which a write lost under it is kept between runs.
+type verdictSink struct {
+	mu     sync.Mutex
+	err    error
+	closed bool
+}
+
+type verdictSinkKey struct{}
+
+// keep keeps err, the first one only, unless the sink is closed, and
+// reports whether it did.
+func (s *verdictSink) keep(err error) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	if s.err == nil {
+		s.err = err
+	}
+	return true
+}
+
+// close closes the sink and returns what it kept.
+func (s *verdictSink) close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	return s.err
+}
+
+// loseVerdict keeps the failed write of v to rec: for the call on ctx
+// that returns it, [verdictSink], while that call has not returned; else
+// for the run on ctx, the first one only, for failOnLostVerdict; else,
+// outside any run, for the session rec writes, the first one only, which
+// the next run recorded there or the next RevokeSkillGrants returns.
+func (k *Kit) loseVerdict(ctx context.Context, rec *session.Recorder, v agentpolicy.Verdict, err error) {
+	err = fmt.Errorf("agentkit: recording the policy verdict on %s: %w", verdictSubject(v), err)
+	if sink, ok := ctx.Value(verdictSinkKey{}).(*verdictSink); ok && sink.keep(err) {
 		return
 	}
+	run := agentturn.RunIDFromContext(ctx)
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if _, ok := k.lostVerdicts.get(run); !ok {
-		k.lostVerdicts.put(run, fmt.Errorf("agentkit: recording the policy verdict on %s: %w", v.Subject, err))
+	if run != "" {
+		if _, ok := k.lostVerdicts.get(run); !ok {
+			k.lostVerdicts.put(run, err)
+		}
+		return
+	}
+	if _, ok := k.betweenRuns.get(rec.SessionID()); !ok {
+		k.betweenRuns.put(rec.SessionID(), err)
 	}
 }
 
+// verdictSubject names what v is about, for a lost write's error: the
+// subject it decided, or the rule change it records.
+func verdictSubject(v agentpolicy.Verdict) string {
+	switch {
+	case v.Subject != "":
+		return v.Subject
+	case v.Grant != "" && v.Source != "":
+		return string(v.Grant) + " of " + v.Source
+	case v.Grant != "":
+		return string(v.Grant) + " under " + v.Scope
+	case v.Tool != "":
+		return v.Tool
+	}
+	return v.Reason
+}
+
 // failOnLostVerdict returns the verdict write the run on ctx lost, once,
-// so the hook that calls it fails the run. The kit calls it after its
+// so the hook that calls it fails the run, and else the one the session
+// the run records into lost between runs, unless the run is a child's
+// recorded in a session of its own. The kit calls it after its
 // engine decides a call, which reports the call's verdict before it
 // returns, and after the guards and the instructions in BeforeModelCall,
 // which find what a guard's check and a skill read's grant lost.
@@ -2212,11 +2372,35 @@ func (k *Kit) failOnLostVerdict(ctx context.Context, run string) error {
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	err, ok := k.lostVerdicts.get(run)
-	if !ok {
+	if err, ok := k.lostVerdicts.get(run); ok {
+		k.lostVerdicts.delete(run)
+		return err
+	}
+	if rec := k.recorderFor(ctx); rec != nil {
+		sid := rec.SessionID()
+		if own := session.SessionIDFromContext(ctx); own == "" || own == sid {
+			if err, ok := k.betweenRuns.get(sid); ok {
+				k.betweenRuns.delete(sid)
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// lostBetweenRuns returns, once, the verdict write the session the
+// recorder on ctx writes lost between runs.
+func (k *Kit) lostBetweenRuns(ctx context.Context) error {
+	rec := k.recorderFor(ctx)
+	if rec == nil {
 		return nil
 	}
-	k.lostVerdicts.delete(run)
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	err, ok := k.betweenRuns.get(rec.SessionID())
+	if ok {
+		k.betweenRuns.delete(rec.SessionID())
+	}
 	return err
 }
 
@@ -2327,7 +2511,7 @@ func (k *Kit) revokeOnUserMessage(ctx context.Context, info agentturn.TurnStartI
 	}
 	_, ended := k.grants.revokeLive(ctx, false)
 	// The child agents of the conversation are over with its message.
-	k.grants.endChildren(ctx)
+	k.endChildren(ctx)
 	if len(ended) > 0 {
 		k.grants.keepEnded(k.grants.scope(ctx), ended)
 		return openresponses.Items{openresponses.DeveloperText(grantsEndedNote(ended))}, nil
@@ -2652,8 +2836,11 @@ func (k *Kit) Parts() []Part {
 //	kit, err = agentkit.New(ctx, agentkit.WithRecorder(rec), ...)
 //
 // The recorder asks for every session it writes, a child run's among
-// them, and a request whose instructions are not this kit's gets nil,
-// so the child keeps the string unless [PartsFrom] names its kit too.
+// them. A child whose config [Kit.ChildConfig] composed gets its own
+// parts, for the text its run starts with and for each request's
+// render; any other request whose instructions are not this kit's gets
+// nil, so the child keeps the string unless [PartsFrom] names its kit
+// too.
 // Concurrent runs off one kit share the last render, so a request from
 // the other run's render gets nil and is recorded as a string, which is
 // what the recorder does with parts that do not join. It is safe on a
@@ -2663,33 +2850,36 @@ func (k *Kit) PartsFor(_ context.Context, req openresponses.Request) ([]agentses
 		return nil, nil
 	}
 	k.mu.Lock()
-	parts, memOmitted, partOmitted, mcpOmitted := k.parts, k.memOmitted, k.partOmitted, k.mcpOmitted
-	if agentsession.JoinInstructions(parts) != req.Instructions {
+	parts := k.parts
+	var omissions [][]Omission
+	switch {
+	case agentsession.JoinInstructions(parts) == req.Instructions:
+		omissions = [][]Omission{k.omitted, k.partOmitted, k.mcpOmitted, k.memOmitted}
+	case k.firstFor(req.Instructions) != nil:
 		// The configuration's own instructions, which the recorder
 		// settles at a run's start before any hook has run, are New's
 		// render as the guards left it. Never the layers' unguarded
 		// render: that is text a guard kept from the model.
-		if parts = k.firstFor(req.Instructions); parts == nil {
+		parts = k.firstFor(req.Instructions)
+		omissions = [][]Omission{k.omitted, k.firstPartOmitted, k.firstMCPOmitted, k.firstOmitted}
+	default:
+		// A child's, composed by ChildConfig: its config's text or its
+		// last request's.
+		var om []Omission
+		if parts, om = k.childFor(req.Instructions); parts == nil {
 			k.mu.Unlock()
 			return nil, nil
 		}
-		memOmitted, partOmitted, mcpOmitted = k.firstOmitted, k.firstPartOmitted, k.firstMCPOmitted
+		omissions = [][]Omission{om}
 	}
 	out := make([]Part, len(parts))
 	copy(out, parts)
 	// The omissions under the same lock, so they are the same render's.
-	omitted := make([]agentsession.OmittedPart, 0, len(k.omitted)+len(partOmitted)+len(memOmitted))
-	for _, o := range k.omitted {
-		omitted = append(omitted, o.OmittedPart())
-	}
-	for _, o := range partOmitted {
-		omitted = append(omitted, o.OmittedPart())
-	}
-	for _, o := range mcpOmitted {
-		omitted = append(omitted, o.OmittedPart())
-	}
-	for _, o := range memOmitted {
-		omitted = append(omitted, o.OmittedPart())
+	omitted := make([]agentsession.OmittedPart, 0)
+	for _, list := range omissions {
+		for _, o := range list {
+			omitted = append(omitted, o.OmittedPart())
+		}
 	}
 	k.mu.Unlock()
 	return out, omitted
@@ -2978,20 +3168,72 @@ func (k *Kit) RegrantSkills(ctx context.Context, sess *agentsession.Session, opt
 	return nil
 }
 
-// RevokeSkillGrants revokes every grant a skill's read made through
-// [WithSkillGrants] in the conversation of ctx, [Kit.GrantScope], and
-// those of the child agents run under it, and returns the number of
-// rules the engine removed. A front calls it when a grant should end,
-// the end of a run or of a conversation, and the end of a conversation
-// is also when the kit may forget what it kept of its grants;
+// RevokeSkillGrants ends the conversation of ctx, [Kit.GrantScope], for
+// the policy engine: it revokes every grant a skill's read made through
+// [WithSkillGrants] in the conversation, and every rule set under the
+// grant scopes of the child agents run under it, [WithChildAgent] and
+// [Kit.StartChild], whether a read or a front made them and whether or
+// not the kit has skill grants. It returns the number of rules the
+// engine removed. A front calls it when a grant should end, the end of
+// a run or of a conversation, and the end of a conversation is also when
+// the kit may forget what it kept of its grants and its child scopes;
 // [WithSkillGrantScope] revokes when each message arrives. Another
 // conversation's grants stay. A skill read again is granted again. It is
-// zero and does nothing without skill grants.
-func (k *Kit) RevokeSkillGrants(ctx context.Context) int {
-	if k.grants == nil {
+// zero and does nothing without an engine.
+//
+// The error is a revocation's verdict the conversation's session would
+// not record, the engine's or the kit's own for a skill's set that held
+// no rule, joined with one its session lost between runs since, which
+// may be no revocation's, a product's rule change, and is named as lost
+// between runs before this revocation: a restart replays the session's
+// journal, which then says a grant is still in force, or misses the
+// change. The engine has revoked all the same. A verdict
+// reported after it returns, as one is when it is called from inside
+// the engine's observer, is kept for the conversation's next run, which
+// fails on it, or the next RevokeSkillGrants.
+func (k *Kit) RevokeSkillGrants(ctx context.Context) (int, error) {
+	sink := &verdictSink{}
+	ctx = context.WithValue(ctx, verdictSinkKey{}, sink)
+	n := 0
+	if k.grants != nil {
+		n, _ = k.grants.revokeLive(ctx, true)
+	}
+	n += k.endChildren(ctx)
+	err := sink.close()
+	if lost := k.lostBetweenRuns(ctx); lost != nil {
+		err = errors.Join(err, fmt.Errorf("agentkit: lost between runs before this revocation: %w", lost))
+	}
+	return n, err
+}
+
+// endChildren ends every rule set under the grant scopes of the child
+// agents run under the grant scope of ctx, [Kit.childContext], and their
+// own children's, and forgets their scopes: a child is one run of a
+// conversation, nothing revokes its sets when it ends, and a scope no
+// run reaches again would be a rule set the engine consults for every
+// decision for as long as it lives. The scopes are those recorded as the
+// conversation's children, so a front's set under one is ended too.
+// Under skill grants it takes their lock as a revocation does, so a read
+// that is granting in a child's scope is not half undone. It returns the
+// number of rules the engine removed.
+func (k *Kit) endChildren(ctx context.Context) int {
+	if k.engine == nil {
 		return 0
 	}
-	return k.grants.revoke(ctx)
+	scope := k.GrantScope(ctx)
+	if k.grants != nil {
+		k.grants.gmu.Lock()
+		defer k.grants.gmu.Unlock()
+	}
+	children := k.scopes.take(scope)
+	if k.grants != nil {
+		k.grants.forget(children)
+	}
+	n := 0
+	for _, child := range children {
+		n += k.engine.RevokeScope(agentpolicy.ContextWithGrantScope(ctx, child))
+	}
+	return n
 }
 
 // ownInstructions reports whether text is the instructions of a config
@@ -3032,12 +3274,16 @@ const earlierConfigs = 8
 // while calls are being decided reloads between runs, with
 // [agentturn.Agent.WhileIdle], to keep the two together. The skills part of the
 // instructions is the new catalogue's, and [Kit.Omitted] its omissions,
-// from the next request of a kit that renders its instructions each
-// request, under [WithMemory] or [WithGuards]; otherwise from the next
-// run of an agent given the new [Kit.Config], with SetConfig between
-// runs, since a config is a value and the loop sends its instructions
-// as they are. Either way the recorder writes the new part as a config
-// delta, and the provider's prefix cache misses from that part on.
+// from the next request, of the run in flight too, of a kit that renders
+// its instructions each request: one with MCP servers' instructions on,
+// the default, which a kit with a skill tool has a tool set for, or one
+// with [WithMemory], a [WithPart] part, or [WithGuards] beside
+// instructions to guard. A kit with none of them, under
+// [WithoutMCPInstructions], sends them from the next run of an agent
+// given the new [Kit.Config], with SetConfig between runs, since a
+// config is a value and the loop sends its instructions as they are.
+// Either way the recorder writes the new part as a config delta, and
+// the provider's prefix cache misses from that part on.
 //
 // Grants already made stand, by the rules they were made with. A read
 // after the reload grants by the new catalogue's rules, and a restart's

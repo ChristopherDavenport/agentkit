@@ -36,7 +36,7 @@ and no fold is recorded.
 | `Retry`, `ToolExecution`, `MaxParallelTools` | `WithRetry`, `WithToolExecution`, `WithMaxParallelTools` | assign them; the kit contests none of them and reads none of them |
 | `Instructions` | `WithInstructions`, `WithSkills`, `WithMemory`, `WithMemoryArchive`, `WithAgentsMD`, `WithPart`, `WithMCP`, `WithTrustedMCPInstructions` | `strings.Join` of the four blocks, each MCP server's instructions part and each `WithPart` part's first render, in the order of [ordering.md](ordering.md) — see below |
 | `Tools` | — | the kit never sets it; it sets `ToolProvider`, which the loop reads in its place |
-| `ToolProvider` | `WithTools`, `WithSkills`, `WithMemory`, `WithMemoryArchive`, `WithMCP`, `WithMCPResourceTools`, `WithChildAgent`, `WithDeferredTools`, `WithToolProvider`, `WithToolFilter`, `WithToolWrap`, `WithPolicy` | `append` the slices, wrap each tool, and wrap the list in `engine.ToolProvider` — see below |
+| `ToolProvider` | `WithTools`, `WithSkills`, `WithMemory`, `WithMemoryArchive`, `WithSessionSearch`, `WithMCP`, `WithMCPResourceTools`, `WithChildAgent`, `WithDeferredTools`, `WithToolProvider`, `WithToolFilter`, `WithToolWrap`, `WithPolicy` | `append` the slices, wrap each tool, and wrap the list in `engine.ToolProvider` — see below |
 | `BeforeTurn` | `WithSkillGrantScope`, `WithBeforeTurn` | `agentturn.ChainBeforeTurn(revokeOnUserMessage, yours...)` — see below |
 | `BeforeModelCall` | `WithMemory`, `WithPart`, `WithGuards`, `WithPolicy`, `WithSkillGrants`, `WithVerdictObserver`, `WithBeforeModelCall` | `agentturn.ChainBeforeModelCall(instructions, chain.BeforeModelCall(), yours...)` — see below |
 | `BeforeToolCall` | `WithPolicy`, `WithMemory`, `WithSkillGrants`, `WithSkillGrantScope`, `WithBeforeToolCall` | `agentturn.ChainBeforeToolCall(keepSaveBase, decide)`, `decide` being `engine.BeforeToolCall()` under the call's grant scope, the engine built with `agentpolicy.WithHooks(refuseEndedGrant, yours...)`; with `WithEngine` or no policy, `yours...` after the engine and no `refuseEndedGrant` — see below |
@@ -220,10 +220,18 @@ tools = append(tools, childagent.New(childCfg,
 		}
 		// Whenever there is an engine: the child's own grant scope, under
 		// its conversation's, so a set granted to the conversation does not
-		// decide the child's calls. Under WithSkillGrants also a record of
-		// whose child it is, so the conversation's next message ends its
-		// grants: they are bound to the parent's user-message mark.
+		// decide the child's calls, and a record of whose child it is, so
+		// Kit.RevokeSkillGrants ends the sets under it with the
+		// conversation's. Under WithSkillGrants also the parent's
+		// user-message mark, so the conversation's next message ends its
+		// grants.
 		return agentpolicy.ContextWithGrantScope(ctx, parent+"/"+child)
+	}),
+	// With a recorder of the kit's own (rec != nil): a call run again
+	// under its key after a restart continues the child from the record
+	// the observer wrote, rather than starting it afresh.
+	childagent.WithRecord(func(ctx context.Context, call agenttool.Call, cfg agentturn.Config) (*childagent.Record, error) {
+		return recorderFor(ctx).ChildRecord(ctx, call, cfg)
 	})))
 // The catalogue's tool as it stands: ReloadSkills puts another
 // catalogue's in its place, and every run sees it from its next call.
@@ -287,6 +295,9 @@ for i, t := range memTools {
 	}
 }
 tools = append(tools, memTools...)
+// WithSessionSearch: conversation_search over the run's recorder's
+// store, agentsession.Search with the calling session left out.
+tools = append(tools, agentkit.SessionSearchTool(recorderFor, searchOpts...))
 for i, t := range tools {
 	tools[i] = wrap(sourceOf(t), t) // WithToolWrap
 	if t.Name() == agentskill.ToolName {
@@ -310,6 +321,27 @@ cfg.ToolProvider = func(ctx context.Context) []agenttool.Tool {
 	return offered(agentpolicy.ContextWithGrantScope(ctx, scopeOf(ctx)))
 }
 ```
+
+`agentkit.SessionSearchTool` is `agenttool.New` over
+`agentsession.Search`, exported so this line is a call and not a copy:
+each call searches `recorderFor(ctx).Store()` for the messages holding
+every word of its query, leaves out `rec.SessionOf(ctx)` unless
+`agentkit.SearchOwnSession()` is given, reads at most the
+`agentkit.SearchFilter`'s `Limit` sessions (`DefaultSearchSessions`
+when it gives none), turns the inclusive `start_date` and `end_date`
+into the exclusive bounds `agentsession.Query` takes (`end_date`
+bounding the sessions read by `created_at` too), runs each
+`agentkit.SearchScope` hook on the query with the call's context, an
+error failing the call, and states its flow as reading untrusted
+content. The search reaches every session the store connection can
+read, so a product serving several principals over one store, such as
+remote peers answered in its user's store, passes a `SearchScope` that
+confines each call to its caller (narrowing `q.Filter.Extra` or setting
+`q.Readable`) or does not offer the tool to them: the kit ships the
+hook, the product decides who may read what. A child agent's search
+starts from the child's own session, so it finds the conversation that
+spawned it, the same person's; `SearchFilter`'s `TopLevel` leaves
+subsessions out.
 
 `grant` is `WithSkillGrants`, under "What the kit does" below. The
 product's wrapper runs inside it, so what `grant` wraps is the tool the
@@ -471,9 +503,43 @@ or `New`'s, together.
 
 `WithChildAgent` is the line above with `childagent.New`: the kit binds
 `WithObserver` and `WithRunContext` to the run's recorder, the memory
-bridge only when `WithMemory` is configured, and adds nothing else, so a
+bridge only when `WithMemory` is configured, and `WithRecord` only when
+the kit has a recorder of its own, `WithSession`, `WithResumedSession`
+or `WithRecorder`, since under a kit with none a call run again with
+no recorder on its context would start the child afresh and repeat its
+work; it adds nothing else, so a
 product that builds its own child hands it to `WithTools` and the
-result is the same tool. `WithDeferredTools` is the same again for a
+result is the same tool. `WithChildAgent(childCfg, agentkit.ChildParts(ids...))`
+is the same line with `childCfg` replaced by
+`kit.ChildConfig(childCfg, ids...)`, which a product building its own
+child calls from `WithDeferredTools`, the kit being what holds the
+parts:
+
+```go
+// The child's own prompt as a part, guarded as the parent's was at New,
+// then the kit's parts of the groups ids names, as the guards left
+// them, each with its source and trust.
+own := []agentkit.Part{{ID: agentkit.PartProduct, Text: childCfg.Instructions, Source: agentkit.SourceProduct}}
+sentOwn, err := guardParts(ctx, guard.Chain{Guards: guards}, own)
+childCfg.Instructions = agentsession.JoinInstructions(append(sentOwn, selected(kit.Parts(), ids)...))
+// Before each of the child's requests whose instructions are still the
+// composition's: the selected groups rendered again over the kit's
+// parts, the memory block, WithPart parts and the servers'
+// instructions as the instructions hook below renders them, each
+// bounded group sized against the child's prompt and its selected
+// parts, not the parent's, the memory manifest written in the child's
+// session, and the prompt and the groups each guarded with guardParts.
+// Ahead of the child's own.
+childCfg.BeforeModelCall = agentturn.ChainBeforeModelCall(renderChild, childCfg.BeforeModelCall)
+```
+
+and the parts function the kit's recorder takes knows both the text the
+child's run starts with and each request's render, so the child's
+config entries carry `instructions_parts`, a memory entry's labelled
+`untrusted` as the parent's are, and the child's path trust holds the
+label (agentsession RFC 0001 0.21, Instructions as parts).
+
+`WithDeferredTools` is the same again for a
 tool that needs the engine, the catalogue or the session; both exist
 because the kit is what opens those, not because it wraps them.
 
@@ -497,6 +563,36 @@ Two things the kit adds that the `append` above does not:
   as they were at `New`, and through `engine.ToolProvider`'s filter
   under `kit.GrantScope` of a bare context, so a tool a bare deny takes
   off the offer is not listed.
+
+An agent of an agentturn `handoff.Team` is offered its transfers beside
+its own tools, and the team's `Offer` sees the whole list on every
+request. `Kit.TeamConfig()` is `Config()` with `ToolProvider` nil, and
+`agentkit.TeamOffer(kits...)` is the `Offer` that sends each agent's
+list through `Kit.Offer` of the kit carrying its name: the block above
+with the list as one more source labelled `"handoff"`
+(`agentkit.HandoffSource`), so the filter, the wrappers, the duplicate
+check and `engine.ToolProvider` run once over the agent's tools and its
+transfers together. The transfers are resolved first, so a transfer
+keeps its name over a kit tool that claims it too, which is dropped and
+reported as a `Conflict` kept by `"handoff"`, and offered last:
+
+```go
+offer := func(ctx context.Context, _ string, transfers []agenttool.Tool) []agenttool.Tool {
+	// labelled "handoff" for the filter and the wrapper; a kit tool
+	// named as a transfer is dropped and reported before this append
+	all := append(slices.Clone(tools), transfers...)
+	return engine.ToolProvider(func(context.Context) []agenttool.Tool { return all })(
+		agentpolicy.ContextWithGrantScope(ctx, scopeOf(ctx)))
+}
+cfg := kit.Config()
+cfg.ToolProvider = nil // or the kit's tools pass the pipeline in the provider and again in Offer
+team, err := handoff.New(handoff.Agent{Config: cfg, Handoffs: handoffs})
+team.Offer = offer
+```
+
+A transfer the policy denies is then not offered, and a wrapper sees
+it, which must keep its name and its result for the call to hand off
+(agentturn RFC 0001, Composition).
 
 ## `BeforeModelCall`, in full
 
@@ -1208,7 +1304,9 @@ Eleven things, all outside `agentturn.Config`:
   `sent` is what the last turn's hook sent and `first` is `New`'s
   guarded render, which the recorder asks about for a run's first
   config entry. Never the layers' own render: that is text a guard kept
-  from the model.
+  from the model. A child `Kit.ChildConfig` composed is asked about the
+  same way after them, its config's text and its last request's, each
+  with the omissions of the groups it takes.
 - `WithSession` and `WithResumedSession` open the recorder with
   `session.WithReopened` too, keeping the session `Kit.Session()`
   returns. The hook runs on the goroutine writing the entry, under the
@@ -1231,8 +1329,8 @@ Eleven things, all outside `agentturn.Config`:
   `session.Transcript(sess, rec.ReadOptions()...)`. The read options
   carry the recorder's blob reader, without which a sidecar session's
   transcript is refused with `session.ErrNoBlobReader`;
-  `Control.ContinueFrom` reads `session.TranscriptModels`,
-  `session.Pending` and `session.OwedNotes` with them as well.
+  `Control.ContinueFrom`'s `session.MoveTo` reads the branch with them
+  as well.
 - `Kit.LookupToolFor(ctx, name)` reads the union the provider last
   returned to the run the context belongs to, and is what the kit's
   engine is given through `agentpolicy.WithToolsFor`; `Kit.LookupTool(name)`
@@ -1268,11 +1366,13 @@ Eleven things, all outside `agentturn.Config`:
 
   so a front that names its conversations with
   `session.ContextWithSessionID` alone is several conversations, and a
-  read in one grants nothing in another. Under `WithSkillGrants` a
-  child agent `WithChildAgent` offers runs under a scope of its own, its
+  read in one grants nothing in another. Whenever the kit has an
+  engine, a child agent `WithChildAgent` offers, or a pass
+  `Kit.StartChild` starts, runs under a scope of its own, its
   conversation's and a slash and its session ID (the call's ID and a
   number without a recording), `parent+"/"+child` in the `ToolProvider`
-  block above, so its parent's skills grant it nothing. The slash makes
+  block above, so its parent's skills, and a set granted under the
+  conversation's scope, grant it nothing. The slash makes
   a name that reads well and nothing more: the kit records which scopes
   are a conversation's children when each child's run starts, so a
   grandchild under a child that read no skill is one of them, and the
@@ -1281,12 +1381,36 @@ Eleven things, all outside `agentturn.Config`:
   begins with the conversation's. A child's grants are bound to the
   user-message mark of its parent's turn, so a message the transcript's
   tail test misses ends them as it ends the parent's. Without skill
-  grants the kit puts no scope on a child, and a scope the product
-  put on the host's context, with its own grants under it, is the
-  child's. The kit forgets what it kept of a conversation's grants at
-  `Kit.RevokeSkillGrants(ctx)`, which a front calls when the
-  conversation ends, as it calls `engine.RevokeScope` for grants of its
-  own under the scope. `WithSkillGrantReport` hears every conversation's
+  grants the child has its scope all the same, and the kit records it
+  as the conversation's, so `Kit.RevokeSkillGrants` ends a set a front
+  made under it. A `WithChildAgent` child's scope is forgotten again
+  when its call is over, the call returned and its runs ended, the last
+  not on a held call, unless the engine holds a set under it or a
+  grandchild's scope is linked under it, so a conversation that is
+  never ended keeps no entry per child run; a child run again links it
+  again. A child offered with `WithChildAgent(cfg,
+  agentkit.ShareGrantScope())` runs under the conversation's scope
+  itself, `agentpolicy.ContextWithGrantScope(ctx, parent)` in the run
+  context above, and is linked to nothing; agentpolicy has no scope
+  inheritance, so the share runs both ways: the conversation's sets
+  decide the child's calls, and a skill the child reads grants to the
+  conversation, bound to the parent's user-message mark. That read and
+  its grant verdict are recorded in the child's session, and a
+  restart's regrant replays the conversation's own path, so the grant
+  is not restored: it fails closed until the skill is read again. A
+  host that wants a `Kit.StartChild` pass to share the
+  conversation's grants puts the conversation's scope on the pass's run
+  context itself. The kit forgets what it kept of a conversation's
+  grants and child scopes at `Kit.RevokeSkillGrants(ctx)`, which a
+  front calls when the conversation ends, as it calls
+  `engine.RevokeScope` for grants of its own under the scope. Beside
+  the count it returns the first revocation verdict the session would
+  not write, the engine's or the kit's own, collected through a sink on
+  the call's context that the observer finds, so the front knows the
+  journal a restart replays still says the grant is in force; a write
+  that fails after it returns, or outside any run and any such call,
+  is kept for the session and fails its next run, or comes back from
+  the next `RevokeSkillGrants`. `WithSkillGrantReport` hears every conversation's
   reads and `SkillGrant.Scope` says whose. The revocation under the
   scope records a verdict per source, `revoked the rules granted by
   <source>`, as before, and a replay also ends everything on a
@@ -1383,8 +1507,12 @@ Eleven things, all outside `agentturn.Config`:
   (`agent.WhileIdle`) to keep claim and call together. It sets the next `Config()`'s `Instructions`; a config already
   handed out keeps its own, which `partsFor` still recognises, and its
   agent takes the new one with `SetConfig` between runs, unless the
-  instructions hook re-renders each request, under `WithMemory` or
-  `WithGuards`.
+  instructions hook re-renders each request, which it does, from the
+  next request of the run in flight, under MCP servers' instructions,
+  on by default and with a tool set whenever there is a skill tool,
+  `WithMemory`, a `WithPart` part, or `WithGuards` with instructions to
+  guard. Only a kit with none of them, under `WithoutMCPInstructions`,
+  waits for `SetConfig`.
 
 - `Kit.Control(agent)` is the agent as `agentturn.Control`, with
   what a kit's agent needs around each run, from these exported calls:
@@ -1401,26 +1529,40 @@ Eleven things, all outside `agentturn.Config`:
   returned. A `Prompt` that answers pending calls with their outputs,
   and a head move that leaves them, are followed by `engine.Resumed`
   with no answers, for the calls still pending, and `engine.Forget` of
-  their run. `Queue` is `rec.Queue`, and `Deliver`, which makes the
+  their run. `Queue` is `rec.Queue`, `Deliver`, which makes the
   Control an `agentturn.Deliverer`, is `rec.Deliver(ctx, agent, items...)`,
-  `rec` being the kit's or, without one, the conversation's on ctx
-  (`agentkit.RecorderFromContext`), or `agent.Deliver` with neither. Under `WithQuestionEvents`, an
+  and `Accept`, which makes it an `agentturn.Accepter`, is
+  `rec.Accept(ctx, agent, items...)`, each writing the queued entry
+  before the agent takes the items, `rec` being the kit's or, without
+  one, the conversation's on ctx (`agentkit.RecorderFromContext`), or
+  `agent.Deliver` and `agent.Accept` with neither, all under the run
+  context above. Under `WithQuestionEvents`, an
   agent whose config has no `ToolElicitor` is given the kit's with
   `agent.SetConfig`. It hands the agent what a resumed session owes,
   `rec.Requeue(ctx, agent)`. `ContinueFrom` is
-  `kit.RevokeSkillGrants`, `rec.Rebase`, `session.TranscriptModels`,
-  `session.Pending`, `agent.SetTranscript`, `agent.SetPending`,
-  `session.OwedNotes` with `agent.SetNotes`, `kit.RegrantSkills`, a
-  leaf label from `s.MarkLeaf` written through the store's
-  `agentsession.Writer`, and `engine.Forget` of the run it leaves,
-  undone on failure. Each step that appends can be reported with
-  `Reopen`, so `s` is taken again from `rec.Store().Open` before the
-  rebase, after it, and before the label, and in the undo before each
-  of its own; a `Reopen` on the label is followed as the recorder's
-  hook follows one, the session kept being the one `Open` returns. A
-  context cancelled before the move is refused before anything moves,
-  and the undo runs under `context.WithoutCancel`, so a move cancelled
-  partway is put back in the store as well as in the agent. A pending call whose hold was recorded
+  `kit.RevokeSkillGrants`, whose error fails the move, then
+  `session.MoveTo(ctx, agent, rec, entryID)`, which rebases the record
+  and sets the agent's transcript, reasoning models, person messages,
+  pending calls and owed notes and reserves the session's call IDs
+  while `agent.WhileIdle` holds it, then, under a second
+  `agent.WhileIdle`, `kit.RegrantSkills` and a leaf label from
+  `s.MarkLeaf` written through the store's `agentsession.Writer`, and
+  `engine.Forget` of the run it leaves. The revocation stays outside
+  the holds and the regrant outside `MoveTo`'s, since `WhileIdle` does
+  not nest; a run that starts between the two holds fails the move
+  with `agentturn.ErrRunning`. The revocation's error may also carry a
+  verdict write lost between runs before it, a product's rule change,
+  which fails the move as well. A failure after the move is undone with `kit.RevokeSkillGrants`,
+  `session.MoveTo` back to the leaf it left, a leaf label there and
+  `kit.RegrantSkills`; one before it with `kit.RegrantSkills` alone.
+  Each step that appends can be reported with `Reopen`, so `s` is taken
+  again from `rec.Store().Open` after the move and before the label,
+  and in the undo before each of its own; a `Reopen` on the label is
+  followed as the recorder's hook follows one, the session kept being
+  the one `Open` returns. A context cancelled before the move is
+  refused before anything moves, and the move and the undo run under
+  `context.WithoutCancel`, so a move cancelled partway is put back in
+  the store as well as in the agent. A pending call whose hold was recorded
   before agentturn/session v0.0.23 gets its held mark and subject from
   the kit's `agentpolicy:verdict` entry for it. By hand:
 
