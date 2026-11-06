@@ -238,6 +238,32 @@ parent's recorder rather than opening a session of its own. Writing the child ag
 is exactly what `WithChildAgent` does, so reach for it only when the
 tool is not a child.
 
+## A handoff team
+
+agentturn's `handoff.Team` switches one agent between configurations
+and adds a transfer tool to each agent's offer per handoff. When the
+agents are kits, the transfers have to meet the kit's tool pipeline as
+the agents' own tools do, or a transfer the policy denies is still
+offered and a product's wrapper never sees one. The team's `Offer` is
+where that happens, once:
+
+```go
+team, err := handoff.New(
+	handoff.Agent{Config: triage.TeamConfig(), Handoffs: []handoff.To{{Agent: "Billing agent"}}},
+	handoff.Agent{Config: billing.TeamConfig()},
+)
+team.Offer = agentkit.TeamOffer(triage, billing)
+```
+
+`TeamConfig` is the kit's config with no tool provider, so the list the
+team hands `Offer` is the transfers alone, and `Kit.Offer` unions them
+with the kit's own sources, labelled `handoff`, through the filter, the
+wrappers, the duplicate check and the policy. Built from `Config()`
+instead, the kit's tools would pass the pipeline in the provider and
+again in `Offer`. A recorder the kits share takes
+`agentkit.PartsFrom(&triage, &billing)`, so each agent's instructions
+are recorded as its own parts.
+
 ## What the kit does own about all of this
 
 The tool namespace. Whatever the source, every tool goes through the

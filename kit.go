@@ -114,7 +114,11 @@ type Kit struct {
 
 	// tools is the union the config's ToolProvider reads, which a server
 	// AddMCP connects joins; nil when the kit has no tool source.
-	tools *toolSet
+	// offerTools is the same set, or an empty one with the kit's filter,
+	// wrapper and conflict report when there is no source, which
+	// Kit.Offer unions a team's transfers with.
+	tools      *toolSet
+	offerTools *toolSet
 	// mcpStderr and mcpElicit are how New dialed its servers, which
 	// AddMCP dials the same way.
 	mcpStderr io.Writer
@@ -1012,13 +1016,15 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 			live: fn,
 		})
 	}
+	ts.prepare()
+	// Kit.Offer unions a team's transfers with the kit's sources, which
+	// may be none.
+	k.offerTools = ts
 	if len(ts.sources) == 0 {
 		// Nothing to union and nothing for a policy to filter, so the
 		// field stays nil and the loop's own empty set applies.
 		return nil
 	}
-
-	ts.prepare()
 	k.tools = ts
 
 	// A collision the kit can see now is an error, because the two

@@ -499,7 +499,9 @@ and the parts function the kit's recorder takes knows both the text the
 child's run starts with and each request's render, so the child's
 config entries carry `instructions_parts`, a memory entry's labelled
 `untrusted` as the parent's are, and the child's path trust holds the
-label (agentsession RFC 0001 0.21, Instructions as parts). `WithDeferredTools` is the same again for a
+label (agentsession RFC 0001 0.21, Instructions as parts).
+
+`WithDeferredTools` is the same again for a
 tool that needs the engine, the catalogue or the session; both exist
 because the kit is what opens those, not because it wraps them.
 
@@ -523,6 +525,32 @@ Two things the kit adds that the `append` above does not:
   as they were at `New`, and through `engine.ToolProvider`'s filter
   under `kit.GrantScope` of a bare context, so a tool a bare deny takes
   off the offer is not listed.
+
+An agent of an agentturn `handoff.Team` is offered its transfers beside
+its own tools, and the team's `Offer` sees the whole list on every
+request. `Kit.TeamConfig()` is `Config()` with `ToolProvider` nil, and
+`agentkit.TeamOffer(kits...)` is the `Offer` that sends each agent's
+list through `Kit.Offer` of the kit carrying its name: the block above
+with the list as one more source, last, labelled `"handoff"`
+(`agentkit.HandoffSource`), so the filter, the wrappers, the duplicate
+check and `engine.ToolProvider` run once over the agent's tools and its
+transfers together:
+
+```go
+offer := func(ctx context.Context, _ string, transfers []agenttool.Tool) []agenttool.Tool {
+	all := append(slices.Clone(tools), transfers...) // labelled "handoff" for the filter and the wrapper
+	return engine.ToolProvider(func(context.Context) []agenttool.Tool { return all })(
+		agentpolicy.ContextWithGrantScope(ctx, scopeOf(ctx)))
+}
+cfg := kit.Config()
+cfg.ToolProvider = nil // or the kit's tools pass the pipeline in the provider and again in Offer
+team, err := handoff.New(handoff.Agent{Config: cfg, Handoffs: handoffs})
+team.Offer = offer
+```
+
+A transfer the policy denies is then not offered, and a wrapper sees
+it, which must keep its name and its result for the call to hand off
+(agentturn RFC 0001, Composition).
 
 ## `BeforeModelCall`, in full
 

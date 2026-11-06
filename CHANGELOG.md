@@ -88,6 +88,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   both ways: the conversation's sets decide the child's calls, and a
   skill the child reads grants to the conversation (#120).
 
+- `Kit.TeamConfig`, `Kit.Offer` and `TeamOffer(kits...)` put an
+  agentturn `handoff.Team` of kits through the kit's tool pipeline:
+  `team.Offer = agentkit.TeamOffer(triage, billing)` sends each agent's
+  transfers, under the source `HandoffSource` ("handoff"), through the
+  kit's `WithToolFilter`, `WithToolWrap`, duplicate check and policy
+  filter beside its own tools, once, since `TeamConfig` is the kit's
+  config without its `ToolProvider`. A transfer the policy denies is no
+  longer offered, and a wrapper reaches it (agentturn#307, #118).
+
 ### Fixed
 
 - `Kit.ReloadSkills`'s doc said the new catalogue reached the run in
