@@ -2758,3 +2758,67 @@ func TestAReadThatGrantsNothingStillEndsTheRefusal(t *testing.T) {
 		})
 	}
 }
+
+// ReloadSkills reaches the next request of the run that reloaded when the
+// kit renders its instructions each request, which a kit offering MCP
+// servers' instructions does by default, and a kit that does not waits
+// for SetConfig between runs. (#123)
+func TestReloadSkillsReachesTheNextRequestOfTheRun(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		opts     []agentkit.Option
+		inTheRun bool
+	}{
+		{"by default", nil, true},
+		{"WithoutMCPInstructions", []agentkit.Option{agentkit.WithoutMCPInstructions()}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "existing", "Read")
+			var kit *agentkit.Kit
+			learn := agenttool.New("learn", "writes a skill", func(ctx context.Context, _ struct{}) (string, error) {
+				skillWithTools(t, skills, "learned-deploy", "Read")
+				if err := kit.ReloadSkills(ctx); err != nil {
+					return "", err
+				}
+				return "learned", nil
+			})
+			model := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("learn", `{}`)}}
+			var err error
+			kit, err = agentkit.New(t.Context(), append([]agentkit.Option{
+				agentkit.WithModel(model, "m"),
+				agentkit.WithSkills(skills),
+				agentkit.WithTools(learn),
+			}, tc.opts...)...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer kit.Close()
+			agent := agentturn.New(kit.Config())
+			if _, err := agent.Prompt(t.Context(), openresponses.UserText("learn a skill")); err != nil {
+				t.Fatal(err)
+			}
+			reqs := model.requests()
+			if len(reqs) != 2 {
+				t.Fatalf("%d requests, want 2", len(reqs))
+			}
+			if strings.Contains(reqs[0].Instructions, "learned-deploy") {
+				t.Fatal("the first request names a skill written after it")
+			}
+			if got := strings.Contains(reqs[1].Instructions, "learned-deploy"); got != tc.inTheRun {
+				t.Fatalf("the next request of the run names the reloaded skill: %v, want %v", got, tc.inTheRun)
+			}
+			if tc.inTheRun {
+				return
+			}
+			if err := agent.SetConfig(kit.Config()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := agent.Prompt(t.Context(), openresponses.UserText("again")); err != nil {
+				t.Fatal(err)
+			}
+			if reqs := model.requests(); !strings.Contains(reqs[len(reqs)-1].Instructions, "learned-deploy") {
+				t.Fatal("after SetConfig the next run does not name the reloaded skill")
+			}
+		})
+	}
+}

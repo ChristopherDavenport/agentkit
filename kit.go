@@ -3032,12 +3032,16 @@ const earlierConfigs = 8
 // while calls are being decided reloads between runs, with
 // [agentturn.Agent.WhileIdle], to keep the two together. The skills part of the
 // instructions is the new catalogue's, and [Kit.Omitted] its omissions,
-// from the next request of a kit that renders its instructions each
-// request, under [WithMemory] or [WithGuards]; otherwise from the next
-// run of an agent given the new [Kit.Config], with SetConfig between
-// runs, since a config is a value and the loop sends its instructions
-// as they are. Either way the recorder writes the new part as a config
-// delta, and the provider's prefix cache misses from that part on.
+// from the next request, of the run in flight too, of a kit that renders
+// its instructions each request: one with MCP servers' instructions on,
+// the default, which a kit with a skill tool has a tool set for, or one
+// with [WithMemory], a [WithPart] part, or [WithGuards] beside
+// instructions to guard. A kit with none of them, under
+// [WithoutMCPInstructions], sends them from the next run of an agent
+// given the new [Kit.Config], with SetConfig between runs, since a
+// config is a value and the loop sends its instructions as they are.
+// Either way the recorder writes the new part as a config delta, and
+// the provider's prefix cache misses from that part on.
 //
 // Grants already made stand, by the rules they were made with. A read
 // after the reload grants by the new catalogue's rules, and a restart's

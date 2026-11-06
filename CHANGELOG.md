@@ -28,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `openresponses`' `insufficient_quota` is no longer retried by the
   loop's default.
 
+### Fixed
+
+- `Kit.ReloadSkills`'s doc said the new catalogue reached the run in
+  flight only under `WithMemory` or `WithGuards`. The kit renders its
+  instructions each request whenever MCP servers' instructions are on,
+  the default, as well as under `WithMemory`, a `WithPart` part or
+  guards, so a reload reaches the next request of the run; only a kit
+  under `WithoutMCPInstructions` with none of the others waits for
+  `SetConfig`. The doc and the manual say both (#123).
+
 ## v0.0.16 - 2026-11-03
 
 ### Changed

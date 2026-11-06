@@ -1383,8 +1383,12 @@ Eleven things, all outside `agentturn.Config`:
   (`agent.WhileIdle`) to keep claim and call together. It sets the next `Config()`'s `Instructions`; a config already
   handed out keeps its own, which `partsFor` still recognises, and its
   agent takes the new one with `SetConfig` between runs, unless the
-  instructions hook re-renders each request, under `WithMemory` or
-  `WithGuards`.
+  instructions hook re-renders each request, which it does, from the
+  next request of the run in flight, under MCP servers' instructions,
+  on by default and with a tool set whenever there is a skill tool,
+  `WithMemory`, a `WithPart` part, or `WithGuards` with instructions to
+  guard. Only a kit with none of them, under `WithoutMCPInstructions`,
+  waits for `SetConfig`.
 
 - `Kit.Control(agent)` is the agent as `agentturn.Control`, with
   what a kit's agent needs around each run, from these exported calls:
