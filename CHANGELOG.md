@@ -50,6 +50,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   scope on a child without skill grants, stale since #109, say what it
   does.
 
+- `Control.ContinueFrom` moves the head with agentturn/session's
+  `session.MoveTo`, which holds the agent through `Agent.WhileIdle`
+  while it rebases the record and sets the agent's state, so a run that
+  starts after the check no longer runs during the move (#116). The
+  move now also reserves the session's call IDs and gives the agent the
+  branch's reasoning models and the person's messages, which
+  `Control` carried on each run's context and lost respectively; the
+  kit's revocation, regrant and leaf label stay outside the hold. A
+  revocation the session would not record fails the move and puts the
+  grants back (#117). A failure after the move goes back with
+  `session.MoveTo` to the leaf it left, which reads the agent's state
+  there from the record.
+
 ### Fixed
 
 - `Kit.ReloadSkills`'s doc said the new catalogue reached the run in

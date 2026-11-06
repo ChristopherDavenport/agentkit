@@ -369,3 +369,32 @@ func TestControlContinueFromRebasesAfterARevocationsReopen(t *testing.T) {
 		t.Errorf("verify records: %v", err)
 	}
 }
+
+// A head move holds the agent while it moves the record and the
+// agent's state, so no run starts between the check and the move: the
+// kit ran its own open, rebase, read and set, with the agent free to
+// start a run at any step, where session.MoveTo holds it through
+// Agent.WhileIdle. (#116)
+func TestControlContinueFromHoldsTheAgentDuringTheMove(t *testing.T) {
+	store := newReopenStore(func(agentsession.Entry) bool { return false })
+	_, ctl, first := reopenedKit(t, store)
+	saw, held := false, false
+	store.fail = func(e agentsession.Entry) error {
+		if rewindEnd(e) {
+			saw, held = true, ctl.State().Held
+		}
+		return nil
+	}
+	if err := ctl.ContinueFrom(t.Context(), first); err != nil {
+		t.Fatalf("continue from the first prompt: %v", err)
+	}
+	if !saw {
+		t.Fatal("the move wrote no rewind end")
+	}
+	if !held {
+		t.Fatal("the agent was not held while the rebase appended")
+	}
+	if ctl.State().Held {
+		t.Fatal("the agent is still held after the move")
+	}
+}

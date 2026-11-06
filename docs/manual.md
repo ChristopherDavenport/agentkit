@@ -1233,8 +1233,8 @@ Eleven things, all outside `agentturn.Config`:
   `session.Transcript(sess, rec.ReadOptions()...)`. The read options
   carry the recorder's blob reader, without which a sidecar session's
   transcript is refused with `session.ErrNoBlobReader`;
-  `Control.ContinueFrom` reads `session.TranscriptModels`,
-  `session.Pending` and `session.OwedNotes` with them as well.
+  `Control.ContinueFrom`'s `session.MoveTo` reads the branch with them
+  as well.
 - `Kit.LookupToolFor(ctx, name)` reads the union the provider last
   returned to the run the context belongs to, and is what the kit's
   engine is given through `agentpolicy.WithToolsFor`; `Kit.LookupTool(name)`
@@ -1425,19 +1425,25 @@ Eleven things, all outside `agentturn.Config`:
   agent whose config has no `ToolElicitor` is given the kit's with
   `agent.SetConfig`. It hands the agent what a resumed session owes,
   `rec.Requeue(ctx, agent)`. `ContinueFrom` is
-  `kit.RevokeSkillGrants`, `rec.Rebase`, `session.TranscriptModels`,
-  `session.Pending`, `agent.SetTranscript`, `agent.SetPending`,
-  `session.OwedNotes` with `agent.SetNotes`, `kit.RegrantSkills`, a
-  leaf label from `s.MarkLeaf` written through the store's
-  `agentsession.Writer`, and `engine.Forget` of the run it leaves,
-  undone on failure. Each step that appends can be reported with
-  `Reopen`, so `s` is taken again from `rec.Store().Open` before the
-  rebase, after it, and before the label, and in the undo before each
-  of its own; a `Reopen` on the label is followed as the recorder's
-  hook follows one, the session kept being the one `Open` returns. A
-  context cancelled before the move is refused before anything moves,
-  and the undo runs under `context.WithoutCancel`, so a move cancelled
-  partway is put back in the store as well as in the agent. A pending call whose hold was recorded
+  `kit.RevokeSkillGrants`, whose error fails the move, then
+  `session.MoveTo(ctx, agent, rec, entryID)`, which rebases the record
+  and sets the agent's transcript, reasoning models, person messages,
+  pending calls and owed notes and reserves the session's call IDs
+  while `agent.WhileIdle` holds it, then `kit.RegrantSkills`, a leaf
+  label from `s.MarkLeaf` written through the store's
+  `agentsession.Writer`, and `engine.Forget` of the run it leaves. The
+  kit's own steps stay outside the hold, since `WhileIdle` does not
+  nest. A failure after the move is undone with `kit.RevokeSkillGrants`,
+  `session.MoveTo` back to the leaf it left, a leaf label there and
+  `kit.RegrantSkills`; one before it with `kit.RegrantSkills` alone.
+  Each step that appends can be reported with `Reopen`, so `s` is taken
+  again from `rec.Store().Open` after the move and before the label,
+  and in the undo before each of its own; a `Reopen` on the label is
+  followed as the recorder's hook follows one, the session kept being
+  the one `Open` returns. A context cancelled before the move is
+  refused before anything moves, and the move and the undo run under
+  `context.WithoutCancel`, so a move cancelled partway is put back in
+  the store as well as in the agent. A pending call whose hold was recorded
   before agentturn/session v0.0.23 gets its held mark and subject from
   the kit's `agentpolicy:verdict` entry for it. By hand:
 

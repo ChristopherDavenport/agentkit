@@ -208,3 +208,66 @@ func TestAVerdictLostBetweenRunsFailsTheNextRun(t *testing.T) {
 		t.Fatalf("the run after it failed too: %v", err)
 	}
 }
+
+// A head move whose revocation the session would not record fails, and
+// leaves the head, the agent and the grant where they were: the branch
+// left would say the grant is still in force, and a move that went on
+// ignored it. (#116, #117)
+func TestControlContinueFromFailsOnALostRevocation(t *testing.T) {
+	skills := skillWithTools(t, filepath.Join(t.TempDir(), "skills"), "digging", "danger")
+	refuse := &atomic.Bool{}
+	store := switchStore{agentsession.NewMemoryStore(), refuse}
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn(agentskill.ToolName, `{"name":"digging"}`)}}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(model, "test-model"),
+		agentkit.WithTools(counting("danger", &atomic.Int32{})),
+		agentkit.WithSkills(skills),
+		agentkit.WithPolicy(agentpolicy.Policy{Allow: policyRules(t, "skill"), Default: agentpolicy.Ask()}, nil),
+		agentkit.WithSkillGrants(trustedSkills),
+		agentkit.WithSession(store, agentsession.Header{Records: agentsession.AllRecords}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
+	defer kit.Attach(agent)()
+	ctl, err := kit.Control(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctl.Prompt(t.Context(), openresponses.UserText("learn")); err != nil {
+		t.Fatal(err)
+	}
+	grants := func() int {
+		ctx := agentpolicy.ContextWithGrantScope(t.Context(), kit.GrantScope(ctl.RunContext(t.Context())))
+		return len(kit.Engine().GrantsFor(ctx))
+	}
+	if grants() == 0 {
+		t.Fatal("no grant after the read")
+	}
+	var user string
+	for _, e := range kit.Session().Entries() {
+		if it, ok := e.(*agentsession.ItemEntry); ok {
+			if m, ok := it.Item.(*openresponses.Message); ok && m.Role == openresponses.RoleUser {
+				user = e.Base().ID
+				break
+			}
+		}
+	}
+	leaf, items := kit.Session().Leaf(), len(ctl.State().Transcript)
+	refuse.Store(true)
+	if err := ctl.ContinueFrom(t.Context(), user); !errors.Is(err, errNoVerdicts) {
+		t.Fatalf("the move returned %v, want the revocation the store refused", err)
+	}
+	refuse.Store(false)
+	if got := kit.Session().Leaf(); got != leaf {
+		t.Fatalf("the leaf is %s after the failed move, want %s", got, leaf)
+	}
+	if n := len(ctl.State().Transcript); n != items {
+		t.Fatalf("the transcript has %d items after the failed move, want %d", n, items)
+	}
+	if grants() == 0 {
+		t.Fatal("the grant was not put back after the failed move")
+	}
+}
