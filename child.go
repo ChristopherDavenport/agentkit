@@ -110,6 +110,8 @@ func WithChild(cfg agentturn.Config, opts ...ChildOption) Option {
 type childComposition struct {
 	own  []Part
 	want map[string]bool
+	// pinned is a composition made during New, which is never evicted.
+	pinned bool
 
 	firsts      [][]Part
 	firstOmits  [][]Omission
@@ -117,9 +119,26 @@ type childComposition struct {
 	lastOmitted []Omission
 }
 
-// childCompositions bounds the compositions the kit recognises: one per
-// distinct prompt and set of parts [Kit.ChildConfig] was asked for.
+// childCompositions bounds the runtime compositions the kit
+// recognises, one per distinct prompt and set of parts [Kit.ChildConfig]
+// was asked for after [New]. Those made during New, a [WithChildAgent]
+// child's with [ChildParts] or a [WithDeferredTools] tool's, are pinned
+// and not counted.
 const childCompositions = 64
+
+// touchChild marks the runtime composition under key as just asked for:
+// last in recent, and past the bound the one asked for least recently
+// is forgotten. The caller holds mu.
+func (k *Kit) touchChild(key string) {
+	if i := slices.Index(k.recent, key); i >= 0 {
+		k.recent = slices.Delete(k.recent, i, i+1)
+	}
+	k.recent = append(k.recent, key)
+	if len(k.recent) > childCompositions {
+		delete(k.children, k.recent[0])
+		k.recent = slices.Delete(k.recent, 0, 1)
+	}
+}
 
 // ChildConfig returns cfg with its instructions composed from parts:
 // cfg.Instructions as the child's own prompt, the part [PartProduct]
@@ -146,6 +165,15 @@ const childCompositions = 64
 // render, so a recorder whose parts function is the kit's records the
 // child's config entries as parts; under a recorder several kits share
 // [PartsFrom] names this one.
+//
+// The kit recognises every composition made during [New], a
+// [WithChildAgent] child's with [ChildParts] or one a
+// [WithDeferredTools] function asked for, and of those made since, the
+// 64 asked for most recently: past that, the one asked for least
+// recently is forgotten, and a child still running on it is recorded
+// with its instructions as one string. A product that composes per call
+// keeps the prompt and ids the same across calls, which asks for one
+// composition, not one each.
 //
 // ids are group IDs the kit orders: [PartProduct], [PartSkills],
 // [PartMCP], [PartMemory], agentsmd.PartID and the [WithPart] ids. An
@@ -181,11 +209,14 @@ func (k *Kit) ChildConfig(cfg agentturn.Config, ids ...string) (agentturn.Config
 	omitted := k.childOmitted(want, k.partOmitted, k.mcpOmitted, k.memOmitted)
 	c := k.children[key]
 	if c == nil {
-		if k.children == nil || len(k.children) >= childCompositions {
+		if k.children == nil {
 			k.children = map[string]*childComposition{}
 		}
-		c = &childComposition{own: own, want: want}
+		c = &childComposition{own: own, want: want, pinned: !k.built}
 		k.children[key] = c
+	}
+	if !c.pinned {
+		k.touchChild(key)
 	}
 	if c.first(agentsession.JoinInstructions(first)) == nil {
 		c.firsts = append(c.firsts, first)

@@ -2,6 +2,7 @@ package agentkit_test
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -184,5 +185,71 @@ func TestChildConfigRefusesAPartItCannotCompose(t *testing.T) {
 	}
 	if cfg.Instructions != "Be the parent." {
 		t.Errorf("a child with no prompt of its own given the product part has instructions %q", cfg.Instructions)
+	}
+}
+
+// The compositions a WithChildAgent child made at New are pinned: past
+// the bound on runtime compositions, ChildConfig evicts the runtime one
+// asked for least recently, and the child New composed is still
+// recognised, so its run records its instructions as parts. (agentkit
+// l6-5b review M1; agentsession RFC 0001 0.21, Instructions as parts)
+func TestChildConfigKeepsNewsChildPastTheRuntimeBound(t *testing.T) {
+	store := memStore(t, agentmemory.Entry{Scope: "user", Name: "likes-tea", Content: "tea, not coffee"})
+	sessions := agentsession.NewMemoryStore()
+	child := &scriptModel{}
+	parent := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("explore", `{"input":"look"}`)}}
+
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(parent, "test-model"),
+		agentkit.WithInstructions("Be the parent."),
+		agentkit.WithMemory(store, "user"),
+		agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
+		agentkit.WithChild(agentturn.Config{
+			Name:         "explore",
+			Description:  "delegate",
+			Instructions: "Explore.",
+			Model:        child,
+			ModelName:    "test-model",
+		}, agentkit.ChildParts(agentkit.PartMemory)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+
+	var runtime []string
+	for i := range 65 {
+		cfg, err := kit.ChildConfig(agentturn.Config{Name: "c", Instructions: fmt.Sprintf("Child %d.", i)}, agentkit.PartMemory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime = append(runtime, cfg.Instructions)
+	}
+	if p, _ := kit.PartsFor(t.Context(), openresponses.Request{Instructions: runtime[0]}); p != nil {
+		t.Error("the runtime composition asked for least recently is still recognised past the bound")
+	}
+	for _, i := range []int{1, 64} {
+		if p, _ := kit.PartsFor(t.Context(), openresponses.Request{Instructions: runtime[i]}); p == nil {
+			t.Errorf("runtime composition %d is forgotten, want only the oldest evicted", i)
+		}
+	}
+
+	agent := agentturn.New(kit.Config())
+	defer kit.Attach(agent)()
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("go")); err != nil {
+		t.Fatal(err)
+	}
+	s := openSession(t, sessions, agentsession.SubsessionID(kit.SessionID(), "call-explore"))
+	var own, entry bool
+	for _, p := range partsOf(s) {
+		switch {
+		case p.ID == agentkit.PartProduct && p.Text == "Explore.":
+			own = true
+		case p.Source == agentkit.SourceMemory && strings.Contains(p.Text, "tea, not coffee"):
+			entry = hasLabel(p.Trust, "untrusted")
+		}
+	}
+	if !own || !entry {
+		t.Fatalf("after 65 runtime compositions the New child's session records parts %+v, want its own prompt (%v) and the untrusted memory entry (%v)", partsOf(s), own, entry)
 	}
 }

@@ -193,8 +193,14 @@ type Kit struct {
 	// config still starts its runs with.
 	earlier [][]Part
 	// children are the compositions Kit.ChildConfig made, by the child's
-	// prompt and the groups it takes, which PartsFor recognises.
+	// prompt and the groups it takes, which PartsFor recognises. Those
+	// made during New are pinned; recent holds the keys of the runtime
+	// ones, least recently asked for first, bounded by childCompositions.
 	children map[string]*childComposition
+	recent   []string
+	// built is set when New returns: a composition made after it is a
+	// runtime one.
+	built bool
 	// reload re-discovers the skills for ReloadSkills, over the sources
 	// New was given; nil without skills.
 	reload func() (*agentskill.Catalog, Part, []Omission, error)
@@ -436,6 +442,9 @@ func New(ctx context.Context, opts ...Option) (*Kit, error) {
 		k.grants.regrant(agentpolicy.ContextWithGrantScope(ctx, k.resumeScope(ctx, k.rec, "")), sess, k.grants.scoped, opts...)
 		k.grants.gmu.Unlock()
 	}
+	k.mu.Lock()
+	k.built = true
+	k.mu.Unlock()
 	return k, nil
 }
 

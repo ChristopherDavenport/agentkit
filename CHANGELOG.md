@@ -80,7 +80,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   recorder writes its config entries as parts and a memory entry's
   `untrusted` label reaches its path trust, as agentsession RFC 0001
   0.21 asks of a writer composing instructions from a layer of known
-  trust. `WithChild(cfg, ...ChildOption)` offers such a child:
+  trust. The kit keeps every composition made during `New` and the 64
+  runtime ones asked for most recently, so calls with ever-new prompts
+  do not make a `WithChild` child's run record one string (#122).
+  `WithChild(cfg, ...ChildOption)` offers such a child:
   `ChildParts(ids...)` composes it, and `ChildAgentOptions(...)` passes
   agentturn's options; `WithChildAgent(cfg, opts...)` is
   `WithChild(cfg, ChildAgentOptions(opts...))`, unchanged (#122).
