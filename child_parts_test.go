@@ -49,7 +49,7 @@ func TestChildAgentRecordsTheMemoryPartWithItsTrust(t *testing.T) {
 		agentkit.WithInstructions("Be the parent."),
 		agentkit.WithMemory(store, "user"),
 		agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
-		agentkit.WithChild(agentturn.Config{
+		agentkit.WithChildAgent(agentturn.Config{
 			Name:         "explore",
 			Description:  "delegate",
 			Instructions: "Explore.",
@@ -204,7 +204,7 @@ func TestChildConfigKeepsNewsChildPastTheRuntimeBound(t *testing.T) {
 		agentkit.WithInstructions("Be the parent."),
 		agentkit.WithMemory(store, "user"),
 		agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
-		agentkit.WithChild(agentturn.Config{
+		agentkit.WithChildAgent(agentturn.Config{
 			Name:         "explore",
 			Description:  "delegate",
 			Instructions: "Explore.",

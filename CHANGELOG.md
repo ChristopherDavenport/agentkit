@@ -50,6 +50,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   scope on a child without skill grants, stale since #109, say what it
   does.
 
+- **Breaking**: `WithChildAgent(cfg, ...ChildOption)` takes the kit's
+  choices for the child, `ChildParts`, `ShareGrantScope` and
+  `ChildAgentOptions`, where it took agentturn/tools/agent's
+  `childagent.Option`s; those go in through
+  `agentkit.ChildAgentOptions(...)`, still applied after the kit's own.
+  A caller that passed options wraps them:
+  `WithChildAgent(cfg, childagent.WithAskParent())` becomes
+  `WithChildAgent(cfg, agentkit.ChildAgentOptions(childagent.WithAskParent()))`;
+  one that passed none is unchanged (#122, #120).
+
 - `Control.ContinueFrom` moves the head with agentturn/session's
   `session.MoveTo`, which holds the agent through `Agent.WhileIdle`
   while it rebases the record and sets the agent's state, so a run that
@@ -82,13 +92,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   0.21 asks of a writer composing instructions from a layer of known
   trust. The kit keeps every composition made during `New` and the 64
   runtime ones asked for most recently, so calls with ever-new prompts
-  do not make a `WithChild` child's run record one string (#122).
-  `WithChild(cfg, ...ChildOption)` offers such a child:
-  `ChildParts(ids...)` composes it, and `ChildAgentOptions(...)` passes
-  agentturn's options; `WithChildAgent(cfg, opts...)` is
-  `WithChild(cfg, ChildAgentOptions(opts...))`, unchanged (#122).
+  do not make a `WithChildAgent` child's run record one string.
+  `WithChildAgent(cfg, agentkit.ChildParts(ids...))` offers such a
+  child (#122).
 
-- `ShareGrantScope()`, a `WithChild` option, runs the child under its
+- `ShareGrantScope()`, a `WithChildAgent` option, runs the child under its
   conversation's grant scope rather than one of its own, keeping the
   kit's recorder, memory session and user-message mark bindings, which
   a product's own `childagent.WithRunContext` drops, and links no child

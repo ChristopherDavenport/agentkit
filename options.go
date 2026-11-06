@@ -993,31 +993,69 @@ func WithDeferredTools(fn func(*Kit) []agenttool.Tool) Option {
 // bindings are the reason this option exists rather than the child
 // going in through [WithTools]: the recorder does not exist until [New]
 // has opened the session, so a product doing this by hand reaches for
-// [WithDeferredTools] and a nil check. The caller's own options are
-// applied after the kit's, so passing childagent.WithObserver or
-// childagent.WithRunContext here still wins (an observer of the
+// [WithDeferredTools] and a nil check.
+//
+// opts are the kit's choices for the child: [ChildParts],
+// [ShareGrantScope], and [ChildAgentOptions], which passes
+// agentturn/tools/agent's own options to the child's tool. Those are
+// applied after the kit's, so a childagent.WithObserver or
+// childagent.WithRunContext given through it still wins (an observer of the
 // product's keeps the child's scope until RevokeSkillGrants, since the
 // kit then cannot see the child's runs end), and a run context of the
 // product's that does not give the child a grant scope leaves it under
 // its parent's, without the kit's other bindings. A child meant to share
-// its conversation's grants is offered with [WithChild] and
-// [ShareGrantScope], which keeps them.
+// its conversation's grants is offered with [ShareGrantScope], which
+// keeps them.
 //
 // The kit cannot do the same for the parent's own run, whose context
 // is the host's: a host that wants the parent's memory writes to name
 // its session prompts with agentmemory.WithSession(ctx, kit.SessionID()).
 //
 // The child's instructions are cfg's, one string the kit does not
-// touch. A child that should see the conversation's memory, its
-// AGENTS.md or another of the kit's parts is offered with [WithChild]
-// and [ChildParts], which compose them with [Kit.ChildConfig], each part
+// touch, unless [ChildParts] is given: a child that should see the
+// conversation's memory, its AGENTS.md or another of the kit's parts
+// takes them through it, composed with [Kit.ChildConfig], each part
 // recorded with its source and trust.
 //
 // The child is an ordinary [agenttool.Tool] in every other way: it
-// joins the set where [WithTools] puts it, the policy filters it, and a
-// name it shares with another tool is a [Conflict].
-func WithChildAgent(cfg agentturn.Config, opts ...childagent.Option) Option {
-	return WithChild(cfg, ChildAgentOptions(opts...))
+// joins the set where [WithTools] puts it, under the source label
+// "WithChildAgent #<n> <name>" a [WithToolFilter] or a [WithToolWrap]
+// reads, the policy filters it, and a name it shares with another tool
+// is a [Conflict].
+//
+//	agentkit.WithChildAgent(exploreCfg,
+//		agentkit.ChildParts(agentkit.PartMemory),
+//		agentkit.ChildAgentOptions(childagent.WithAskParent()))
+func WithChildAgent(cfg agentturn.Config, opts ...ChildOption) Option {
+	var c childSettings
+	for _, o := range opts {
+		if o != nil {
+			o(&c)
+		}
+	}
+	return func(s *settings) {
+		s.deferTools = append(s.deferTools, deferred{
+			kind: "WithChildAgent",
+			name: cfg.Name,
+			fn: func(k *Kit) ([]agenttool.Tool, error) {
+				cfg := cfg
+				if len(c.parts) > 0 {
+					var err error
+					if cfg, err = k.ChildConfig(cfg, c.parts...); err != nil {
+						return nil, err
+					}
+				}
+				// A fresh slice: appending to the caller's options would
+				// grow their array and make two child agents share it.
+				all := make([]childagent.Option, 0, len(c.opts)+2)
+				all = append(all,
+					childagent.WithObserver(k.observeChildCall),
+					childagent.WithRunContext(k.childContext(c.share)))
+				all = append(all, c.opts...)
+				return []agenttool.Tool{k.childTool(childagent.New(cfg, all...))}, nil
+			},
+		})
+	}
 }
 
 // WithPolicy builds a policy engine from p and the matchers, and wires
@@ -1407,7 +1445,7 @@ func (k *Kit) observeChild(ctx context.Context, ev agentturn.Event) {
 	}
 }
 
-// childCall is what the kit keeps of one call of a [WithChild] child's
+// childCall is what the kit keeps of one call of a [WithChildAgent] child's
 // tool, [Kit.childTool]: the grant scope its run context linked under
 // the conversation's, claimed by the first run context made under the
 // call, the call's own, so a detached grandchild's, made on its
@@ -1446,7 +1484,7 @@ func (c *childCall) over() (parent, scope string, ok bool) {
 	return c.parent, c.scope, c.returned && c.seen && c.running == 0 && !c.held && c.scope != ""
 }
 
-// childTool is a [WithChild] child's tool as the kit offers it: the
+// childTool is a [WithChildAgent] child's tool as the kit offers it: the
 // same tool, [agenttool.Wrap], whose calls each carry a [childCall], so
 // the scope a call linked is forgotten when the call is over.
 func (k *Kit) childTool(t agenttool.Tool) agenttool.Tool {
@@ -1461,7 +1499,7 @@ func (k *Kit) childTool(t agenttool.Tool) agenttool.Tool {
 	})
 }
 
-// observeChildCall is the observer [WithChild] gives a child: the
+// observeChildCall is the observer [WithChildAgent] gives a child: the
 // recording [Kit.observeChild] makes, and the call's runs, counted so
 // the call's scope is forgotten when the last ends after the call
 // returned, as a detached child's does.

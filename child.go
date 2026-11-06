@@ -7,13 +7,12 @@ import (
 	"strings"
 
 	"github.com/ChristopherDavenport/agentsession"
-	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
 	childagent "github.com/ChristopherDavenport/agentturn/tools/agent"
 	"github.com/ChristopherDavenport/openresponses"
 )
 
-// ChildOption is a choice the kit makes for one child [WithChild]
+// ChildOption is a choice the kit makes for one child [WithChildAgent]
 // offers. agentturn's own options for the child's tool go in through
 // [ChildAgentOptions].
 type ChildOption func(*childSettings)
@@ -26,8 +25,7 @@ type childSettings struct {
 
 // ChildAgentOptions passes agentturn/tools/agent's options to the
 // child's tool, after the kit's own, so a childagent.WithObserver or
-// childagent.WithRunContext given here still wins, as it does through
-// [WithChildAgent].
+// childagent.WithRunContext given here still wins over the kit's.
 func ChildAgentOptions(opts ...childagent.Option) ChildOption {
 	return func(c *childSettings) { c.opts = append(c.opts, opts...) }
 }
@@ -61,45 +59,6 @@ func ChildParts(ids ...string) ChildOption {
 // what the child was granted as the conversation's own.
 func ShareGrantScope() ChildOption {
 	return func(c *childSettings) { c.share = true }
-}
-
-// WithChild is [WithChildAgent] with the kit's own choices for the child
-// beside agentturn's: [ChildParts], [ShareGrantScope] and
-// [ChildAgentOptions].
-// WithChildAgent(cfg, opts...) is WithChild(cfg, ChildAgentOptions(opts...)),
-// and everything WithChildAgent says holds here. The tool's source label
-// is the same, "WithChildAgent #<n> <name>", so a [WithToolFilter] or a
-// [WithToolWrap] reads one child as it reads the other.
-func WithChild(cfg agentturn.Config, opts ...ChildOption) Option {
-	var c childSettings
-	for _, o := range opts {
-		if o != nil {
-			o(&c)
-		}
-	}
-	return func(s *settings) {
-		s.deferTools = append(s.deferTools, deferred{
-			kind: "WithChildAgent",
-			name: cfg.Name,
-			fn: func(k *Kit) ([]agenttool.Tool, error) {
-				cfg := cfg
-				if len(c.parts) > 0 {
-					var err error
-					if cfg, err = k.ChildConfig(cfg, c.parts...); err != nil {
-						return nil, err
-					}
-				}
-				// A fresh slice: appending to the caller's options would
-				// grow their array and make two child agents share it.
-				all := make([]childagent.Option, 0, len(c.opts)+2)
-				all = append(all,
-					childagent.WithObserver(k.observeChildCall),
-					childagent.WithRunContext(k.childContext(c.share)))
-				all = append(all, c.opts...)
-				return []agenttool.Tool{k.childTool(childagent.New(cfg, all...))}, nil
-			},
-		})
-	}
 }
 
 // childComposition is one composition [Kit.ChildConfig] made: the
@@ -180,7 +139,7 @@ func (k *Kit) touchChild(key string) {
 // id the kit does not order is refused, and so is [PartProduct] beside
 // a prompt of the child's own, which would be two parts under one ID; a
 // child with no prompt of its own may take the parent's. A group that
-// is configured and empty adds nothing. [WithChild] with [ChildParts]
+// is configured and empty adds nothing. [WithChildAgent] with [ChildParts]
 // calls it for a [WithChildAgent] child; a product building its own
 // child's tool calls it from [WithDeferredTools].
 func (k *Kit) ChildConfig(cfg agentturn.Config, ids ...string) (agentturn.Config, error) {

@@ -475,7 +475,7 @@ or `New`'s, together.
 `WithObserver` and `WithRunContext` to the run's recorder, the memory
 bridge only when `WithMemory` is configured, and adds nothing else, so a
 product that builds its own child hands it to `WithTools` and the
-result is the same tool. `WithChild(childCfg, agentkit.ChildParts(ids...))`
+result is the same tool. `WithChildAgent(childCfg, agentkit.ChildParts(ids...))`
 is the same line with `childCfg` replaced by
 `kit.ChildConfig(childCfg, ids...)`, which a product building its own
 child calls from `WithDeferredTools`, the kit being what holds the
@@ -1350,7 +1350,7 @@ Eleven things, all outside `agentturn.Config`:
   not on a held call, unless the engine holds a set under it or a
   grandchild's scope is linked under it, so a conversation that is
   never ended keeps no entry per child run; a child run again links it
-  again. A child offered with `WithChild(cfg,
+  again. A child offered with `WithChildAgent(cfg,
   agentkit.ShareGrantScope())` runs under the conversation's scope
   itself, `agentpolicy.ContextWithGrantScope(ctx, parent)` in the run
   context above, and is linked to nothing; agentpolicy has no scope

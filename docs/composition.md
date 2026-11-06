@@ -170,7 +170,7 @@ one per child run, and a set it makes under a scope after that is its
 own to revoke with `engine.RevokeScope`.
 
 A child that should act on the conversation's grants is offered with
-`WithChild(cfg, agentkit.ShareGrantScope())`: it runs under the
+`WithChildAgent(cfg, agentkit.ShareGrantScope())`: it runs under the
 conversation's scope, with the recorder, memory and mark bindings kept,
 and no scope of its own is linked. agentpolicy decides a call against
 the unscoped sets and its context's scope alone, with no inheritance,
@@ -182,15 +182,16 @@ that sees its parent's grants and keeps its own reads to itself needs
 scope inheritance in agentpolicy first.
 
 The child's instructions are its config's own string unless it asks
-for the kit's parts. `WithChild` is `WithChildAgent` with the kit's
-choices for the child beside agentturn's; `ChildParts` composes the
+for the kit's parts. `WithChildAgent` takes the kit's choices for the
+child, and agentturn's own options through `ChildAgentOptions`;
+`ChildParts` composes the
 child's prompt and the parts it names with `Kit.ChildConfig`, so a
 child that should know the conversation's memory or its AGENTS.md
 gets them rendered for each of its requests and recorded as parts,
 each with its source and trust:
 
 ```go
-agentkit.WithChild(exploreCfg,
+agentkit.WithChildAgent(exploreCfg,
 	agentkit.ChildParts(agentkit.PartMemory, agentsmd.PartID),
 	agentkit.ChildAgentOptions(childagent.WithAskParent()))
 ```
@@ -202,8 +203,9 @@ string the product copied in would carry no label.
 The recorder does not exist until `New` has opened the session, so
 those bindings are not something a product can do in the option list
 — which is the whole reason this is an option and a peer is not. The
-caller's own `childagent.Option`s are applied after the kit's, so
-passing an observer or a run context still wins.
+caller's own `childagent.Option`s, given through
+`agentkit.ChildAgentOptions`, are applied after the kit's, so passing
+an observer or a run context still wins.
 
 Without a session, or without the recording, and without an engine,
 a child is an ordinary tool and needs no option:

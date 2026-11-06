@@ -40,7 +40,7 @@ func TestChildAgentSharesTheConversationScopeWhenAsked(t *testing.T) {
 			Execute: []string{"Bash"},
 		}), map[string]agentpolicy.ToolMatcher{"Bash": {Match: agentpolicy.PrefixMatcher("command")}}),
 		agentkit.WithSession(agentsession.NewMemoryStore(), agentsession.Header{CWD: t.TempDir()}),
-		agentkit.WithChild(agentturn.Config{
+		agentkit.WithChildAgent(agentturn.Config{
 			Name: "explore", Description: "delegate", Model: child, ModelName: "m",
 			Tools: []agenttool.Tool{bash},
 			BeforeToolCall: func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
