@@ -150,6 +150,16 @@ childagent.WithRunContext(func(ctx context.Context, callID string) context.Conte
 })
 ```
 
+With a recorder of the kit's own the child also gets the recorder's
+loader, `childagent.WithRecord` with `ChildRecord`, so a restart does
+not lose a child's open question. A call the process stopped in is
+run again under its key, `session.ReplayAnswers` given to
+`Control.Resume`, and the child continues its session from the record:
+the call its policy was deciding goes back to its `BeforeToolCall`, so
+under `childagent.WithAskParent` the person is asked again under the
+same parent call, and the child runs under its own scope again. A
+child that had answered returns that answer and runs nothing.
+
 The grant scope is the third binding. A skill a conversation read grants
 its tools to that conversation's calls, and a child run from a tool call
 inherits its parent's context, so without a scope of its own it would

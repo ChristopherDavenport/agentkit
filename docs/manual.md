@@ -226,6 +226,12 @@ tools = append(tools, childagent.New(childCfg,
 		// user-message mark, so the conversation's next message ends its
 		// grants.
 		return agentpolicy.ContextWithGrantScope(ctx, parent+"/"+child)
+	}),
+	// With a recorder of the kit's own (rec != nil): a call run again
+	// under its key after a restart continues the child from the record
+	// the observer wrote, rather than starting it afresh.
+	childagent.WithRecord(func(ctx context.Context, call agenttool.Call, cfg agentturn.Config) (*childagent.Record, error) {
+		return recorderFor(ctx).ChildRecord(ctx, call, cfg)
 	})))
 // The catalogue's tool as it stands: ReloadSkills puts another
 // catalogue's in its place, and every run sees it from its next call.
@@ -473,7 +479,11 @@ or `New`'s, together.
 
 `WithChildAgent` is the line above with `childagent.New`: the kit binds
 `WithObserver` and `WithRunContext` to the run's recorder, the memory
-bridge only when `WithMemory` is configured, and adds nothing else, so a
+bridge only when `WithMemory` is configured, and `WithRecord` only when
+the kit has a recorder of its own, `WithSession`, `WithResumedSession`
+or `WithRecorder`, since under a kit with none a call run again with
+no recorder on its context would start the child afresh and repeat its
+work; it adds nothing else, so a
 product that builds its own child hands it to `WithTools` and the
 result is the same tool. `WithChildAgent(childCfg, agentkit.ChildParts(ids...))`
 is the same line with `childCfg` replaced by

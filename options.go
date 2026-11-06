@@ -995,6 +995,27 @@ func WithDeferredTools(fn func(*Kit) []agenttool.Tool) Option {
 // has opened the session, so a product doing this by hand reaches for
 // [WithDeferredTools] and a nil check.
 //
+// With a recorder of the kit's own ([WithSession], [WithResumedSession],
+// [WithRecorder]) the kit also gives the child that recorder's loader,
+// childagent.WithRecord with [session.Recorder.ChildRecord], read from
+// the recorder the parent's run records into, so the tool reports
+// itself keyed and a call that was in flight when the process stopped
+// is run again under its key after a restart: the child continues its
+// session from the record rather than starting afresh, its call the
+// policy was deciding goes back to its BeforeToolCall, so under
+// childagent.WithAskParent the question open at the stop is asked
+// again under the same parent call, and its run links its grant scope,
+// which names its session, to the conversation again. A host gets the
+// answers that run it again from session.ReplayAnswers over
+// [Kit.Session] and the config's tools, and passes them to
+// [Control.Resume]. A call whose child the record does not hold fails
+// with childagent.ErrNoRecord, the outcome unknown. A kit with no
+// recorder of its own, serving each conversation under
+// [ContextWithRecorder], does not bind it, since a call run again with
+// no recorder on its context would start the child afresh and repeat
+// its work; such a front passes childagent.WithRecord through [ChildAgentOptions] with
+// a loader that reads [RecorderFromContext].
+//
 // opts are the kit's choices for the child: [ChildParts],
 // [ShareGrantScope], and [ChildAgentOptions], which passes
 // agentturn/tools/agent's own options to the child's tool. Those are
@@ -1047,10 +1068,15 @@ func WithChildAgent(cfg agentturn.Config, opts ...ChildOption) Option {
 				}
 				// A fresh slice: appending to the caller's options would
 				// grow their array and make two child agents share it.
-				all := make([]childagent.Option, 0, len(c.opts)+2)
+				all := make([]childagent.Option, 0, len(c.opts)+3)
 				all = append(all,
 					childagent.WithObserver(k.observeChildCall),
 					childagent.WithRunContext(k.childContext(c.share)))
+				if k.rec != nil {
+					// The record the observer writes is the one a call run
+					// again under its key continues the child from (#124).
+					all = append(all, childagent.WithRecord(k.childRecord))
+				}
 				all = append(all, c.opts...)
 				return []agenttool.Tool{k.childTool(childagent.New(cfg, all...))}, nil
 			},
@@ -1554,6 +1580,16 @@ func (k *Kit) holdsNoSet(scope string) bool {
 	before := len(k.engine.GrantsFor(none))
 	under := len(k.engine.GrantsFor(agentpolicy.ContextWithGrantScope(context.Background(), scope)))
 	return under == before && len(k.engine.GrantsFor(none)) == before
+}
+
+// childRecord is the loader WithChildAgent gives a child under a kit
+// with a recorder of its own, childagent.WithRecord: the
+// [session.Recorder.ChildRecord] of the recorder the parent's run
+// records into, the one [ContextWithRecorder] put on its context or the
+// kit's, which is the recorder [Kit.observeChildCall] wrote the child
+// into.
+func (k *Kit) childRecord(ctx context.Context, call agenttool.Call, cfg agentturn.Config) (*childagent.Record, error) {
+	return k.recorderFor(ctx).ChildRecord(ctx, call, cfg)
 }
 
 // childContext is the run context WithChildAgent gives a child: the

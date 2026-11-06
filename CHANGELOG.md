@@ -122,6 +122,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   runtime MCP tool: the kit tool is dropped from that agent's offer and
   reported as a `Conflict` kept by `"handoff"` (#118).
 
+- A `WithChildAgent` child resumes after a restart. Under a kit with a
+  recorder of its own the child is given that recorder's loader,
+  agentturn v0.0.38's `childagent.WithRecord` with
+  `session.Recorder.ChildRecord`, read from the recorder the parent's
+  run records into, so the child's tool reports itself keyed: a call in
+  flight when the process stopped is run again under its key (the
+  answers `session.ReplayAnswers` gives, passed to `Control.Resume`),
+  the child continues its session from the record, and under
+  `childagent.WithAskParent` its open question is asked again under the
+  same parent call; its grant scope is linked to the conversation
+  again. A call whose child the record does not hold now fails with
+  `childagent.ErrNoRecord`, the outcome unknown, where before the
+  replay rule answered it as not run again. A kit with no recorder of
+  its own binds no loader (#124).
+
 ### Fixed
 
 - `Kit.ReloadSkills`'s doc said the new catalogue reached the run in
