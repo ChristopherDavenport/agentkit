@@ -30,9 +30,10 @@ import (
 //     held beside another call's ask is released with the batch, and
 //     tells the engine how the resumed run went
 //     ([agentpolicy.Engine.Resumed]);
-//   - Queue writes the queued entry before it returns
-//     ([session.Recorder.Queue]), so a steer is on the record before a
-//     quiet tool's next event would write it;
+//   - Queue, Deliver and Accept write the queued entry before the agent
+//     takes the item ([session.Recorder.Queue], [session.Recorder.Deliver],
+//     [session.Recorder.Accept]), so it is on the record before they
+//     return, an input to an idle agent included;
 //   - under [WithQuestionEvents], a question asked while a call of one
 //     of its runs goes, a tool's own, a nested call the policy asks
 //     about and an MCP server's, is an [agentturn.Question] event to
@@ -239,7 +240,7 @@ func QuestionsFromContext(ctx context.Context) (agenttool.Elicitor, bool) {
 // ([ContextWithQuestions]), so the run's questions reach this
 // conversation's subscribers; the kit's recorder, the session's
 // ID for the model calls and for memory a run writes. Prompt, Resume,
-// Queue and ContinueFrom use it; a front that starts a run of its own
+// Queue, Deliver, Accept and ContinueFrom use it; a front that starts a run of its own
 // on the agent does too. With a recorder of the kit's own it replaces
 // any recorder the caller put on ctx; without one it adds the Control
 // and its elicitor alone, and a recorder the caller put there
@@ -397,12 +398,37 @@ func (c *Control) Deliver(ctx context.Context, items ...openresponses.Item) (boo
 	return c.agent.Deliver(ctx, items...)
 }
 
+var _ agentturn.Accepter = (*Control)(nil)
+
+// Accept implements [agentturn.Accepter]: [Control.Deliver] in two
+// steps, as agentturn.Agent.Accept is Deliver's. It returns once the
+// agent has queued the items, with the [agentturn.Delivery] whose Wait
+// gives what Deliver returns, and the agent settles it whether or not
+// anyone waits, starting the run that takes the items, when one is
+// needed, on RunContext's values, so that run is recorded and decided
+// as the kit's are. A view forwarding a person's steer answers once
+// the agent has it, and a second steer sent while a quiet tool runs is
+// not held behind the first's outcome. With a recorder, the kit's or
+// the conversation's on ctx as for Deliver, each item is written as a
+// queued entry carrying deliver before the agent accepts it
+// ([session.Recorder.Accept]). An error means nothing was delivered.
+func (c *Control) Accept(ctx context.Context, items ...openresponses.Item) (*agentturn.Delivery, error) {
+	ctx = c.RunContext(ctx)
+	if rec := RecorderFromContext(ctx); rec != nil {
+		return rec.Accept(ctx, c.agent, items...)
+	}
+	return c.agent.Accept(ctx, items...)
+}
+
 // Queue implements [agentturn.Control]: with a recorder, each item is
-// written as a queued entry before the agent takes it
-// ([session.Recorder.Queue]) rather than at the agent's queued event,
-// which the run's next event delivers and a quiet tool can hold off.
-// The recorder is the kit's, or the conversation's on ctx, as for
-// [Control.Deliver].
+// written as a queued entry before the agent takes it, durably, before
+// Queue returns ([session.Recorder.Queue]), rather than at the agent's
+// queued event. A run in flight reports that event promptly since
+// agentturn v0.0.38, but on a goroutine of its own that Queue does not
+// wait for, and an idle agent reports it only when its next run starts,
+// so an input written only at the event could be lost to a process that
+// stops first. The recorder is the kit's, or the conversation's on ctx, as
+// for [Control.Deliver].
 func (c *Control) Queue(ctx context.Context, mode agentturn.QueueMode, items ...openresponses.Item) error {
 	ctx = c.RunContext(ctx)
 	if rec := RecorderFromContext(ctx); rec != nil {

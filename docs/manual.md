@@ -1505,10 +1505,14 @@ Eleven things, all outside `agentturn.Config`:
   returned. A `Prompt` that answers pending calls with their outputs,
   and a head move that leaves them, are followed by `engine.Resumed`
   with no answers, for the calls still pending, and `engine.Forget` of
-  their run. `Queue` is `rec.Queue`, and `Deliver`, which makes the
+  their run. `Queue` is `rec.Queue`, `Deliver`, which makes the
   Control an `agentturn.Deliverer`, is `rec.Deliver(ctx, agent, items...)`,
-  `rec` being the kit's or, without one, the conversation's on ctx
-  (`agentkit.RecorderFromContext`), or `agent.Deliver` with neither. Under `WithQuestionEvents`, an
+  and `Accept`, which makes it an `agentturn.Accepter`, is
+  `rec.Accept(ctx, agent, items...)`, each writing the queued entry
+  before the agent takes the items, `rec` being the kit's or, without
+  one, the conversation's on ctx (`agentkit.RecorderFromContext`), or
+  `agent.Deliver` and `agent.Accept` with neither, all under the run
+  context above. Under `WithQuestionEvents`, an
   agent whose config has no `ToolElicitor` is given the kit's with
   `agent.SetConfig`. It hands the agent what a resumed session owes,
   `rec.Requeue(ctx, agent)`. `ContinueFrom` is

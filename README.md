@@ -226,7 +226,10 @@ kit.Engine().Resumed(ctx, end, answers, next)
 has pending. The Control also delivers, `Control.Deliver`, which makes
 it an `agentturn.Deliverer`: a message joins the run in flight, or
 starts a run once that one has ended, and with a session is recorded
-before the agent takes it. `Control.Compact(ctx, instructions)` folds
+before the agent takes it. `Control.Accept` is the same delivery in two
+steps, an `agentturn.Accepter`: it returns once the agent has queued
+the items, recorded first, so a view forwarding a person's steers
+answers at once. `Control.Compact(ctx, instructions)` folds
 the next model call whatever the budget, a product's `/compact`, under
 `WithCompaction`.
 

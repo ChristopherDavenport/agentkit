@@ -137,6 +137,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   replay rule answered it as not run again. A kit with no recorder of
   its own binds no loader (#124).
 
+- `Control.Accept`, so a `Control` is an `agentturn.Accepter`: agentturn
+  v0.0.38's delivery in two steps, under `RunContext`, through
+  `session.Recorder.Accept` of the kit's recorder or the conversation's
+  on the context, which writes each item's queued entry before the
+  agent accepts it. It returns once the items are queued, with the
+  `Delivery` whose `Wait` gives what `Deliver` returns, so a view
+  forwarding a person's steer, such as agentconsole's `client.Direct`,
+  answers at once and a second steer sent while a quiet tool runs is
+  not held behind the first. `Control.Queue`'s doc no longer says the
+  agent's queued event waits for the run's next event, which agentturn
+  v0.0.38 changed (#125).
+
 ### Fixed
 
 - `Kit.ReloadSkills`'s doc said the new catalogue reached the run in
