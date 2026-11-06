@@ -1341,7 +1341,12 @@ Eleven things, all outside `agentturn.Config`:
   tail test misses ends them as it ends the parent's. Without skill
   grants the child has its scope all the same, and the kit records it
   as the conversation's, so `Kit.RevokeSkillGrants` ends a set a front
-  made under it. A child offered with `WithChild(cfg,
+  made under it. A `WithChildAgent` child's scope is forgotten again
+  when its call is over, the call returned and its runs ended, the last
+  not on a held call, unless the engine holds a set under it or a
+  grandchild's scope is linked under it, so a conversation that is
+  never ended keeps no entry per child run; a child run again links it
+  again. A child offered with `WithChild(cfg,
   agentkit.ShareGrantScope())` runs under the conversation's scope
   itself, `agentpolicy.ContextWithGrantScope(ctx, parent)` in the run
   context above, and is linked to nothing; agentpolicy has no scope

@@ -106,6 +106,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   guards, so a reload reaches the next request of the run; only a kit
   under `WithoutMCPInstructions` with none of the others waits for
   `SetConfig`. The doc and the manual say both (#123).
+- With #121's registry on every engine, a `WithChildAgent` child's
+  scope was kept for every child run until `RevokeSkillGrants`, so a
+  front that offers child agents and never ends its conversation grew
+  an entry per call for the life of the process. The kit forgets a
+  child's scope when its call is over, its runs ended and the last not
+  stopped on a held call, unless the engine holds a set under it or a
+  grandchild's is linked under it; a child run again links it again.
+  The child's tool is wrapped with `agenttool.Wrap` for this, so every
+  property it declares is reported as before. A set a front makes under
+  a child's scope after the child's call is over is the front's to
+  revoke with `engine.RevokeScope` (#121).
 
 ## v0.0.16 - 2026-11-03
 

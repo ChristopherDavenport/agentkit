@@ -22,10 +22,18 @@ import (
 // child's scope to its conversation only under WithSkillGrants, so
 // without skills RevokeSkillGrants ended nothing and a set the front
 // activated under a child's scope outlived the conversation. (#121)
+// The front grants while the child runs: a child that ended holding
+// nothing under its scope is forgotten with its call.
 func TestRevokeSkillGrantsEndsAChildScopeWithoutSkillGrants(t *testing.T) {
 	var childScope string
+	var kit *agentkit.Kit
+	var granted []agentpolicy.Rule
 	where := agenttool.New("where", "says where it runs", func(ctx context.Context, _ struct{}) (string, error) {
 		childScope = agentpolicy.GrantScopeFromContext(ctx)
+		granted, _ = kit.Engine().GrantSet(ctx, agentpolicy.RuleSet{
+			Source: agentpolicy.Source{Name: "front", Trusted: true},
+			Allow:  []agentpolicy.Rule{{Tool: "Bash", Spec: "git:*"}},
+		})
 		return "here", nil
 	})
 	bash := agenttool.New("Bash", "run a command", func(context.Context, struct {
@@ -33,7 +41,6 @@ func TestRevokeSkillGrantsEndsAChildScopeWithoutSkillGrants(t *testing.T) {
 	}) (string, error) {
 		return "", nil
 	})
-	var kit *agentkit.Kit
 	child := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("where", `{}`)}}
 	parent := &scriptModel{turns: []func(*openresponses.Emitter) error{callTurn("explore", `{"input":"look"}`)}}
 	sessions := agentsession.NewMemoryStore()
@@ -68,10 +75,7 @@ func TestRevokeSkillGrantsEndsAChildScopeWithoutSkillGrants(t *testing.T) {
 		t.Fatalf("the child ran under scope %q, want one of its own", childScope)
 	}
 	cctx := agentpolicy.ContextWithGrantScope(t.Context(), childScope)
-	if granted, _ := kit.Engine().GrantSet(cctx, agentpolicy.RuleSet{
-		Source: agentpolicy.Source{Name: "front", Trusted: true},
-		Allow:  []agentpolicy.Rule{{Tool: "Bash", Spec: "git:*"}},
-	}); len(granted) != 1 {
+	if len(granted) != 1 {
 		t.Fatalf("the front's grant under the child's scope: %v", granted)
 	}
 	call := agentturn.ToolCallInfo{Call: &openresponses.FunctionCall{CallID: "c", Name: "Bash", Arguments: `{"command":"git status"}`}, Args: json.RawMessage(`{"command":"git status"}`)}

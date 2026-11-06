@@ -162,7 +162,12 @@ person's "allow for this session", does not decide the child's calls.
 `kit.RevokeSkillGrants` ends every set under the child's scope with the
 conversation's, a front's as well as a skill's, and under
 `WithSkillGrants` so does the conversation's next message; a skill the
-child reads is the child's alone.
+child reads is the child's alone. The kit forgets a child's scope again
+when its call is over, its runs ended and the last not stopped on a
+held call, unless the engine holds a set under it or a grandchild's is
+linked under it: a front that never ends its conversation does not keep
+one per child run, and a set it makes under a scope after that is its
+own to revoke with `engine.RevokeScope`.
 
 A child that should act on the conversation's grants is offered with
 `WithChild(cfg, agentkit.ShareGrantScope())`: it runs under the

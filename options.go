@@ -6,6 +6,7 @@ import (
 	"io"
 	"slices"
 	"strconv"
+	"sync"
 
 	"github.com/ChristopherDavenport/agentmemory"
 	"github.com/ChristopherDavenport/agentpolicy"
@@ -977,7 +978,9 @@ func WithDeferredTools(fn func(*Kit) []agenttool.Tool) Option {
 // the child's session ID, or the call's ID and a number without a
 // recording, which the kit records as the conversation's child, so
 // [Kit.RevokeSkillGrants] ends whatever was granted under it with the
-// conversation, a front's set as well as a skill's. A skill its parent
+// conversation, a front's set as well as a skill's; the kit forgets the
+// scope again when the call is over and nothing is held under it. A
+// skill its parent
 // read, or a set granted under the conversation's scope, grants the
 // child's calls nothing, and under [WithSkillGrants] a skill the child
 // reads is the child's alone, ended with its conversation's next
@@ -987,7 +990,9 @@ func WithDeferredTools(fn func(*Kit) []agenttool.Tool) Option {
 // has opened the session, so a product doing this by hand reaches for
 // [WithDeferredTools] and a nil check. The caller's own options are
 // applied after the kit's, so passing childagent.WithObserver or
-// childagent.WithRunContext here still wins, and a run context of the
+// childagent.WithRunContext here still wins (an observer of the
+// product's keeps the child's scope until RevokeSkillGrants, since the
+// kit then cannot see the child's runs end), and a run context of the
 // product's that does not give the child a grant scope leaves it under
 // its parent's, without the kit's other bindings. A child meant to share
 // its conversation's grants is offered with [WithChild] and
@@ -1397,6 +1402,117 @@ func (k *Kit) observeChild(ctx context.Context, ev agentturn.Event) {
 	}
 }
 
+// childCall is what the kit keeps of one call of a [WithChild] child's
+// tool, [Kit.childTool]: the grant scope its run context linked under
+// the conversation's, claimed by the first run context made under the
+// call, the call's own, so a detached grandchild's, made on its
+// parent's run context, does not take it; and the call's runs as the
+// kit's observer sees them. Once the call has returned, and no run of
+// the child is in flight, [Kit.endChildCall] forgets the scope unless
+// the child's last run stopped on a held call or the engine holds a set
+// under it.
+type childCall struct {
+	mu            sync.Mutex
+	claimed       bool
+	parent, scope string
+	// seen is set when the kit's observer saw a run start: a product's
+	// childagent.WithObserver in its place leaves the scope linked, since
+	// a detached run's end could not be told from its call's return.
+	seen     bool
+	running  int
+	returned bool
+	held     bool
+}
+
+type childCallKey struct{}
+
+// claim records the scope the call's run context linked, once.
+func (c *childCall) claim(parent, scope string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.claimed {
+		c.claimed, c.parent, c.scope = true, parent, scope
+	}
+}
+
+// over reports whether the call has returned, its runs have ended and
+// the last did not stop on a held call, with the scope to forget.
+func (c *childCall) over() (parent, scope string, ok bool) {
+	return c.parent, c.scope, c.returned && c.seen && c.running == 0 && !c.held && c.scope != ""
+}
+
+// childTool is a [WithChild] child's tool as the kit offers it: the
+// same tool, [agenttool.Wrap], whose calls each carry a [childCall], so
+// the scope a call linked is forgotten when the call is over.
+func (k *Kit) childTool(t agenttool.Tool) agenttool.Tool {
+	return agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+		c := &childCall{}
+		res, err := t.Execute(context.WithValue(ctx, childCallKey{}, c), call)
+		c.mu.Lock()
+		c.returned = true
+		c.mu.Unlock()
+		k.endChildCall(c)
+		return res, err
+	})
+}
+
+// observeChildCall is the observer [WithChild] gives a child: the
+// recording [Kit.observeChild] makes, and the call's runs, counted so
+// the call's scope is forgotten when the last ends after the call
+// returned, as a detached child's does.
+func (k *Kit) observeChildCall(ctx context.Context, ev agentturn.Event) {
+	k.observeChild(ctx, ev)
+	c, ok := ctx.Value(childCallKey{}).(*childCall)
+	if !ok {
+		return
+	}
+	switch e := ev.(type) {
+	case *agentturn.RunStart:
+		c.mu.Lock()
+		c.seen = true
+		c.running++
+		c.mu.Unlock()
+	case *agentturn.RunEnd:
+		c.mu.Lock()
+		if c.running > 0 {
+			c.running--
+		}
+		c.held = e.Reason == agentturn.ReasonInputRequired
+		c.mu.Unlock()
+		k.endChildCall(c)
+	}
+}
+
+// endChildCall forgets the scope of a child's call that is over when
+// nothing is linked or held under it, [childScopes.unlink]: the
+// conversation would otherwise keep an entry per child run for as long
+// as it is not ended, for a front that never calls RevokeSkillGrants.
+// A run of the child again, a call run again under its key, links it
+// again. A set a front makes under the scope after that is the front's
+// to revoke, with [agentpolicy.Engine.RevokeScope].
+func (k *Kit) endChildCall(c *childCall) {
+	c.mu.Lock()
+	parent, scope, ok := c.over()
+	c.mu.Unlock()
+	if !ok || k.engine == nil {
+		return
+	}
+	if k.scopes.unlink(parent, scope, k.holdsNoSet) && k.grants != nil {
+		k.grants.forget([]string{scope})
+	}
+}
+
+// holdsNoSet reports whether the engine holds no set under scope: the
+// sets a decision under it consults are the unscoped ones alone. The
+// unscoped ones are read on both sides, so a set activated between the
+// reads reads as held.
+func (k *Kit) holdsNoSet(scope string) bool {
+	none := agentpolicy.ContextWithGrantScope(context.Background(), "")
+	before := len(k.engine.GrantsFor(none))
+	under := len(k.engine.GrantsFor(agentpolicy.ContextWithGrantScope(context.Background(), scope)))
+	return under == before && len(k.engine.GrantsFor(none)) == before
+}
+
 // childContext is the run context WithChildAgent gives a child: the
 // ChildContext of the recorder the parent's run records into, which
 // puts the child's session ID on the context under the session
@@ -1421,7 +1537,11 @@ func (k *Kit) childContext(share bool) func(ctx context.Context, callID string) 
 		if rec != nil {
 			ctx = rec.ChildContext(ctx, callID)
 		}
-		return k.childRun(parentCtx, ctx, rec, callID, share)
+		out := k.childRun(parentCtx, ctx, rec, callID, share)
+		if c, ok := parentCtx.Value(childCallKey{}).(*childCall); ok && !share && k.engine != nil {
+			c.claim(k.GrantScope(parentCtx), agentpolicy.GrantScopeFromContext(out))
+		}
+		return out
 	}
 }
 

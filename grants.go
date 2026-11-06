@@ -168,7 +168,10 @@ type skillGrants struct {
 // front may grant under a child's scope too, so [Kit.RevokeSkillGrants]
 // ends them with their conversation, a grandchild's is reached through a
 // child that granted nothing, and a conversation ends exactly those and
-// not a scope whose name merely begins with its own.
+// not a scope whose name merely begins with its own. A WithChildAgent
+// child's scope is forgotten again when its call is over and nothing is
+// held under it, [Kit.endChildCall], so a conversation that is never
+// ended does not keep one per child run.
 type childScopes struct {
 	mu       sync.Mutex
 	children map[string]map[string]bool
@@ -185,6 +188,24 @@ func (c *childScopes) link(parent, scope string) {
 		c.children[parent] = map[string]bool{}
 	}
 	c.children[parent][scope] = true
+}
+
+// unlink forgets scope as a child scope of parent, when no scope is
+// linked under it and empty reports that nothing is held under it, and
+// reports whether it did. empty is asked with mu held, so a link under
+// scope does not land between the two.
+func (c *childScopes) unlink(parent, scope string, empty func(string) bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.children[parent][scope] || len(c.children[scope]) > 0 || !empty(scope) {
+		return false
+	}
+	delete(c.children[parent], scope)
+	if len(c.children[parent]) == 0 {
+		delete(c.children, parent)
+	}
+	delete(c.children, scope)
+	return true
 }
 
 // descendants returns every scope run under scope, children and their

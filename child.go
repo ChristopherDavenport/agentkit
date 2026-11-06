@@ -93,10 +93,10 @@ func WithChild(cfg agentturn.Config, opts ...ChildOption) Option {
 				// grow their array and make two child agents share it.
 				all := make([]childagent.Option, 0, len(c.opts)+2)
 				all = append(all,
-					childagent.WithObserver(k.observeChild),
+					childagent.WithObserver(k.observeChildCall),
 					childagent.WithRunContext(k.childContext(c.share)))
 				all = append(all, c.opts...)
-				return []agenttool.Tool{childagent.New(cfg, all...)}, nil
+				return []agenttool.Tool{k.childTool(childagent.New(cfg, all...))}, nil
 			},
 		})
 	}
