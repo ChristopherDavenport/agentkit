@@ -57,9 +57,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   move now also reserves the session's call IDs and gives the agent the
   branch's reasoning models and the person's messages, which
   `Control` carried on each run's context and lost respectively; the
-  kit's revocation, regrant and leaf label stay outside the hold. A
-  revocation the session would not record fails the move and puts the
-  grants back (#117). A failure after the move goes back with
+  kit's revocation stays outside the hold, and its regrant and leaf
+  label run under a second one, so a run that starts between the two
+  fails the move with `agentturn.ErrRunning` rather than have the label
+  appended in its middle. A revocation the session would not record
+  fails the move and puts the grants back (#117), and so does an older
+  verdict write the session lost between runs, which
+  `RevokeSkillGrants` now names as lost between runs before the
+  revocation. A failure after the move goes back with
   `session.MoveTo` to the leaf it left, which reads the agent's state
   there from the record.
 

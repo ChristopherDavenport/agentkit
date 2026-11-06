@@ -575,9 +575,12 @@ func WithSkillGrantScope() Option {
 // front reloads the skills, [Kit.ReloadSkills], on a report wrapping
 // agentskill.ErrSkillChanged or with [SkillGrant.FrontmatterChanged]
 // set, since the model is told to discover the skills again and cannot.
-// fn is called while the kit holds its grant lock, so it must not call
+// fn is called with the kit's grant lock held for a grant and the
+// grants a restart makes again, and without it for a read the tool
+// refused; the lock is not reentrant, so fn must not call
 // [Kit.RevokeSkillGrants], [Kit.RegrantSkills] or
-// [Control.ContinueFrom].
+// [Control.ContinueFrom], which take it and would wait on the call fn
+// reports.
 func WithSkillGrantReport(fn func(SkillGrant)) Option {
 	return func(s *settings) { s.skillGrant = fn }
 }

@@ -1494,11 +1494,15 @@ Eleven things, all outside `agentturn.Config`:
   `session.MoveTo(ctx, agent, rec, entryID)`, which rebases the record
   and sets the agent's transcript, reasoning models, person messages,
   pending calls and owed notes and reserves the session's call IDs
-  while `agent.WhileIdle` holds it, then `kit.RegrantSkills`, a leaf
-  label from `s.MarkLeaf` written through the store's
-  `agentsession.Writer`, and `engine.Forget` of the run it leaves. The
-  kit's own steps stay outside the hold, since `WhileIdle` does not
-  nest. A failure after the move is undone with `kit.RevokeSkillGrants`,
+  while `agent.WhileIdle` holds it, then, under a second
+  `agent.WhileIdle`, `kit.RegrantSkills` and a leaf label from
+  `s.MarkLeaf` written through the store's `agentsession.Writer`, and
+  `engine.Forget` of the run it leaves. The revocation stays outside
+  the holds and the regrant outside `MoveTo`'s, since `WhileIdle` does
+  not nest; a run that starts between the two holds fails the move
+  with `agentturn.ErrRunning`. The revocation's error may also carry a
+  verdict write lost between runs before it, a product's rule change,
+  which fails the move as well. A failure after the move is undone with `kit.RevokeSkillGrants`,
   `session.MoveTo` back to the leaf it left, a leaf label there and
   `kit.RegrantSkills`; one before it with `kit.RegrantSkills` alone.
   Each step that appends can be reported with `Reopen`, so `s` is taken

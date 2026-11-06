@@ -3161,9 +3161,11 @@ func (k *Kit) RegrantSkills(ctx context.Context, sess *agentsession.Session, opt
 //
 // The error is a revocation's verdict the conversation's session would
 // not record, the engine's or the kit's own for a skill's set that held
-// no rule, and else one its session lost between runs since: a
-// restart replays the session's journal, which then says a grant is
-// still in force. The engine has revoked all the same. A verdict
+// no rule, joined with one its session lost between runs since, which
+// may be no revocation's, a product's rule change, and is named as lost
+// between runs before this revocation: a restart replays the session's
+// journal, which then says a grant is still in force, or misses the
+// change. The engine has revoked all the same. A verdict
 // reported after it returns, as one is when it is called from inside
 // the engine's observer, is kept for the conversation's next run, which
 // fails on it, or the next RevokeSkillGrants.
@@ -3177,7 +3179,7 @@ func (k *Kit) RevokeSkillGrants(ctx context.Context) (int, error) {
 	n += k.endChildren(ctx)
 	err := sink.close()
 	if lost := k.lostBetweenRuns(ctx); lost != nil {
-		err = errors.Join(err, lost)
+		err = errors.Join(err, fmt.Errorf("agentkit: lost between runs before this revocation: %w", lost))
 	}
 	return n, err
 }

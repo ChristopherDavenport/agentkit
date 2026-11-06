@@ -398,3 +398,27 @@ func TestControlContinueFromHoldsTheAgentDuringTheMove(t *testing.T) {
 		t.Fatal("the agent is still held after the move")
 	}
 }
+
+// The head's mark was appended after the move's hold was released, so a
+// run that started in between had the label appended in its middle. It
+// is appended under a second hold. (l6-5a review L3)
+func TestControlContinueFromHoldsTheAgentWhileItMarksTheHead(t *testing.T) {
+	store := newReopenStore(func(agentsession.Entry) bool { return false })
+	_, ctl, first := reopenedKit(t, store)
+	saw, held := false, false
+	store.fail = func(e agentsession.Entry) error {
+		if l, ok := e.(*agentsession.LabelEntry); ok && l.Label != nil && *l.Label == agentsession.LeafLabel {
+			saw, held = true, ctl.State().Held
+		}
+		return nil
+	}
+	if err := ctl.ContinueFrom(t.Context(), first); err != nil {
+		t.Fatalf("continue from the first prompt: %v", err)
+	}
+	if !saw {
+		t.Fatal("the move wrote no leaf label")
+	}
+	if !held {
+		t.Fatal("the agent was not held while the head's mark was appended")
+	}
+}

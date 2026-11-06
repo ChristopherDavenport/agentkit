@@ -505,7 +505,11 @@ func (c *Control) Permissions(end *agentturn.RunEnd) []Permission {
 // ([Kit.RegrantSkills]), so a tool a skill on the old branch allowed is
 // not allowed on the new one. A revocation the session would not record
 // fails the move, since the branch left would say the grant is still in
-// force.
+// force, and so does an older verdict write the session lost between
+// runs, a product's rule change, which [Kit.RevokeSkillGrants] returns
+// once and names as lost between runs. The new branch's grants and the
+// leaf label are made under a second hold, so a run that starts in
+// between fails the move with [agentturn.ErrRunning].
 //
 // The target is checked before anything changes: a leaf label, an
 // entry on a fork's prefix above its base, and an entry that leaves
@@ -611,26 +615,36 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 	}()
 	// The revocation writes its verdicts to the branch being left; one
 	// the session would not record fails the move, and the undo grants
-	// again what that branch holds.
+	// again what that branch holds. So does a verdict write the session
+	// lost between runs before, which the revocation returns once.
 	if _, err := c.kit.RevokeSkillGrants(ctx); err != nil {
-		return fail(fmt.Errorf("ending the skill grants: %w", err))
+		return fail(fmt.Errorf("the revocation before the move: %w", err))
 	}
 	if err := session.MoveTo(context.WithoutCancel(ctx), c.agent, rec, entryID); err != nil {
 		// MoveTo leaves the record and the agent as they were.
 		return fail(err)
 	}
 	moved = true
-	if err := rehold(); err != nil {
+	// The grants and the head's mark under a second hold, so a run that
+	// starts after the move begins with them in place rather than have
+	// the mark appended in its middle; one that started between the two
+	// holds fails the move with agentturn.ErrRunning.
+	if err := c.agent.WhileIdle(func() error {
+		if err := rehold(); err != nil {
+			return err
+		}
+		if err := c.kit.RegrantSkills(ctx, s); err != nil {
+			return err
+		}
+		if err := rehold(); err != nil {
+			return err
+		}
+		if err := c.markHead(ctx, rec, s); err != nil {
+			return fmt.Errorf("mark the head: %w", err)
+		}
+		return nil
+	}); err != nil {
 		return fail(err)
-	}
-	if err := c.kit.RegrantSkills(ctx, s); err != nil {
-		return fail(err)
-	}
-	if err := rehold(); err != nil {
-		return fail(err)
-	}
-	if err := c.markHead(ctx, rec, s); err != nil {
-		return fail(fmt.Errorf("mark the head: %w", err))
 	}
 	if eng := c.kit.Engine(); eng != nil && len(prev.Pending) > 0 {
 		// The calls the head left behind will not be answered: what
