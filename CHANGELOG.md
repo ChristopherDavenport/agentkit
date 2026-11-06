@@ -3,6 +3,31 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- **Breaking**: requires agentturn and agentturn/session v0.0.38, up
+  from v0.0.36, agentsession v0.0.38, up from v0.0.37, agentpolicy
+  v0.0.20, up from v0.0.19, agenttool and agenttool/mcpclient v0.0.30,
+  up from v0.0.29, and openresponses v0.0.19, up from v0.0.18, in the
+  root and in `examples/a2a` (front/a2a and tools/a2a v0.0.38 there).
+  Sessions are written as `agentsession/0.21`, which agentsession
+  v0.0.37 and earlier refuse: upgrade every reader of a store first.
+  Under `WithCompaction` a fold now keeps the person's own messages
+  verbatim after the summary (agentturn's `compact` default), and
+  `Kit.AgentOptions` seeds them from the record, so a product that
+  wants every message folded passes `compact.WithPersonBound(0)` in
+  its compaction options. agentpolicy's rule changes, a skill read's
+  `GrantSet` and a revocation among them, now return once their
+  verdicts have reached the observers, and the kit holds its grant
+  lock across them: a `WithVerdictObserver` or `WithSkillGrantReport`
+  function must not call `Kit.RevokeSkillGrants`, `Kit.RegrantSkills`
+  or `Control.ContinueFrom`, or it may wait forever on the call it
+  is reporting. Nothing in the kit's own observer takes that lock.
+  `openresponses`' `insufficient_quota` is no longer retried by the
+  loop's default.
+
 ## v0.0.16 - 2026-11-03
 
 ### Changed

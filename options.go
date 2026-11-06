@@ -574,6 +574,9 @@ func WithSkillGrantScope() Option {
 // front reloads the skills, [Kit.ReloadSkills], on a report wrapping
 // agentskill.ErrSkillChanged or with [SkillGrant.FrontmatterChanged]
 // set, since the model is told to discover the skills again and cannot.
+// fn is called while the kit holds its grant lock, so it must not call
+// [Kit.RevokeSkillGrants], [Kit.RegrantSkills] or
+// [Control.ContinueFrom].
 func WithSkillGrantReport(fn func(SkillGrant)) Option {
 	return func(s *settings) { s.skillGrant = fn }
 }
@@ -1106,6 +1109,13 @@ func WithGuards(gs ...guard.Guard) Option {
 // not written, as a hook's allow with no reason is not: a guard runs on
 // every part and every message, and recording its silence would
 // outweigh the run.
+//
+// fn must not call [Kit.RevokeSkillGrants], [Kit.RegrantSkills] or
+// [Control.ContinueFrom]. A rule change, a skill read's grant or a
+// revocation, returns once its verdicts have reached the observers
+// (agentpolicy v0.0.20), and the kit holds its grant lock across it, so
+// fn calling one of them waits on the lock, the change waits on fn, and
+// neither returns.
 func WithVerdictObserver(fn func(context.Context, agentpolicy.Verdict)) Option {
 	return func(s *settings) { s.verdicts = fn }
 }

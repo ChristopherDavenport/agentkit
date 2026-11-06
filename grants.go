@@ -144,6 +144,11 @@ type skillGrants struct {
 	// It is one lock for every conversation, so a slow journal write in
 	// one delays a skill read in another; a lock per scope would remove
 	// that.
+	// A rule change returns once its verdicts have reached the engine's
+	// observers, on whichever goroutine is reporting (agentpolicy
+	// v0.0.20), so the verdicts are written while gmu is held, and no
+	// observer, the kit's or the product's, may take it: the change would
+	// wait on the observer and the observer on gmu.
 	gmu sync.Mutex
 
 	// mu guards scopes, the state of each grant scope a read has granted
