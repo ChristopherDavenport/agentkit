@@ -587,7 +587,7 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 	ctx = c.RunContext(ctx)
 	// The revocation writes its verdicts to the branch being left, which
 	// moves the leaf, so a failure from here on puts the head back.
-	c.kit.RevokeSkillGrants(ctx)
+	_, _ = c.kit.RevokeSkillGrants(ctx)
 	moved := false
 	defer func() {
 		if err == nil {
@@ -601,7 +601,7 @@ func (c *Control) ContinueFrom(ctx context.Context, entryID string) (err error) 
 			// The grants are the new branch's now: end them while the
 			// recorder still writes there, off the path the head goes
 			// back to.
-			c.kit.RevokeSkillGrants(ctx)
+			_, _ = c.kit.RevokeSkillGrants(ctx)
 		}
 		// s follows the store's session wherever it can be opened, so
 		// the grants below read the path the head went back to.

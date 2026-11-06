@@ -28,6 +28,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `openresponses`' `insufficient_quota` is no longer retried by the
   loop's default.
 
+- **Breaking**: `Kit.RevokeSkillGrants(ctx)` returns `(int, error)`,
+  where it returned the count alone (#117), and ends the grant scopes
+  of the conversation's child agents with or without `WithSkillGrants`
+  (#121). The error is the first revocation verdict the conversation's
+  session would not record, the engine's or the kit's own for a skill
+  set that held no rule, gathered through a sink on the call's context,
+  and else one the session lost between runs since; the engine has
+  revoked all the same. A verdict write that fails outside any run and
+  outside such a call, a product's own rule change between runs or a
+  revocation reported after the call returned, was dropped; it is kept
+  for its session, and the next run recorded there fails on it at its
+  first hook, or the next `RevokeSkillGrants` returns it. The registry
+  of child scopes moved from the skill grants into the kit, so a child
+  `WithChildAgent` runs or `Kit.StartChild` starts is linked to its
+  conversation whenever the kit has an engine, and a set a front
+  activated under a child's scope without skill grants is ended by
+  `RevokeSkillGrants`, recorded as a `revoke_scope` verdict, where it
+  outlived the conversation. A caller adds the error; one that wants
+  the old behaviour ignores it. The docs that said the kit puts no
+  scope on a child without skill grants, stale since #109, say what it
+  does.
+
 ### Fixed
 
 - `Kit.ReloadSkills`'s doc said the new catalogue reached the run in

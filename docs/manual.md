@@ -220,9 +220,11 @@ tools = append(tools, childagent.New(childCfg,
 		}
 		// Whenever there is an engine: the child's own grant scope, under
 		// its conversation's, so a set granted to the conversation does not
-		// decide the child's calls. Under WithSkillGrants also a record of
-		// whose child it is, so the conversation's next message ends its
-		// grants: they are bound to the parent's user-message mark.
+		// decide the child's calls, and a record of whose child it is, so
+		// Kit.RevokeSkillGrants ends the sets under it with the
+		// conversation's. Under WithSkillGrants also the parent's
+		// user-message mark, so the conversation's next message ends its
+		// grants.
 		return agentpolicy.ContextWithGrantScope(ctx, parent+"/"+child)
 	})))
 // The catalogue's tool as it stands: ReloadSkills puts another
@@ -1268,11 +1270,13 @@ Eleven things, all outside `agentturn.Config`:
 
   so a front that names its conversations with
   `session.ContextWithSessionID` alone is several conversations, and a
-  read in one grants nothing in another. Under `WithSkillGrants` a
-  child agent `WithChildAgent` offers runs under a scope of its own, its
+  read in one grants nothing in another. Whenever the kit has an
+  engine, a child agent `WithChildAgent` offers, or a pass
+  `Kit.StartChild` starts, runs under a scope of its own, its
   conversation's and a slash and its session ID (the call's ID and a
   number without a recording), `parent+"/"+child` in the `ToolProvider`
-  block above, so its parent's skills grant it nothing. The slash makes
+  block above, so its parent's skills, and a set granted under the
+  conversation's scope, grant it nothing. The slash makes
   a name that reads well and nothing more: the kit records which scopes
   are a conversation's children when each child's run starts, so a
   grandchild under a child that read no skill is one of them, and the
@@ -1281,12 +1285,21 @@ Eleven things, all outside `agentturn.Config`:
   begins with the conversation's. A child's grants are bound to the
   user-message mark of its parent's turn, so a message the transcript's
   tail test misses ends them as it ends the parent's. Without skill
-  grants the kit puts no scope on a child, and a scope the product
-  put on the host's context, with its own grants under it, is the
-  child's. The kit forgets what it kept of a conversation's grants at
-  `Kit.RevokeSkillGrants(ctx)`, which a front calls when the
-  conversation ends, as it calls `engine.RevokeScope` for grants of its
-  own under the scope. `WithSkillGrantReport` hears every conversation's
+  grants the child has its scope all the same, and the kit records it
+  as the conversation's, so `Kit.RevokeSkillGrants` ends a set a front
+  made under it; a host that wants a `Kit.StartChild` pass to share the
+  conversation's grants puts the conversation's scope on the pass's run
+  context itself. The kit forgets what it kept of a conversation's
+  grants and child scopes at `Kit.RevokeSkillGrants(ctx)`, which a
+  front calls when the conversation ends, as it calls
+  `engine.RevokeScope` for grants of its own under the scope. Beside
+  the count it returns the first revocation verdict the session would
+  not write, the engine's or the kit's own, collected through a sink on
+  the call's context that the observer finds, so the front knows the
+  journal a restart replays still says the grant is in force; a write
+  that fails after it returns, or outside any run and any such call,
+  is kept for the session and fails its next run, or comes back from
+  the next `RevokeSkillGrants`. `WithSkillGrantReport` hears every conversation's
   reads and `SkillGrant.Scope` says whose. The revocation under the
   scope records a verdict per source, `revoked the rules granted by
   <source>`, as before, and a replay also ends everything on a

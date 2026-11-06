@@ -271,7 +271,7 @@ func TestASkillReadAfterARevokeIsGrantedAgain(t *testing.T) {
 	if got := len(kit.Engine().Grants()); got != 1 {
 		t.Fatalf("grants after the read = %d, want 1", got)
 	}
-	if n := kit.RevokeSkillGrants(t.Context()); n != 1 {
+	if n, _ := kit.RevokeSkillGrants(t.Context()); n != 1 {
 		t.Fatalf("RevokeSkillGrants removed %d rules, want the skill's one", n)
 	}
 	if got := len(kit.Engine().Grants()); got != 0 {
@@ -660,8 +660,10 @@ func TestARestartRegrantsOnlyWhatTheJournalLeftInForce(t *testing.T) {
 		if _, err := agent.Prompt(t.Context(), openresponses.UserText("cut the release")); err != nil {
 			t.Fatal(err)
 		}
-		if revoke && kit.RevokeSkillGrants(t.Context()) == 0 {
-			t.Fatal("the revoke removed nothing")
+		if revoke {
+			if n, err := kit.RevokeSkillGrants(t.Context()); err != nil || n == 0 {
+				t.Fatalf("the revoke removed %d rules (%v), want some", n, err)
+			}
 		}
 		return kit.SessionID()
 	}
@@ -717,7 +719,7 @@ func TestARevokeOfASetWithNoRulesSurvivesARestart(t *testing.T) {
 	if _, err := agent.Prompt(t.Context(), openresponses.UserText("cut the release")); err != nil {
 		t.Fatal(err)
 	}
-	first.RevokeSkillGrants(t.Context())
+	_, _ = first.RevokeSkillGrants(t.Context())
 	unsubscribe()
 	// The kit's revocation is recorded as the engine records one, with
 	// agentpolicy v0.0.19's members: the kind, the source and the scope.
@@ -870,7 +872,7 @@ func TestASkillGrantDoesNotReachAnotherConversation(t *testing.T) {
 	}
 
 	// Ending one conversation ends its grants and no other's.
-	if n := kit.RevokeSkillGrants(inCtx(alice)); n != 1 {
+	if n, _ := kit.RevokeSkillGrants(inCtx(alice)); n != 1 {
 		t.Fatalf("RevokeSkillGrants removed %d rules, want the one conversation's one", n)
 	}
 	if a, c := grantsOf(alice), grantsOf(carol); a != 0 || c != 1 {
@@ -1424,7 +1426,7 @@ func TestAScopeIsNotTheParentOfAScopeItsNameBeginsWith(t *testing.T) {
 		t.Fatalf("grants in force after a message in user/4 = %v, want 0, 1, 1", got)
 	}
 	// Ending user/42 ends user/42's grant alone, and a message in it too.
-	if n := kit.RevokeSkillGrants(ctxOf("user/42")); n != 1 {
+	if n, _ := kit.RevokeSkillGrants(ctxOf("user/42")); n != 1 {
 		t.Fatalf("RevokeSkillGrants(user/42) removed %d rules, want its own one", n)
 	}
 	if got := inForce(); !slices.Equal(got, []int{0, 0, 1}) {
@@ -1493,7 +1495,7 @@ func TestAMessageTheTailMissesEndsTheChildrensGrants(t *testing.T) {
 			ctx := agentkit.ContextWithRecorder(session.ContextWithSessionID(t.Context(), kit.SessionID()), kit.Recorder())
 			if byCall {
 				// Ending the conversation ends its children's grants too.
-				if n := kit.RevokeSkillGrants(ctx); n != 1 {
+				if n, _ := kit.RevokeSkillGrants(ctx); n != 1 {
 					t.Fatalf("RevokeSkillGrants removed %d rules, want the child's one", n)
 				}
 			} else {

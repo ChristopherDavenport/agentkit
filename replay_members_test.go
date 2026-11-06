@@ -193,7 +193,7 @@ func TestAResumedForkGrantsIntoItsOwnScopeNotItsOrigins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if kit.RevokeSkillGrants(ctxA) == 0 {
+	if n, _ := kit.RevokeSkillGrants(ctxA); n == 0 {
 		t.Fatal("A's revoke removed nothing")
 	}
 

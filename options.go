@@ -971,15 +971,17 @@ func WithDeferredTools(fn func(*Kit) []agenttool.Tool) Option {
 // session names the child's. With [WithMemory] as well, the same
 // context carries the child's session ID under
 // [agentmemory.WithSession], which is the key the memory journal
-// reads: a memory the child saves names the child's session. Under
-// [WithSkillGrants] the run context also carries a grant scope of the
+// reads: a memory the child saves names the child's session. When the
+// kit has an engine the run context also carries a grant scope of the
 // child's own, under its conversation's, [agentpolicy.ContextWithGrantScope]:
 // the child's session ID, or the call's ID and a number without a
-// recording. A skill its parent read grants the child's calls nothing,
-// and one the child reads is the child's alone, ended with its
-// conversation's next message; see [WithSkillGrants]. Without skill
-// grants the kit puts no scope there, and a scope the product put on the
-// host's context is the child's. Those
+// recording, which the kit records as the conversation's child, so
+// [Kit.RevokeSkillGrants] ends whatever was granted under it with the
+// conversation, a front's set as well as a skill's. A skill its parent
+// read, or a set granted under the conversation's scope, grants the
+// child's calls nothing, and under [WithSkillGrants] a skill the child
+// reads is the child's alone, ended with its conversation's next
+// message; see [WithSkillGrants]. Those
 // bindings are the reason this option exists rather than the child
 // going in through [WithTools]: the recorder does not exist until [New]
 // has opened the session, so a product doing this by hand reaches for
@@ -1454,12 +1456,12 @@ func (k *Kit) childRun(parentCtx, ctx context.Context, rec *session.Recorder, na
 	parent := k.GrantScope(parentCtx)
 	scope := parent + childSep + child
 	ctx = agentpolicy.ContextWithGrantScope(ctx, scope)
+	// Linked with or without skill grants: a front may grant under the
+	// child's scope, and RevokeSkillGrants ends it with the conversation.
+	k.scopes.link(parent, scope)
 	if k.grants == nil {
 		return ctx
 	}
-	k.grants.mu.Lock()
-	k.grants.link(parent, scope)
-	k.grants.mu.Unlock()
 	if m, ok := k.markFor(parentCtx); ok {
 		ctx = context.WithValue(ctx, parentMarkKey{k}, m)
 	}

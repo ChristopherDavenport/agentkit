@@ -165,6 +165,10 @@ type Kit struct {
 	runUnions bounded[map[string]agenttool.Tool]
 	// childSeq numbers the scopes of child agents run with no recording.
 	childSeq atomic.Uint64
+	// scopes is the registry of child agents' grant scopes, linked under
+	// their conversation's whenever the kit has an engine, which
+	// RevokeSkillGrants ends with the conversation.
+	scopes childScopes
 
 	// mu guards the skill catalogue and its tool, which ReloadSkills
 	// replaces, and the parts, the memory manifest and the memory
@@ -236,6 +240,13 @@ type Kit struct {
 	// what installs failOnLostVerdict.
 	lostVerdicts    bounded[error]
 	recordsVerdicts bool
+	// betweenRuns is the first verdict write each session refused outside
+	// any run and outside a call that returns the error, keyed by the
+	// session's ID: a revocation reported after RevokeSkillGrants
+	// returned, or a product's own rule change between runs. The next
+	// run recorded there fails on it, or the next RevokeSkillGrants
+	// returns it, whichever comes first.
+	betweenRuns bounded[error]
 
 	// compact is the compaction transform the kit built, nil without
 	// one; Control.Compact asks it to fold.
@@ -963,6 +974,7 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 				matchers: s.matchers,
 				scoped:   s.skillGrantScope,
 				hooks:    len(s.beforeToolCall) > 0 || len(s.engineOpts) > 0,
+				children: &k.scopes,
 			}
 			if s.engine == nil {
 				k.grants.observe = k.observeVerdicts(s, false)
@@ -1989,8 +2001,9 @@ var ErrNoChildRecorder = errors.New("agentkit: no recorder writes the conversati
 // whose header names the parent and the spawn: the foreground session's
 // export embeds its steps, and agentsession.DelegatedWork counts it. The
 // context carries the recorder, the child's session ID for the memory
-// journal, and under [WithSkillGrants] a grant scope of the child's own,
-// as a child [WithChildAgent] runs has. A later pass continues the child
+// journal, and, when the kit has an engine, a grant scope of the child's
+// own, linked to the conversation's for [Kit.RevokeSkillGrants], as a
+// child [WithChildAgent] runs has. A later pass continues the child
 // with [Kit.ContinueChild]. The kit that calls it may be another than
 // the one the conversation's agent runs under, a pass's kit built
 // [WithRecorder] the conversation's recorder.
@@ -2161,8 +2174,11 @@ func callIDOf(p agentturn.PendingCall) string {
 // of a decision the run went on under, and a restart regrants skill
 // grants from these verdicts. A write that fails in the last hook a
 // run calls, an output guard's verdict on the final answer or a stop
-// hook's, has no later hook in that run and is lost, and so is one that
-// fails outside any run, a revocation a product makes between runs.
+// hook's, has no later hook in that run and is lost. One made under a
+// call that returns the error, [Kit.RevokeSkillGrants], goes to that
+// call, and one that fails outside any run otherwise, a product's rule
+// change between runs, is kept for its session and fails the next run
+// recorded there, [Kit.loseVerdict].
 // When the engine had deferred the call whose hook fails the run, it
 // keeps what it held of the run until [agentpolicy.Engine.Forget].
 func (k *Kit) observeVerdicts(s *settings, guards bool) func(context.Context, agentpolicy.Verdict) {
@@ -2175,7 +2191,7 @@ func (k *Kit) observeVerdicts(s *settings, guards bool) func(context.Context, ag
 		if rec := k.recorderFor(ctx); rec != nil && (!guards || v.Action != agentturn.Allow || v.Reason != "") {
 			ns, data := v.Record()
 			if _, err := rec.Annotate(ctx, ns, json.RawMessage(data)); err != nil {
-				k.loseVerdict(ctx, v, err)
+				k.loseVerdict(ctx, rec, v, err)
 			}
 		}
 		if product != nil {
@@ -2184,22 +2200,85 @@ func (k *Kit) observeVerdicts(s *settings, guards bool) func(context.Context, ag
 	}
 }
 
-// loseVerdict keeps the failed write of v for the run on ctx, the first
-// one only, for failOnLostVerdict.
-func (k *Kit) loseVerdict(ctx context.Context, v agentpolicy.Verdict, err error) {
-	run := agentturn.RunIDFromContext(ctx)
-	if run == "" {
+// verdictSink collects the verdict writes a call that returns their
+// error lost, [Kit.RevokeSkillGrants]: it rides on the call's context,
+// which the engine hands its observers with a change's verdicts on
+// whichever goroutine reports them, and is closed when the call
+// returns, after which a write lost under it is kept between runs.
+type verdictSink struct {
+	mu     sync.Mutex
+	err    error
+	closed bool
+}
+
+type verdictSinkKey struct{}
+
+// keep keeps err, the first one only, unless the sink is closed, and
+// reports whether it did.
+func (s *verdictSink) keep(err error) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	if s.err == nil {
+		s.err = err
+	}
+	return true
+}
+
+// close closes the sink and returns what it kept.
+func (s *verdictSink) close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	return s.err
+}
+
+// loseVerdict keeps the failed write of v to rec: for the call on ctx
+// that returns it, [verdictSink], while that call has not returned; else
+// for the run on ctx, the first one only, for failOnLostVerdict; else,
+// outside any run, for the session rec writes, the first one only, which
+// the next run recorded there or the next RevokeSkillGrants returns.
+func (k *Kit) loseVerdict(ctx context.Context, rec *session.Recorder, v agentpolicy.Verdict, err error) {
+	err = fmt.Errorf("agentkit: recording the policy verdict on %s: %w", verdictSubject(v), err)
+	if sink, ok := ctx.Value(verdictSinkKey{}).(*verdictSink); ok && sink.keep(err) {
 		return
 	}
+	run := agentturn.RunIDFromContext(ctx)
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if _, ok := k.lostVerdicts.get(run); !ok {
-		k.lostVerdicts.put(run, fmt.Errorf("agentkit: recording the policy verdict on %s: %w", v.Subject, err))
+	if run != "" {
+		if _, ok := k.lostVerdicts.get(run); !ok {
+			k.lostVerdicts.put(run, err)
+		}
+		return
+	}
+	if _, ok := k.betweenRuns.get(rec.SessionID()); !ok {
+		k.betweenRuns.put(rec.SessionID(), err)
 	}
 }
 
+// verdictSubject names what v is about, for a lost write's error: the
+// subject it decided, or the rule change it records.
+func verdictSubject(v agentpolicy.Verdict) string {
+	switch {
+	case v.Subject != "":
+		return v.Subject
+	case v.Grant != "" && v.Source != "":
+		return string(v.Grant) + " of " + v.Source
+	case v.Grant != "":
+		return string(v.Grant) + " under " + v.Scope
+	case v.Tool != "":
+		return v.Tool
+	}
+	return v.Reason
+}
+
 // failOnLostVerdict returns the verdict write the run on ctx lost, once,
-// so the hook that calls it fails the run. The kit calls it after its
+// so the hook that calls it fails the run, and else the one the session
+// the run records into lost between runs, unless the run is a child's
+// recorded in a session of its own. The kit calls it after its
 // engine decides a call, which reports the call's verdict before it
 // returns, and after the guards and the instructions in BeforeModelCall,
 // which find what a guard's check and a skill read's grant lost.
@@ -2212,11 +2291,35 @@ func (k *Kit) failOnLostVerdict(ctx context.Context, run string) error {
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	err, ok := k.lostVerdicts.get(run)
-	if !ok {
+	if err, ok := k.lostVerdicts.get(run); ok {
+		k.lostVerdicts.delete(run)
+		return err
+	}
+	if rec := k.recorderFor(ctx); rec != nil {
+		sid := rec.SessionID()
+		if own := session.SessionIDFromContext(ctx); own == "" || own == sid {
+			if err, ok := k.betweenRuns.get(sid); ok {
+				k.betweenRuns.delete(sid)
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// lostBetweenRuns returns, once, the verdict write the session the
+// recorder on ctx writes lost between runs.
+func (k *Kit) lostBetweenRuns(ctx context.Context) error {
+	rec := k.recorderFor(ctx)
+	if rec == nil {
 		return nil
 	}
-	k.lostVerdicts.delete(run)
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	err, ok := k.betweenRuns.get(rec.SessionID())
+	if ok {
+		k.betweenRuns.delete(rec.SessionID())
+	}
 	return err
 }
 
@@ -2327,7 +2430,7 @@ func (k *Kit) revokeOnUserMessage(ctx context.Context, info agentturn.TurnStartI
 	}
 	_, ended := k.grants.revokeLive(ctx, false)
 	// The child agents of the conversation are over with its message.
-	k.grants.endChildren(ctx)
+	k.endChildren(ctx)
 	if len(ended) > 0 {
 		k.grants.keepEnded(k.grants.scope(ctx), ended)
 		return openresponses.Items{openresponses.DeveloperText(grantsEndedNote(ended))}, nil
@@ -2978,20 +3081,70 @@ func (k *Kit) RegrantSkills(ctx context.Context, sess *agentsession.Session, opt
 	return nil
 }
 
-// RevokeSkillGrants revokes every grant a skill's read made through
-// [WithSkillGrants] in the conversation of ctx, [Kit.GrantScope], and
-// those of the child agents run under it, and returns the number of
-// rules the engine removed. A front calls it when a grant should end,
-// the end of a run or of a conversation, and the end of a conversation
-// is also when the kit may forget what it kept of its grants;
+// RevokeSkillGrants ends the conversation of ctx, [Kit.GrantScope], for
+// the policy engine: it revokes every grant a skill's read made through
+// [WithSkillGrants] in the conversation, and every rule set under the
+// grant scopes of the child agents run under it, [WithChildAgent] and
+// [Kit.StartChild], whether a read or a front made them and whether or
+// not the kit has skill grants. It returns the number of rules the
+// engine removed. A front calls it when a grant should end, the end of
+// a run or of a conversation, and the end of a conversation is also when
+// the kit may forget what it kept of its grants and its child scopes;
 // [WithSkillGrantScope] revokes when each message arrives. Another
 // conversation's grants stay. A skill read again is granted again. It is
-// zero and does nothing without skill grants.
-func (k *Kit) RevokeSkillGrants(ctx context.Context) int {
-	if k.grants == nil {
+// zero and does nothing without an engine.
+//
+// The error is a revocation's verdict the conversation's session would
+// not record, the engine's or the kit's own for a skill's set that held
+// no rule, and else one its session lost between runs since: a
+// restart replays the session's journal, which then says a grant is
+// still in force. The engine has revoked all the same. A verdict
+// reported after it returns, as one is when it is called from inside
+// the engine's observer, is kept for the conversation's next run, which
+// fails on it, or the next RevokeSkillGrants.
+func (k *Kit) RevokeSkillGrants(ctx context.Context) (int, error) {
+	sink := &verdictSink{}
+	ctx = context.WithValue(ctx, verdictSinkKey{}, sink)
+	n := 0
+	if k.grants != nil {
+		n, _ = k.grants.revokeLive(ctx, true)
+	}
+	n += k.endChildren(ctx)
+	err := sink.close()
+	if lost := k.lostBetweenRuns(ctx); lost != nil {
+		err = errors.Join(err, lost)
+	}
+	return n, err
+}
+
+// endChildren ends every rule set under the grant scopes of the child
+// agents run under the grant scope of ctx, [Kit.childContext], and their
+// own children's, and forgets their scopes: a child is one run of a
+// conversation, nothing revokes its sets when it ends, and a scope no
+// run reaches again would be a rule set the engine consults for every
+// decision for as long as it lives. The scopes are those recorded as the
+// conversation's children, so a front's set under one is ended too.
+// Under skill grants it takes their lock as a revocation does, so a read
+// that is granting in a child's scope is not half undone. It returns the
+// number of rules the engine removed.
+func (k *Kit) endChildren(ctx context.Context) int {
+	if k.engine == nil {
 		return 0
 	}
-	return k.grants.revoke(ctx)
+	scope := k.GrantScope(ctx)
+	if k.grants != nil {
+		k.grants.gmu.Lock()
+		defer k.grants.gmu.Unlock()
+	}
+	children := k.scopes.take(scope)
+	if k.grants != nil {
+		k.grants.forget(children)
+	}
+	n := 0
+	for _, child := range children {
+		n += k.engine.RevokeScope(agentpolicy.ContextWithGrantScope(ctx, child))
+	}
+	return n
 }
 
 // ownInstructions reports whether text is the instructions of a config

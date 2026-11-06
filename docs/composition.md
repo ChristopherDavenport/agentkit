@@ -77,7 +77,8 @@ skill, the session of the run's recorder or the session ID the run's
 context names, `kit.GrantScope(ctx)`, and it decides no other
 conversation's calls. A front that ends a conversation calls
 `kit.RevokeSkillGrants(ctx)` with its context, so nothing the
-conversation opened outlives it, and `WithSkillGrantReport` hears every
+conversation or its child agents opened outlives it, and hears from
+its error when the session would not record a revocation, and `WithSkillGrantReport` hears every
 conversation's reads with `SkillGrant.Scope` saying whose. An MCP
 server's connection stays the kit's: it is dialed once at `New`, and its
 identity, an OAuth token among it, every conversation shares. A front
@@ -141,9 +142,10 @@ childagent.WithRunContext(func(ctx context.Context, callID string) context.Conte
 	parent := kit.GrantScope(ctx)
 	ctx = rec.ChildContext(ctx, callID)
 	ctx = agentmemory.WithSession(ctx, session.SessionIDFromContext(ctx))
-	// Under WithSkillGrants only: the child's own grant scope, under its
-	// conversation's. The kit also records whose child it is and which user
-	// message its grants are bound to, for the conversation's next message.
+	// Whenever the kit has an engine: the child's own grant scope, under
+	// its conversation's. The kit also records whose child it is, for
+	// kit.RevokeSkillGrants, and under WithSkillGrants which user message
+	// its grants are bound to, for the conversation's next message.
 	return agentpolicy.ContextWithGrantScope(ctx, parent+"/"+session.SessionIDFromContext(ctx))
 })
 ```
@@ -151,14 +153,16 @@ childagent.WithRunContext(func(ctx context.Context, callID string) context.Conte
 The grant scope is the third binding. A skill a conversation read grants
 its tools to that conversation's calls, and a child run from a tool call
 inherits its parent's context, so without a scope of its own it would
-run under what its parent was granted. Under `WithSkillGrants` the kit
-gives the child's context one, the child's session ID under its
+run under what its parent was granted. Whenever the kit has an engine
+it gives the child's context one, the child's session ID under its
 conversation's, or the call's ID and a number when there is no
-recording; a skill the child reads is the child's alone, and the
-conversation's next message, or `kit.RevokeSkillGrants`, ends it with
-the conversation's own. Without skill grants the kit puts no scope on
-the child's context, and a scope the product put on the host's, with
-grants of its own under it, is the child's.
+recording, and records it as the conversation's child, with skill
+grants or without; a set granted under the conversation's scope, a
+person's "allow for this session", does not decide the child's calls.
+`kit.RevokeSkillGrants` ends every set under the child's scope with the
+conversation's, a front's as well as a skill's, and under
+`WithSkillGrants` so does the conversation's next message; a skill the
+child reads is the child's alone.
 
 The recorder does not exist until `New` has opened the session, so
 those bindings are not something a product can do in the option list
@@ -166,7 +170,7 @@ those bindings are not something a product can do in the option list
 caller's own `childagent.Option`s are applied after the kit's, so
 passing an observer or a run context still wins.
 
-Without a session, or without the recording, and without skill grants,
+Without a session, or without the recording, and without an engine,
 a child is an ordinary tool and needs no option:
 
 ```go

@@ -274,7 +274,9 @@ conversations and a child agent runs under a scope of its own.
 `WithSkillGrantScope` ends each grant when the user's next message in
 its conversation arrives, whichever agent's run received it, as Claude
 Code clears `allowed-tools` at the next message, and
-`kit.RevokeSkillGrants(ctx)` ends a conversation's when a front says; a
+`kit.RevokeSkillGrants(ctx)` ends a conversation's, and every set under
+its child agents' scopes, when a front says, returning the error of a
+revocation the session would not record; a
 skill read again is granted again, and under the scope the model is told
 which grants a message ended and that a read restores them, and a call
 only an ended grant allowed is refused, inside the engine, naming the
