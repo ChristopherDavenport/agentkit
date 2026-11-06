@@ -475,7 +475,31 @@ or `New`'s, together.
 `WithObserver` and `WithRunContext` to the run's recorder, the memory
 bridge only when `WithMemory` is configured, and adds nothing else, so a
 product that builds its own child hands it to `WithTools` and the
-result is the same tool. `WithDeferredTools` is the same again for a
+result is the same tool. `WithChild(childCfg, agentkit.ChildParts(ids...))`
+is the same line with `childCfg` replaced by
+`kit.ChildConfig(childCfg, ids...)`, which a product building its own
+child calls from `WithDeferredTools`, the kit being what holds the
+parts:
+
+```go
+// The child's own prompt as a part, then the kit's parts of the groups
+// ids names, as the guards left them, each with its source and trust.
+own := []agentkit.Part{{ID: agentkit.PartProduct, Text: childCfg.Instructions, Source: agentkit.SourceProduct}}
+childCfg.Instructions = agentsession.JoinInstructions(append(own, selected(kit.Parts(), ids)...))
+// Before each of the child's requests whose instructions are still the
+// composition's: the selected groups rendered again over the kit's
+// parts, the memory block, WithPart parts and the servers'
+// instructions as the instructions hook below renders them, the memory
+// manifest written in the child's session, each guarded with
+// guardParts, and joined after the prompt. Ahead of the child's own.
+childCfg.BeforeModelCall = agentturn.ChainBeforeModelCall(renderChild, childCfg.BeforeModelCall)
+```
+
+and the parts function the kit's recorder takes knows both the text the
+child's run starts with and each request's render, so the child's
+config entries carry `instructions_parts`, a memory entry's labelled
+`untrusted` as the parent's are, and the child's path trust holds the
+label (agentsession RFC 0001 0.21, Instructions as parts). `WithDeferredTools` is the same again for a
 tool that needs the engine, the catalogue or the session; both exist
 because the kit is what opens those, not because it wraps them.
 
@@ -1210,7 +1234,9 @@ Eleven things, all outside `agentturn.Config`:
   `sent` is what the last turn's hook sent and `first` is `New`'s
   guarded render, which the recorder asks about for a run's first
   config entry. Never the layers' own render: that is text a guard kept
-  from the model.
+  from the model. A child `Kit.ChildConfig` composed is asked about the
+  same way after them, its config's text and its last request's, each
+  with the omissions of the groups it takes.
 - `WithSession` and `WithResumedSession` open the recorder with
   `session.WithReopened` too, keeping the session `Kit.Session()`
   returns. The hook runs on the goroutine writing the entry, under the

@@ -164,6 +164,24 @@ conversation's, a front's as well as a skill's, and under
 `WithSkillGrants` so does the conversation's next message; a skill the
 child reads is the child's alone.
 
+The child's instructions are its config's own string unless it asks
+for the kit's parts. `WithChild` is `WithChildAgent` with the kit's
+choices for the child beside agentturn's; `ChildParts` composes the
+child's prompt and the parts it names with `Kit.ChildConfig`, so a
+child that should know the conversation's memory or its AGENTS.md
+gets them rendered for each of its requests and recorded as parts,
+each with its source and trust:
+
+```go
+agentkit.WithChild(exploreCfg,
+	agentkit.ChildParts(agentkit.PartMemory, agentsmd.PartID),
+	agentkit.ChildAgentOptions(childagent.WithAskParent()))
+```
+
+A memory entry the child is shown is then on its path as an
+`agentmemory` part labelled `untrusted`, as on the parent's, where a
+string the product copied in would carry no label.
+
 The recorder does not exist until `New` has opened the session, so
 those bindings are not something a product can do in the option list
 — which is the whole reason this is an option and a peer is not. The

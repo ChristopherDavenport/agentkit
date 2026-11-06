@@ -63,6 +63,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `session.MoveTo` to the leaf it left, which reads the agent's state
   there from the record.
 
+### Added
+
+- `Kit.ChildConfig(cfg, ids...)` composes a child agent's instructions
+  from parts: the child's own prompt as the `product` part, then the
+  kit's parts of the groups `ids` names, such as `PartMemory` or
+  `agentsmd.PartID`, as the input guards left them, each with its
+  source and trust. The config's `BeforeModelCall` renders them again
+  for each of the child's requests, and `Kit.PartsFor` knows both the
+  config's text and each render, so a child recorded through the kit's
+  recorder writes its config entries as parts and a memory entry's
+  `untrusted` label reaches its path trust, as agentsession RFC 0001
+  0.21 asks of a writer composing instructions from a layer of known
+  trust. `WithChild(cfg, ...ChildOption)` offers such a child:
+  `ChildParts(ids...)` composes it, and `ChildAgentOptions(...)` passes
+  agentturn's options; `WithChildAgent(cfg, opts...)` is
+  `WithChild(cfg, ChildAgentOptions(opts...))`, unchanged (#122).
+
 ### Fixed
 
 - `Kit.ReloadSkills`'s doc said the new catalogue reached the run in

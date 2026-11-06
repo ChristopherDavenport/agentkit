@@ -188,6 +188,9 @@ type Kit struct {
 	// ReloadSkills, newest first, which an agent not yet handed the new
 	// config still starts its runs with.
 	earlier [][]Part
+	// children are the compositions Kit.ChildConfig made, by the child's
+	// prompt and the groups it takes, which PartsFor recognises.
+	children map[string]*childComposition
 	// reload re-discovers the skills for ReloadSkills, over the sources
 	// New was given; nil without skills.
 	reload func() (*agentskill.Catalog, Part, []Omission, error)
@@ -247,6 +250,11 @@ type Kit struct {
 	// run recorded there fails on it, or the next RevokeSkillGrants
 	// returns it, whichever comes first.
 	betweenRuns bounded[error]
+
+	// rerender is Kit.render over New's settings and the kit's input
+	// guards, which a child's BeforeModelCall renders its parts with;
+	// set by buildHooks, before any run.
+	rerender func(ctx context.Context, base []Part, want map[string]bool) (rendered, error)
 
 	// compact is the compaction transform the kit built, nil without
 	// one; Control.Compact asks it to fold.
@@ -946,7 +954,11 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 	// Their own source, so a collision with a product tool says which
 	// of the two to rename rather than blaming one name twice.
 	for i, d := range s.deferTools {
-		if tools := d.fn(k); len(tools) > 0 {
+		tools, err := d.fn(k)
+		if err != nil {
+			return fmt.Errorf("agentkit: %s: %w", d.label(i), err)
+		}
+		if len(tools) > 0 {
 			ts.sources = append(ts.sources, source{name: d.label(i), tools: tools})
 		}
 	}
@@ -1347,6 +1359,9 @@ func (k *Kit) buildHooks(s *settings) {
 	if len(s.guards) > 0 {
 		guards = guard.Chain{Guards: s.guards, Observer: k.observeVerdicts(s, true)}
 	}
+	k.rerender = func(ctx context.Context, base []Part, want map[string]bool) (rendered, error) {
+		return k.render(ctx, s, guards, base, want)
+	}
 
 	// BeforeModelCall: the instructions, memory re-rendered and each
 	// part guarded, then the guards over the whole request, then the
@@ -1550,82 +1565,120 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 			return nil
 		}
 
-		var (
-			man     agentmemory.Manifest
-			memOm   []Omission
-			partOm  []Omission
-			mcpOm   []Omission
-			dropped bool
-			render  = s.memStore != nil
-		)
-		// The product's parts first, so the memory block is bounded by
-		// what they leave of the budget this request.
-		for _, pp := range s.parts {
-			g, om, err := renderPart(ctx, pp)
-			if err != nil {
-				return err
-			}
-			base = withGroup(base, pp.id, g, k.order)
-			partOm = append(partOm, om...)
-		}
-		// The servers' instructions as the kit holds the servers now: an
-		// added server's join, a removed or closed one's leave.
-		if k.mcpParts {
-			var g []Part
-			servers := k.mcpServers()
-			g, mcpOm = mcpGroup(servers, k.mcpTrusted, k.offeredServers(ctx, servers), mcpShare(s.budget, base))
-			base = withGroup(base, PartMCP, g, k.order)
-		}
-		if render {
-			// The same render, the same bound and the same drop as the
-			// first one, so the block cannot grow past the budget
-			// between turns and cannot come back at its floor after the
-			// budget dropped it.
-			group, m, om, drop, err := memoryPart(ctx, s, memoryShare(s.budget, base))
-			if err != nil {
-				return err
-			}
-			base, man, memOm, dropped = withGroup(base, PartMemory, group, k.order), m, om, drop
-			// Recorded before the guards run: the manifest says what the
-			// render put in the block, which a guard that blocks the
-			// request does not change.
-			if err := k.record(ctx, man); err != nil {
-				return err
-			}
-		}
-
-		sent := base
-		if len(guards.Guards) > 0 {
-			var err error
-			if sent, err = guardParts(ctx, guards, base); err != nil {
-				return err
-			}
+		r, err := k.render(ctx, s, guards, base, nil)
+		if err != nil {
+			return err
 		}
 
 		k.mu.Lock()
-		k.base, k.parts = base, sent
+		k.base, k.parts = r.base, r.sent
 		if len(s.parts) > 0 {
-			k.partOmitted = partOm
+			k.partOmitted = r.partOm
 		}
 		if k.mcpParts {
-			k.mcpOmitted = mcpOm
+			k.mcpOmitted = r.mcpOm
 		}
-		if render {
-			k.manifest, k.memOmitted, k.memDropped = man, memOm, dropped
+		if r.memory {
+			k.manifest, k.memOmitted, k.memDropped = r.man, r.memOm, r.dropped
 			if id := agentturn.RunIDFromContext(ctx); id != "" {
-				k.rendered.put(id, memoryRender{man: man, dropped: dropped})
+				k.rendered.put(id, memoryRender{man: r.man, dropped: r.dropped})
 			}
 		}
 		k.mu.Unlock()
 
-		req.Instructions = agentsession.JoinInstructions(sent)
-		if dropped {
+		req.Instructions = agentsession.JoinInstructions(r.sent)
+		if r.dropped {
 			// No block and no word on the tools, so no tool that writes
 			// over what the block would have shown.
 			req.Tools = withoutMemoryWrites(req.Tools)
 		}
 		return nil
 	}
+}
+
+// rendered is one render of the parts for a request: base as the
+// layers rendered them, sent as the guards left them, and what each
+// layer that rendered left out.
+type rendered struct {
+	base, sent           []Part
+	man                  agentmemory.Manifest
+	memOm, partOm, mcpOm []Omission
+	// memory is true when the memory block was rendered, and dropped
+	// when the budget dropped it.
+	memory, dropped bool
+}
+
+// render re-renders the parts that change between requests over base,
+// the [WithPart] parts, the MCP servers' instructions and the memory
+// block, and runs the input guards over each part, as [Kit.instructions]
+// does for the kit's own requests. want, when it is not nil, says which
+// groups a child composed with [Kit.ChildConfig] takes: only those are
+// rendered again and guarded, and sent holds only them. When the
+// memory block is rendered its manifest is recorded in the session the
+// run on ctx writes, a child's in its own.
+func (k *Kit) render(ctx context.Context, s *settings, guards guard.Chain, base []Part, want map[string]bool) (rendered, error) {
+	takes := func(id string) bool { return want == nil || want[id] }
+	var r rendered
+	// The product's parts first, so the memory block is bounded by
+	// what they leave of the budget this request.
+	for _, pp := range s.parts {
+		if !takes(pp.id) {
+			continue
+		}
+		g, om, err := renderPart(ctx, pp)
+		if err != nil {
+			return r, err
+		}
+		base = withGroup(base, pp.id, g, k.order)
+		r.partOm = append(r.partOm, om...)
+	}
+	// The servers' instructions as the kit holds the servers now: an
+	// added server's join, a removed or closed one's leave.
+	if k.mcpParts && takes(PartMCP) {
+		var g []Part
+		servers := k.mcpServers()
+		g, r.mcpOm = mcpGroup(servers, k.mcpTrusted, k.offeredServers(ctx, servers), mcpShare(s.budget, base))
+		base = withGroup(base, PartMCP, g, k.order)
+	}
+	if s.memStore != nil && takes(PartMemory) {
+		// The same render, the same bound and the same drop as the
+		// first one, so the block cannot grow past the budget
+		// between turns and cannot come back at its floor after the
+		// budget dropped it.
+		group, m, om, drop, err := memoryPart(ctx, s, memoryShare(s.budget, base))
+		if err != nil {
+			return r, err
+		}
+		base, r.man, r.memOm, r.dropped, r.memory = withGroup(base, PartMemory, group, k.order), m, om, drop, true
+		// Recorded before the guards run: the manifest says what the
+		// render put in the block, which a guard that blocks the
+		// request does not change.
+		if err := k.record(ctx, r.man); err != nil {
+			return r, err
+		}
+	}
+	r.base, r.sent = base, base
+	if want != nil {
+		r.sent = selectGroups(base, want)
+	}
+	if len(guards.Guards) > 0 {
+		var err error
+		if r.sent, err = guardParts(ctx, guards, r.sent); err != nil {
+			return r, err
+		}
+	}
+	return r, nil
+}
+
+// selectGroups is the parts of the groups want names, in their order.
+func selectGroups(parts []Part, want map[string]bool) []Part {
+	var out []Part
+	for _, p := range parts {
+		if want[group(p.ID)] {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // withGroup returns parts with the parts of group id replaced by g, in
@@ -2755,8 +2808,11 @@ func (k *Kit) Parts() []Part {
 //	kit, err = agentkit.New(ctx, agentkit.WithRecorder(rec), ...)
 //
 // The recorder asks for every session it writes, a child run's among
-// them, and a request whose instructions are not this kit's gets nil,
-// so the child keeps the string unless [PartsFrom] names its kit too.
+// them. A child whose config [Kit.ChildConfig] composed gets its own
+// parts, for the text its run starts with and for each request's
+// render; any other request whose instructions are not this kit's gets
+// nil, so the child keeps the string unless [PartsFrom] names its kit
+// too.
 // Concurrent runs off one kit share the last render, so a request from
 // the other run's render gets nil and is recorded as a string, which is
 // what the recorder does with parts that do not join. It is safe on a
@@ -2766,33 +2822,36 @@ func (k *Kit) PartsFor(_ context.Context, req openresponses.Request) ([]agentses
 		return nil, nil
 	}
 	k.mu.Lock()
-	parts, memOmitted, partOmitted, mcpOmitted := k.parts, k.memOmitted, k.partOmitted, k.mcpOmitted
-	if agentsession.JoinInstructions(parts) != req.Instructions {
+	parts := k.parts
+	var omissions [][]Omission
+	switch {
+	case agentsession.JoinInstructions(parts) == req.Instructions:
+		omissions = [][]Omission{k.omitted, k.partOmitted, k.mcpOmitted, k.memOmitted}
+	case k.firstFor(req.Instructions) != nil:
 		// The configuration's own instructions, which the recorder
 		// settles at a run's start before any hook has run, are New's
 		// render as the guards left it. Never the layers' unguarded
 		// render: that is text a guard kept from the model.
-		if parts = k.firstFor(req.Instructions); parts == nil {
+		parts = k.firstFor(req.Instructions)
+		omissions = [][]Omission{k.omitted, k.firstPartOmitted, k.firstMCPOmitted, k.firstOmitted}
+	default:
+		// A child's, composed by ChildConfig: its config's text or its
+		// last request's.
+		var om []Omission
+		if parts, om = k.childFor(req.Instructions); parts == nil {
 			k.mu.Unlock()
 			return nil, nil
 		}
-		memOmitted, partOmitted, mcpOmitted = k.firstOmitted, k.firstPartOmitted, k.firstMCPOmitted
+		omissions = [][]Omission{om}
 	}
 	out := make([]Part, len(parts))
 	copy(out, parts)
 	// The omissions under the same lock, so they are the same render's.
-	omitted := make([]agentsession.OmittedPart, 0, len(k.omitted)+len(partOmitted)+len(memOmitted))
-	for _, o := range k.omitted {
-		omitted = append(omitted, o.OmittedPart())
-	}
-	for _, o := range partOmitted {
-		omitted = append(omitted, o.OmittedPart())
-	}
-	for _, o := range mcpOmitted {
-		omitted = append(omitted, o.OmittedPart())
-	}
-	for _, o := range memOmitted {
-		omitted = append(omitted, o.OmittedPart())
+	omitted := make([]agentsession.OmittedPart, 0)
+	for _, list := range omissions {
+		for _, o := range list {
+			omitted = append(omitted, o.OmittedPart())
+		}
 	}
 	k.mu.Unlock()
 	return out, omitted

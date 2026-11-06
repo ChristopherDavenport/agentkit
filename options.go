@@ -155,7 +155,7 @@ func (s *settings) summaryReasoning() openresponses.ReasoningConfig {
 type deferred struct {
 	kind string
 	name string
-	fn   func(*Kit) []agenttool.Tool
+	fn   func(*Kit) ([]agenttool.Tool, error)
 }
 
 func (d deferred) label(i int) string {
@@ -954,7 +954,7 @@ func WithToolWrap(fn func(source string, t agenttool.Tool) agenttool.Tool) Optio
 // [Kit.Recorder], [Kit.Session], [Kit.Engine] and [Kit.Catalog] are.
 func WithDeferredTools(fn func(*Kit) []agenttool.Tool) Option {
 	return func(s *settings) {
-		s.deferTools = append(s.deferTools, deferred{kind: "WithDeferredTools", fn: fn})
+		s.deferTools = append(s.deferTools, deferred{kind: "WithDeferredTools", fn: func(k *Kit) ([]agenttool.Tool, error) { return fn(k), nil }})
 	}
 }
 
@@ -995,26 +995,17 @@ func WithDeferredTools(fn func(*Kit) []agenttool.Tool) Option {
 // is the host's: a host that wants the parent's memory writes to name
 // its session prompts with agentmemory.WithSession(ctx, kit.SessionID()).
 //
+// The child's instructions are cfg's, one string the kit does not
+// touch. A child that should see the conversation's memory, its
+// AGENTS.md or another of the kit's parts is offered with [WithChild]
+// and [ChildParts], which compose them with [Kit.ChildConfig], each part
+// recorded with its source and trust.
+//
 // The child is an ordinary [agenttool.Tool] in every other way: it
 // joins the set where [WithTools] puts it, the policy filters it, and a
 // name it shares with another tool is a [Conflict].
 func WithChildAgent(cfg agentturn.Config, opts ...childagent.Option) Option {
-	return func(s *settings) {
-		s.deferTools = append(s.deferTools, deferred{
-			kind: "WithChildAgent",
-			name: cfg.Name,
-			fn: func(k *Kit) []agenttool.Tool {
-				// A fresh slice: appending to opts would grow the
-				// caller's array and make two child agents share it.
-				all := make([]childagent.Option, 0, len(opts)+2)
-				all = append(all,
-					childagent.WithObserver(k.observeChild),
-					childagent.WithRunContext(k.childContext))
-				all = append(all, opts...)
-				return []agenttool.Tool{childagent.New(cfg, all...)}
-			},
-		})
-	}
+	return WithChild(cfg, ChildAgentOptions(opts...))
 }
 
 // WithPolicy builds a policy engine from p and the matchers, and wires
