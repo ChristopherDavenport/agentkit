@@ -149,6 +149,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   agent's queued event waits for the run's next event, which agentturn
   v0.0.38 changed (#125).
 
+- `WithSessionSearch(opts...)` offers `conversation_search(query, roles,
+  limit, start_date, end_date)` (`ConversationSearchTool`), so a
+  kit-built agent finds what an earlier conversation said without the
+  product writing a scan over `List` and `Reader`. It searches the
+  store of the run's recorder with agentsession v0.0.38's `Search` (RFC
+  0002, Search), through the store's `Searcher` when it has one, and
+  leaves out the calling session (`Recorder.SessionOf`) unless
+  `SearchOwnSession()` is given. `SearchFilter(agentsession.ListFilter)`
+  selects the sessions, and its `Limit` caps those read,
+  `DefaultSearchSessions` (100) when it gives none;
+  `SearchOmitRedacted()` and `SearchLimit(n)` (`DefaultSearchHits`, at
+  most `MaxSearchHits` a call) shape the rest. `start_date` and
+  `end_date` are inclusive, a UTC day or an RFC 3339 instant, turned
+  into `Query`'s exclusive bounds. Each hit names its session, the
+  session's name, the message's time and role and its snippet, and the
+  tool states its flow as reading untrusted content. The tool joins
+  the set after the memory tools, labelled `WithSessionSearch`;
+  `SessionSearchTool(recorderFor, opts...)` builds it without the kit
+  (#108).
+
 ### Fixed
 
 - `Kit.ReloadSkills`'s doc said the new catalogue reached the run in

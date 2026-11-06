@@ -154,14 +154,16 @@ same verdicts.
 ### 3. The tool set
 
 A run's tools come from the product, `agentskill.Catalog.Tool()`,
-`agentmemory.Tools`, `mcpclient`, and `agentturn/tools/agent` for a
-child. Five sources, one namespace, and nothing below the kit detects a
+`agentmemory.Tools`, `mcpclient`, `agentturn/tools/agent` for a
+child, and `SessionSearchTool`, `conversation_search` over
+`agentsession.Search`, under `WithSessionSearch`. Six sources, one
+namespace, and nothing below the kit detects a
 collision: two tools with one name reach the model as two entries and
 the loop dispatches whichever the set returns first.
 
 The kit unions them in a stable order — product tools, then child
-agents and other deferred sources, then skills, then memory, then MCP,
-then any provider the product gave — refuses a duplicate present at
+agents and other deferred sources, then skills, then memory, then
+session search, then MCP, then any provider the product gave — refuses a duplicate present at
 `New` with a `Conflict` naming both sources, drops the later of one
 that appears at turn time and tells `WithToolConflict`, and puts
 `agentpolicy`'s `ToolProvider` in front of the result so a tool a bare

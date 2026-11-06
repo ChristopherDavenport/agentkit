@@ -85,6 +85,10 @@ type settings struct {
 	memRender  []agentmemory.RenderOption
 	memTools   []agentmemory.ToolOption
 
+	// search is WithSessionSearch, with its options.
+	search     bool
+	searchOpts []SearchOption
+
 	tools      []agenttool.Tool
 	deferTools []deferred
 	mcp        []mcpDial

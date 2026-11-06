@@ -36,7 +36,7 @@ and no fold is recorded.
 | `Retry`, `ToolExecution`, `MaxParallelTools` | `WithRetry`, `WithToolExecution`, `WithMaxParallelTools` | assign them; the kit contests none of them and reads none of them |
 | `Instructions` | `WithInstructions`, `WithSkills`, `WithMemory`, `WithMemoryArchive`, `WithAgentsMD`, `WithPart`, `WithMCP`, `WithTrustedMCPInstructions` | `strings.Join` of the four blocks, each MCP server's instructions part and each `WithPart` part's first render, in the order of [ordering.md](ordering.md) — see below |
 | `Tools` | — | the kit never sets it; it sets `ToolProvider`, which the loop reads in its place |
-| `ToolProvider` | `WithTools`, `WithSkills`, `WithMemory`, `WithMemoryArchive`, `WithMCP`, `WithMCPResourceTools`, `WithChildAgent`, `WithDeferredTools`, `WithToolProvider`, `WithToolFilter`, `WithToolWrap`, `WithPolicy` | `append` the slices, wrap each tool, and wrap the list in `engine.ToolProvider` — see below |
+| `ToolProvider` | `WithTools`, `WithSkills`, `WithMemory`, `WithMemoryArchive`, `WithSessionSearch`, `WithMCP`, `WithMCPResourceTools`, `WithChildAgent`, `WithDeferredTools`, `WithToolProvider`, `WithToolFilter`, `WithToolWrap`, `WithPolicy` | `append` the slices, wrap each tool, and wrap the list in `engine.ToolProvider` — see below |
 | `BeforeTurn` | `WithSkillGrantScope`, `WithBeforeTurn` | `agentturn.ChainBeforeTurn(revokeOnUserMessage, yours...)` — see below |
 | `BeforeModelCall` | `WithMemory`, `WithPart`, `WithGuards`, `WithPolicy`, `WithSkillGrants`, `WithVerdictObserver`, `WithBeforeModelCall` | `agentturn.ChainBeforeModelCall(instructions, chain.BeforeModelCall(), yours...)` — see below |
 | `BeforeToolCall` | `WithPolicy`, `WithMemory`, `WithSkillGrants`, `WithSkillGrantScope`, `WithBeforeToolCall` | `agentturn.ChainBeforeToolCall(keepSaveBase, decide)`, `decide` being `engine.BeforeToolCall()` under the call's grant scope, the engine built with `agentpolicy.WithHooks(refuseEndedGrant, yours...)`; with `WithEngine` or no policy, `yours...` after the engine and no `refuseEndedGrant` — see below |
@@ -295,6 +295,9 @@ for i, t := range memTools {
 	}
 }
 tools = append(tools, memTools...)
+// WithSessionSearch: conversation_search over the run's recorder's
+// store, agentsession.Search with the calling session left out.
+tools = append(tools, agentkit.SessionSearchTool(recorderFor, searchOpts...))
 for i, t := range tools {
 	tools[i] = wrap(sourceOf(t), t) // WithToolWrap
 	if t.Name() == agentskill.ToolName {
@@ -318,6 +321,16 @@ cfg.ToolProvider = func(ctx context.Context) []agenttool.Tool {
 	return offered(agentpolicy.ContextWithGrantScope(ctx, scopeOf(ctx)))
 }
 ```
+
+`agentkit.SessionSearchTool` is `agenttool.New` over
+`agentsession.Search`, exported so this line is a call and not a copy:
+each call searches `recorderFor(ctx).Store()` for the messages holding
+every word of its query, leaves out `rec.SessionOf(ctx)` unless
+`agentkit.SearchOwnSession()` is given, reads at most the
+`agentkit.SearchFilter`'s `Limit` sessions (`DefaultSearchSessions`
+when it gives none), turns the inclusive `start_date` and `end_date`
+into the exclusive bounds `agentsession.Query` takes, and states its
+flow as reading untrusted content.
 
 `grant` is `WithSkillGrants`, under "What the kit does" below. The
 product's wrapper runs inside it, so what `grant` wraps is the tool the

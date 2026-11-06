@@ -1015,6 +1015,12 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 		}
 		ts.sources = append(ts.sources, source{name: "WithMemory", tools: tools})
 	}
+	if s.search {
+		ts.sources = append(ts.sources, source{
+			name:  "WithSessionSearch",
+			tools: []agenttool.Tool{SessionSearchTool(k.recorderFor, s.searchOpts...)},
+		})
+	}
 	for i, remote := range k.remotes {
 		ts.sources = append(ts.sources, k.remoteSource(k.remoteLabels[i], remote))
 	}
