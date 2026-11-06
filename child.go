@@ -21,6 +21,7 @@ type ChildOption func(*childSettings)
 type childSettings struct {
 	opts  []childagent.Option
 	parts []string
+	share bool
 }
 
 // ChildAgentOptions passes agentturn/tools/agent's options to the
@@ -40,8 +41,31 @@ func ChildParts(ids ...string) ChildOption {
 	return func(c *childSettings) { c.parts = append(c.parts, ids...) }
 }
 
+// ShareGrantScope runs the child under its conversation's grant scope,
+// [Kit.GrantScope] of the parent's run, where a child otherwise has a
+// scope of its own under it. The kit's other bindings stay: the
+// recorder's ChildContext, the memory session and, under
+// [WithSkillGrants], the parent's user-message mark. Passing a
+// childagent.WithRunContext of the product's instead drops all of them.
+//
+// agentpolicy has no scope inheritance, so the scope is shared both
+// ways. The child is decided by every set granted to the conversation, a
+// person's "allow for this session" and a skill its parent read; and a
+// skill the child reads under [WithSkillGrants] grants its tools to the
+// conversation, the parent's calls too, bound to the parent's
+// user-message mark and ended, under [WithSkillGrantScope], with the
+// conversation's next message, as a read of the parent's is. A child that
+// should see its parent's grants and keep its own reads to itself needs
+// scope inheritance in agentpolicy, which there is not. Nothing is
+// linked as the conversation's child, so [Kit.RevokeSkillGrants] ends
+// what the child was granted as the conversation's own.
+func ShareGrantScope() ChildOption {
+	return func(c *childSettings) { c.share = true }
+}
+
 // WithChild is [WithChildAgent] with the kit's own choices for the child
-// beside agentturn's: [ChildParts] and [ChildAgentOptions].
+// beside agentturn's: [ChildParts], [ShareGrantScope] and
+// [ChildAgentOptions].
 // WithChildAgent(cfg, opts...) is WithChild(cfg, ChildAgentOptions(opts...)),
 // and everything WithChildAgent says holds here. The tool's source label
 // is the same, "WithChildAgent #<n> <name>", so a [WithToolFilter] or a
@@ -70,7 +94,7 @@ func WithChild(cfg agentturn.Config, opts ...ChildOption) Option {
 				all := make([]childagent.Option, 0, len(c.opts)+2)
 				all = append(all,
 					childagent.WithObserver(k.observeChild),
-					childagent.WithRunContext(k.childContext))
+					childagent.WithRunContext(k.childContext(c.share)))
 				all = append(all, c.opts...)
 				return []agenttool.Tool{childagent.New(cfg, all...)}, nil
 			},

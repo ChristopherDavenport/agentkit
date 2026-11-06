@@ -80,6 +80,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   agentturn's options; `WithChildAgent(cfg, opts...)` is
   `WithChild(cfg, ChildAgentOptions(opts...))`, unchanged (#122).
 
+- `ShareGrantScope()`, a `WithChild` option, runs the child under its
+  conversation's grant scope rather than one of its own, keeping the
+  kit's recorder, memory session and user-message mark bindings, which
+  a product's own `childagent.WithRunContext` drops, and links no child
+  scope. agentpolicy has no scope inheritance, so the scope is shared
+  both ways: the conversation's sets decide the child's calls, and a
+  skill the child reads grants to the conversation (#120).
+
 ### Fixed
 
 - `Kit.ReloadSkills`'s doc said the new catalogue reached the run in

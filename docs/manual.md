@@ -1313,7 +1313,13 @@ Eleven things, all outside `agentturn.Config`:
   tail test misses ends them as it ends the parent's. Without skill
   grants the child has its scope all the same, and the kit records it
   as the conversation's, so `Kit.RevokeSkillGrants` ends a set a front
-  made under it; a host that wants a `Kit.StartChild` pass to share the
+  made under it. A child offered with `WithChild(cfg,
+  agentkit.ShareGrantScope())` runs under the conversation's scope
+  itself, `agentpolicy.ContextWithGrantScope(ctx, parent)` in the run
+  context above, and is linked to nothing; agentpolicy has no scope
+  inheritance, so the share runs both ways: the conversation's sets
+  decide the child's calls, and a skill the child reads grants to the
+  conversation, bound to the parent's user-message mark. A host that wants a `Kit.StartChild` pass to share the
   conversation's grants puts the conversation's scope on the pass's run
   context itself. The kit forgets what it kept of a conversation's
   grants and child scopes at `Kit.RevokeSkillGrants(ctx)`, which a

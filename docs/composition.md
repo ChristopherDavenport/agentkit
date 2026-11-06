@@ -164,6 +164,18 @@ conversation's, a front's as well as a skill's, and under
 `WithSkillGrants` so does the conversation's next message; a skill the
 child reads is the child's alone.
 
+A child that should act on the conversation's grants is offered with
+`WithChild(cfg, agentkit.ShareGrantScope())`: it runs under the
+conversation's scope, with the recorder, memory and mark bindings kept,
+and no scope of its own is linked. agentpolicy decides a call against
+the unscoped sets and its context's scope alone, with no inheritance,
+so the share runs both ways: the child takes the person's "allow for
+this session" and the skills its parent read, and a skill the child
+reads grants its tools to the conversation, the parent included, until
+the conversation's next message under `WithSkillGrantScope`. A child
+that sees its parent's grants and keeps its own reads to itself needs
+scope inheritance in agentpolicy first.
+
 The child's instructions are its config's own string unless it asks
 for the kit's parts. `WithChild` is `WithChildAgent` with the kit's
 choices for the child beside agentturn's; `ChildParts` composes the

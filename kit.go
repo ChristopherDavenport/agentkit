@@ -2069,7 +2069,7 @@ func (k *Kit) StartChild(ctx context.Context, spawnID string) (context.Context, 
 	if err != nil {
 		return ctx, fmt.Errorf("agentkit: starting child %s: %w", spawnID, err)
 	}
-	return k.childRun(ctx, ContextWithRecorder(cctx, rec), rec, spawnID), nil
+	return k.childRun(ctx, ContextWithRecorder(cctx, rec), rec, spawnID, false), nil
 }
 
 // ContinueChild gives the context for a child [Kit.StartChild] started,
@@ -2088,7 +2088,7 @@ func (k *Kit) ContinueChild(ctx context.Context, spawnID string) (context.Contex
 	if err != nil {
 		return ctx, fmt.Errorf("agentkit: continuing child %s: %w", spawnID, err)
 	}
-	return k.childRun(ctx, ContextWithRecorder(cctx, rec), rec, spawnID), nil
+	return k.childRun(ctx, ContextWithRecorder(cctx, rec), rec, spawnID, false), nil
 }
 
 // AttachChild subscribes the recorder of each run's context to a, the

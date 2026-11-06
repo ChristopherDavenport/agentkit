@@ -989,7 +989,9 @@ func WithDeferredTools(fn func(*Kit) []agenttool.Tool) Option {
 // applied after the kit's, so passing childagent.WithObserver or
 // childagent.WithRunContext here still wins, and a run context of the
 // product's that does not give the child a grant scope leaves it under
-// its parent's.
+// its parent's, without the kit's other bindings. A child meant to share
+// its conversation's grants is offered with [WithChild] and
+// [ShareGrantScope], which keeps them.
 //
 // The kit cannot do the same for the parent's own run, whose context
 // is the host's: a host that wants the parent's memory writes to name
@@ -1409,24 +1411,27 @@ func (k *Kit) observeChild(ctx context.Context, ev agentturn.Event) {
 // calls, and what the child is granted is not the parent's. Under
 // [WithSkillGrants] the context also says whose child it is, and which
 // user message its grants are bound to, the parent's, so the
-// conversation's next message ends them. A host that wants a child to
-// share the conversation's grants puts the conversation's scope on the
-// context the child's run is prompted with, over the kit's.
-func (k *Kit) childContext(ctx context.Context, callID string) context.Context {
-	parentCtx := ctx
-	rec := k.recorderFor(ctx)
-	if rec != nil {
-		ctx = rec.ChildContext(ctx, callID)
+// conversation's next message ends them. Under share, [ShareGrantScope],
+// the child keeps the conversation's scope instead, and nothing is
+// linked.
+func (k *Kit) childContext(share bool) func(ctx context.Context, callID string) context.Context {
+	return func(ctx context.Context, callID string) context.Context {
+		parentCtx := ctx
+		rec := k.recorderFor(ctx)
+		if rec != nil {
+			ctx = rec.ChildContext(ctx, callID)
+		}
+		return k.childRun(parentCtx, ctx, rec, callID, share)
 	}
-	return k.childRun(parentCtx, ctx, rec, callID)
 }
 
 // childRun is what the kit adds to a child's run context ctx, made from
 // parentCtx by rec, or by no recorder: the child's session ID under
-// agentmemory's key, and under skill grants a grant scope of its own,
-// as [Kit.childContext] says. name stands for the child in the scope
-// when no session names it.
-func (k *Kit) childRun(parentCtx, ctx context.Context, rec *session.Recorder, name string) context.Context {
+// agentmemory's key, and with an engine a grant scope of its own, as
+// [Kit.childContext] says, or the conversation's under share,
+// [ShareGrantScope], linked to nothing. name stands for the child in the
+// scope when no session names it.
+func (k *Kit) childRun(parentCtx, ctx context.Context, rec *session.Recorder, name string, share bool) context.Context {
 	callID := name
 	child := ""
 	if id := session.SessionIDFromContext(ctx); rec != nil && id != "" {
@@ -1438,18 +1443,24 @@ func (k *Kit) childRun(parentCtx, ctx context.Context, rec *session.Recorder, na
 	if k.engine == nil {
 		return ctx
 	}
-	if child == "" {
-		// Not the call's ID alone: a provider that numbers its calls the
-		// same every turn would put two children of one message in one
-		// scope.
-		child = callID + "#" + strconv.FormatUint(k.childSeq.Add(1), 10)
-	}
 	parent := k.GrantScope(parentCtx)
-	scope := parent + childSep + child
-	ctx = agentpolicy.ContextWithGrantScope(ctx, scope)
-	// Linked with or without skill grants: a front may grant under the
-	// child's scope, and RevokeSkillGrants ends it with the conversation.
-	k.scopes.link(parent, scope)
+	if share {
+		// The conversation's scope, put on the context so the child's
+		// session ID, which ChildContext put there, does not name one.
+		ctx = agentpolicy.ContextWithGrantScope(ctx, parent)
+	} else {
+		if child == "" {
+			// Not the call's ID alone: a provider that numbers its calls the
+			// same every turn would put two children of one message in one
+			// scope.
+			child = callID + "#" + strconv.FormatUint(k.childSeq.Add(1), 10)
+		}
+		scope := parent + childSep + child
+		ctx = agentpolicy.ContextWithGrantScope(ctx, scope)
+		// Linked with or without skill grants: a front may grant under the
+		// child's scope, and RevokeSkillGrants ends it with the conversation.
+		k.scopes.link(parent, scope)
+	}
 	if k.grants == nil {
 		return ctx
 	}
