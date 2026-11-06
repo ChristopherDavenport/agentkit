@@ -93,6 +93,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   trust. The kit keeps every composition made during `New` and the 64
   runtime ones asked for most recently, so calls with ever-new prompts
   do not make a `WithChildAgent` child's run record one string.
+  The child's own prompt passes the input guards, in the config text
+  and each request, and under `WithInstructionBudget` the memory block
+  and the servers' instructions are sized against the child's
+  instructions, not the parent's.
   `WithChildAgent(cfg, agentkit.ChildParts(ids...))` offers such a
   child (#122).
 
@@ -102,7 +106,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   a product's own `childagent.WithRunContext` drops, and links no child
   scope. agentpolicy has no scope inheritance, so the scope is shared
   both ways: the conversation's sets decide the child's calls, and a
-  skill the child reads grants to the conversation (#120).
+  skill the child reads grants to the conversation; that read is
+  recorded in the child's session, so a restart does not regrant it,
+  which fails closed (#120).
 
 - `Kit.TeamConfig`, `Kit.Offer` and `TeamOffer(kits...)` put an
   agentturn `handoff.Team` of kits through the kit's tool pipeline:

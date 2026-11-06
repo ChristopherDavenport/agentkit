@@ -264,7 +264,7 @@ type Kit struct {
 	// rerender is Kit.render over New's settings and the kit's input
 	// guards, which a child's BeforeModelCall renders its parts with;
 	// set by buildHooks, before any run.
-	rerender func(ctx context.Context, base []Part, want map[string]bool) (rendered, error)
+	rerender func(ctx context.Context, base, own []Part, want map[string]bool) (rendered, error)
 
 	// compact is the compaction transform the kit built, nil without
 	// one; Control.Compact asks it to fold.
@@ -1374,8 +1374,8 @@ func (k *Kit) buildHooks(s *settings) {
 	if len(s.guards) > 0 {
 		guards = guard.Chain{Guards: s.guards, Observer: k.observeVerdicts(s, true)}
 	}
-	k.rerender = func(ctx context.Context, base []Part, want map[string]bool) (rendered, error) {
-		return k.render(ctx, s, guards, base, want)
+	k.rerender = func(ctx context.Context, base, own []Part, want map[string]bool) (rendered, error) {
+		return k.render(ctx, s, guards, base, own, want)
 	}
 
 	// BeforeModelCall: the instructions, memory re-rendered and each
@@ -1580,7 +1580,7 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 			return nil
 		}
 
-		r, err := k.render(ctx, s, guards, base, nil)
+		r, err := k.render(ctx, s, guards, base, nil, nil)
 		if err != nil {
 			return err
 		}
@@ -1628,11 +1628,21 @@ type rendered struct {
 // block, and runs the input guards over each part, as [Kit.instructions]
 // does for the kit's own requests. want, when it is not nil, says which
 // groups a child composed with [Kit.ChildConfig] takes: only those are
-// rendered again and guarded, and sent holds only them. When the
-// memory block is rendered its manifest is recorded in the session the
-// run on ctx writes, a child's in its own.
-func (k *Kit) render(ctx context.Context, s *settings, guards guard.Chain, base []Part, want map[string]bool) (rendered, error) {
+// rendered again, and sent is own, the child's prompt, then them,
+// guarded, and the bounded groups are sized against sent, the child's
+// instructions, not the parent's. When the memory block is rendered
+// its manifest is recorded in the session the run on ctx writes, a
+// child's in its own.
+func (k *Kit) render(ctx context.Context, s *settings, guards guard.Chain, base, own []Part, want map[string]bool) (rendered, error) {
 	takes := func(id string) bool { return want == nil || want[id] }
+	// What the request carries, which the budget bounds: the kit's
+	// parts, or the child's.
+	carried := func() []Part {
+		if want == nil {
+			return base
+		}
+		return append(slices.Clone(own), selectGroups(base, want)...)
+	}
 	var r rendered
 	// The product's parts first, so the memory block is bounded by
 	// what they leave of the budget this request.
@@ -1652,7 +1662,7 @@ func (k *Kit) render(ctx context.Context, s *settings, guards guard.Chain, base 
 	if k.mcpParts && takes(PartMCP) {
 		var g []Part
 		servers := k.mcpServers()
-		g, r.mcpOm = mcpGroup(servers, k.mcpTrusted, k.offeredServers(ctx, servers), mcpShare(s.budget, base))
+		g, r.mcpOm = mcpGroup(servers, k.mcpTrusted, k.offeredServers(ctx, servers), mcpShare(s.budget, carried()))
 		base = withGroup(base, PartMCP, g, k.order)
 	}
 	if s.memStore != nil && takes(PartMemory) {
@@ -1660,7 +1670,7 @@ func (k *Kit) render(ctx context.Context, s *settings, guards guard.Chain, base 
 		// first one, so the block cannot grow past the budget
 		// between turns and cannot come back at its floor after the
 		// budget dropped it.
-		group, m, om, drop, err := memoryPart(ctx, s, memoryShare(s.budget, base))
+		group, m, om, drop, err := memoryPart(ctx, s, memoryShare(s.budget, carried()))
 		if err != nil {
 			return r, err
 		}
@@ -1672,10 +1682,7 @@ func (k *Kit) render(ctx context.Context, s *settings, guards guard.Chain, base 
 			return r, err
 		}
 	}
-	r.base, r.sent = base, base
-	if want != nil {
-		r.sent = selectGroups(base, want)
-	}
+	r.base, r.sent = base, carried()
 	if len(guards.Guards) > 0 {
 		var err error
 		if r.sent, err = guardParts(ctx, guards, r.sent); err != nil {

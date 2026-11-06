@@ -42,8 +42,12 @@ func (k *Kit) TeamConfig() agentturn.Config {
 // whose own provider is gone, so the list the team passes holds only
 // its transfers, and a tool of the kit's is not filtered and wrapped
 // twice. A config whose provider is still the kit's, [Kit.Config],
-// passes its tools again in tools, and they are offered twice over,
-// the second time as handoff tools. A transfer wins its name: a kit
+// passes the kit's tools in tools, already filtered, wrapped and
+// decided: they are taken as transfers, under [HandoffSource], so each
+// keeps its name, the kit's own copy is dropped and reported once as a
+// [Conflict], and each tool is offered once, but the filter, the
+// wrappers and the policy run over it twice on every request, the
+// second time as a handoff tool. A transfer wins its name: a kit
 // tool that claims it too, such as a remote server's tool that appears
 // at runtime, is dropped from this agent's offer and reported through
 // [WithToolConflict] as a [Conflict] keeping [HandoffSource], since the

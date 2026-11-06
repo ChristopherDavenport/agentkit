@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ChristopherDavenport/agentpolicy/guard"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentturn"
 	childagent "github.com/ChristopherDavenport/agentturn/tools/agent"
@@ -57,6 +58,12 @@ func ChildParts(ids ...string) ChildOption {
 // scope inheritance in agentpolicy, which there is not. Nothing is
 // linked as the conversation's child, so [Kit.RevokeSkillGrants] ends
 // what the child was granted as the conversation's own.
+//
+// A skill the child reads is recorded in the child's session, its read
+// and its grant verdict, while the grant is the conversation's. A
+// restart's regrant replays the conversation's own path, not its
+// children's, so that grant is not restored: it fails closed, and the
+// child, or the parent, reads the skill again to have it back.
 func ShareGrantScope() ChildOption {
 	return func(c *childSettings) { c.share = true }
 }
@@ -115,7 +122,14 @@ func (k *Kit) touchChild(key string) {
 // are rendered: the memory block, a [WithPart] part and the MCP
 // servers' instructions as they stand, the skill catalogue
 // [Kit.ReloadSkills] last put in place, each guarded by the kit's
-// input guards. A memory render is recorded in the session the child's
+// input guards. A bounded group, the memory block and the servers'
+// instructions, is sized against the child's instructions under
+// [WithInstructionBudget], its prompt and the groups it takes, not the
+// parent's, so a short child may be shown a block its parent's budget
+// dropped. The child's own prompt passes the input guards too: in the
+// config text, as [New] guards the parent's, with no observer and under
+// the kit's own context, a refusal failing the call, and before each
+// request with the groups. A memory render is recorded in the session the child's
 // run writes, its own under [WithChildAgent]. It runs ahead of cfg's own
 // BeforeModelCall, and only over instructions the composition made: a
 // request whose instructions a per-call config or a hook rewrote is
@@ -123,7 +137,10 @@ func (k *Kit) touchChild(key string) {
 // which the recorder settles at the run's start, and of each request's
 // render, so a recorder whose parts function is the kit's records the
 // child's config entries as parts; under a recorder several kits share
-// [PartsFrom] names this one.
+// [PartsFrom] names this one. Concurrent runs of one composition share
+// its last render, as the parent's runs share the kit's: a request from
+// the other run's render is not recognised and is recorded with its
+// instructions as one string.
 //
 // The kit recognises every composition made during [New], a
 // [WithChildAgent] child's with [ChildParts] or one a
@@ -163,8 +180,19 @@ func (k *Kit) ChildConfig(cfg agentturn.Config, ids ...string) (agentturn.Config
 	slices.Sort(sorted)
 	key := cfg.Instructions + "\x00" + strings.Join(sorted, "\x00")
 
+	// The child's prompt guarded as New guarded the parent's, with no
+	// observer and outside the lock, since a guard may call a model; the
+	// kit's parts are as the guards left them already.
+	sentOwn := own
+	if len(k.guards) > 0 && len(own) > 0 {
+		var err error
+		if sentOwn, err = guardParts(k.closeCtx, guard.Chain{Guards: k.guards}, own); err != nil {
+			return cfg, fmt.Errorf("agentkit: ChildConfig: an input guard refused the child's prompt: %w", err)
+		}
+	}
+
 	k.mu.Lock()
-	first := append(slices.Clone(own), selectGroups(k.parts, want)...)
+	first := append(slices.Clone(sentOwn), selectGroups(k.parts, want)...)
 	omitted := k.childOmitted(want, k.partOmitted, k.mcpOmitted, k.memOmitted)
 	c := k.children[key]
 	if c == nil {
@@ -207,11 +235,11 @@ func (k *Kit) childInstructions(c *childComposition) func(context.Context, *open
 		if !ours || k.rerender == nil {
 			return nil
 		}
-		r, err := k.rerender(ctx, base, c.want)
+		r, err := k.rerender(ctx, base, c.own, c.want)
 		if err != nil {
 			return err
 		}
-		parts := append(slices.Clone(c.own), r.sent...)
+		parts := r.sent
 
 		k.mu.Lock()
 		c.last = parts

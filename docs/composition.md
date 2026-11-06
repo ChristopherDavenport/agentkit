@@ -179,7 +179,10 @@ this session" and the skills its parent read, and a skill the child
 reads grants its tools to the conversation, the parent included, until
 the conversation's next message under `WithSkillGrantScope`. A child
 that sees its parent's grants and keeps its own reads to itself needs
-scope inheritance in agentpolicy first.
+scope inheritance in agentpolicy first. The child's read is recorded in
+the child's session, so a restart, which regrants from the
+conversation's own path, does not restore what it granted: that fails
+closed until the skill is read again.
 
 The child's instructions are its config's own string unless it asks
 for the kit's parts. `WithChildAgent` takes the kit's choices for the
@@ -198,7 +201,10 @@ agentkit.WithChildAgent(exploreCfg,
 
 A memory entry the child is shown is then on its path as an
 `agentmemory` part labelled `untrusted`, as on the parent's, where a
-string the product copied in would carry no label.
+string the product copied in would carry no label. Under
+`WithInstructionBudget` the block is sized against the child's prompt
+and the groups it takes, not the parent's, and the child's prompt
+passes the input guards as the parent's does.
 
 The recorder does not exist until `New` has opened the session, so
 those bindings are not something a product can do in the option list
@@ -270,7 +276,9 @@ name over a kit tool that claims it too, a remote server's tool that
 appears at runtime: the kit tool is dropped from that agent's offer and
 reported through `WithToolConflict`. Built from `Config()`
 instead, the kit's tools would pass the pipeline in the provider and
-again in `Offer`. A recorder the kits share takes
+again in `Offer`: offered once, the kit's copies reported as
+conflicts, but filtered, wrapped and decided twice per request. A
+recorder the kits share takes
 `agentkit.PartsFrom(&triage, &billing)`, so each agent's instructions
 are recorded as its own parts.
 

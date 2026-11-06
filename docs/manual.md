@@ -482,16 +482,20 @@ child calls from `WithDeferredTools`, the kit being what holds the
 parts:
 
 ```go
-// The child's own prompt as a part, then the kit's parts of the groups
-// ids names, as the guards left them, each with its source and trust.
+// The child's own prompt as a part, guarded as the parent's was at New,
+// then the kit's parts of the groups ids names, as the guards left
+// them, each with its source and trust.
 own := []agentkit.Part{{ID: agentkit.PartProduct, Text: childCfg.Instructions, Source: agentkit.SourceProduct}}
-childCfg.Instructions = agentsession.JoinInstructions(append(own, selected(kit.Parts(), ids)...))
+sentOwn, err := guardParts(ctx, guard.Chain{Guards: guards}, own)
+childCfg.Instructions = agentsession.JoinInstructions(append(sentOwn, selected(kit.Parts(), ids)...))
 // Before each of the child's requests whose instructions are still the
 // composition's: the selected groups rendered again over the kit's
 // parts, the memory block, WithPart parts and the servers'
-// instructions as the instructions hook below renders them, the memory
-// manifest written in the child's session, each guarded with
-// guardParts, and joined after the prompt. Ahead of the child's own.
+// instructions as the instructions hook below renders them, each
+// bounded group sized against the child's prompt and its selected
+// parts, not the parent's, the memory manifest written in the child's
+// session, and the prompt and the groups each guarded with guardParts.
+// Ahead of the child's own.
 childCfg.BeforeModelCall = agentturn.ChainBeforeModelCall(renderChild, childCfg.BeforeModelCall)
 ```
 
@@ -1356,7 +1360,11 @@ Eleven things, all outside `agentturn.Config`:
   context above, and is linked to nothing; agentpolicy has no scope
   inheritance, so the share runs both ways: the conversation's sets
   decide the child's calls, and a skill the child reads grants to the
-  conversation, bound to the parent's user-message mark. A host that wants a `Kit.StartChild` pass to share the
+  conversation, bound to the parent's user-message mark. That read and
+  its grant verdict are recorded in the child's session, and a
+  restart's regrant replays the conversation's own path, so the grant
+  is not restored: it fails closed until the skill is read again. A
+  host that wants a `Kit.StartChild` pass to share the
   conversation's grants puts the conversation's scope on the pass's run
   context itself. The kit forgets what it kept of a conversation's
   grants and child scopes at `Kit.RevokeSkillGrants(ctx)`, which a

@@ -9,6 +9,7 @@ import (
 
 	"github.com/ChristopherDavenport/agentkit"
 	"github.com/ChristopherDavenport/agentmemory"
+	"github.com/ChristopherDavenport/agentpolicy/guard"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
@@ -251,5 +252,58 @@ func TestChildConfigKeepsNewsChildPastTheRuntimeBound(t *testing.T) {
 	}
 	if !own || !entry {
 		t.Fatalf("after 65 runtime compositions the New child's session records parts %+v, want its own prompt (%v) and the untrusted memory entry (%v)", partsOf(s), own, entry)
+	}
+}
+
+// A child's memory block is sized against the child's own composition,
+// its prompt and the groups it takes, not the parent's: a parent prompt
+// that leaves the parent no room for the block leaves a short child
+// the room. The child's own prompt passes the kit's input guards, in
+// the config text and in each request, as the parent's prompt does.
+// (l6-5b review L3)
+func TestChildConfigSizesMemoryByTheChildAndGuardsItsPrompt(t *testing.T) {
+	store := memStore(t, agentmemory.Entry{Scope: "user", Name: "likes-tea", Content: "tea, not coffee"})
+	parentPrompt := strings.Repeat("Be the parent. ", 200)
+	child := &scriptModel{}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "test-model"),
+		agentkit.WithInstructions(parentPrompt),
+		agentkit.WithMemory(store, "user"),
+		agentkit.WithGuards(guard.Redact()),
+		agentkit.WithInstructionBudget(int64(len(parentPrompt)+len(agentkit.Separator)+40)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	if strings.Contains(kit.Config().Instructions, "tea, not coffee") {
+		t.Fatal("the parent's budget left room for the memory block; the test needs it dropped there")
+	}
+
+	cfg, err := kit.ChildConfig(agentturn.Config{
+		Name: "explore", Instructions: "Explore. The key is " + awsKey, Model: child, ModelName: "test-model",
+	}, agentkit.PartMemory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(cfg.Instructions, awsKey) {
+		t.Errorf("the child's config text carries its prompt unguarded: %q", cfg.Instructions)
+	}
+	if _, err := agentturn.New(cfg).Prompt(t.Context(), openresponses.UserText("go")); err != nil {
+		t.Fatal(err)
+	}
+	reqs := child.requests()
+	if len(reqs) == 0 {
+		t.Fatal("the child sent no request")
+	}
+	got := reqs[0].Instructions
+	if strings.Contains(got, awsKey) || !strings.Contains(got, "[REDACTED") {
+		t.Errorf("the child's request carries its prompt unguarded: %q", got)
+	}
+	if !strings.Contains(got, "tea, not coffee") {
+		t.Errorf("the child's request %q has no memory block, sized by the parent's prompt", got)
+	}
+	if p, _ := kit.PartsFor(t.Context(), openresponses.Request{Instructions: got}); agentsession.JoinInstructions(p) != got {
+		t.Errorf("PartsFor(the child's request) = %+v, want parts joining to it", p)
 	}
 }
