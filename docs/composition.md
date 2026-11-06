@@ -263,7 +263,10 @@ team.Offer = agentkit.TeamOffer(triage, billing)
 `TeamConfig` is the kit's config with no tool provider, so the list the
 team hands `Offer` is the transfers alone, and `Kit.Offer` unions them
 with the kit's own sources, labelled `handoff`, through the filter, the
-wrappers, the duplicate check and the policy. Built from `Config()`
+wrappers, the duplicate check and the policy. A transfer keeps its
+name over a kit tool that claims it too, a remote server's tool that
+appears at runtime: the kit tool is dropped from that agent's offer and
+reported through `WithToolConflict`. Built from `Config()`
 instead, the kit's tools would pass the pipeline in the provider and
 again in `Offer`. A recorder the kits share takes
 `agentkit.PartsFrom(&triage, &billing)`, so each agent's instructions
@@ -274,6 +277,7 @@ are recorded as its own parts.
 The tool namespace. Whatever the source, every tool goes through the
 same union: stable order, a duplicate name refused at `New` with a
 `Conflict` naming both sources, a later duplicate dropped and reported
-through `WithToolConflict`, and `agentpolicy`'s filter in front of the
+through `WithToolConflict` (a handoff transfer is kept over any of the
+kit's), and `agentpolicy`'s filter in front of the
 result. A peer, a child, an MCP tool and a built-in are the same kind
 of thing to the kit, and that is the only claim it makes about them.

@@ -884,8 +884,10 @@ func WithMCPStderr(w io.Writer) Option {
 // WithToolConflict is called when two tools claim one name at turn
 // time, which is the only point at which a remote's tool list can
 // collide with a name it did not collide with when [New] checked. The
-// later tool is dropped, the earlier is kept, and fn is told. A
-// conflict present at New is an error from New instead.
+// later tool is dropped, the earlier is kept, and fn is told, except
+// that a handoff team's transfer, which [Kit.Offer] adds, is kept over
+// any tool of the kit's. A conflict present at New is an error from New
+// instead.
 func WithToolConflict(fn func(Conflict)) Option {
 	return func(s *settings) { s.conflict = fn }
 }

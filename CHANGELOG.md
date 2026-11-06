@@ -103,7 +103,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   kit's `WithToolFilter`, `WithToolWrap`, duplicate check and policy
   filter beside its own tools, once, since `TeamConfig` is the kit's
   config without its `ToolProvider`. A transfer the policy denies is no
-  longer offered, and a wrapper reaches it (agentturn#307, #118).
+  longer offered, and a wrapper reaches it (agentturn#307, #118). A
+  transfer keeps its name over a kit tool that claims it too, such as a
+  runtime MCP tool: the kit tool is dropped from that agent's offer and
+  reported as a `Conflict` kept by `"handoff"` (#118).
 
 ### Fixed
 

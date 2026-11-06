@@ -43,9 +43,13 @@ func (k *Kit) TeamConfig() agentturn.Config {
 // its transfers, and a tool of the kit's is not filtered and wrapped
 // twice. A config whose provider is still the kit's, [Kit.Config],
 // passes its tools again in tools, and they are offered twice over,
-// the second time as handoff tools. A transfer whose name a kit tool
-// already holds is dropped from the offer and reported through
-// [WithToolConflict], as any later duplicate is. A wrapper must keep a
+// the second time as handoff tools. A transfer wins its name: a kit
+// tool that claims it too, such as a remote server's tool that appears
+// at runtime, is dropped from this agent's offer and reported through
+// [WithToolConflict] as a [Conflict] keeping [HandoffSource], since the
+// transfers are the team's structure and the team routes a call of that
+// name to the receiver (agentturn fails the turn on such a clash). The
+// transfers are still offered after the kit's tools. A wrapper must keep a
 // transfer's name and result, or the call runs without handing off; one
 // that refuses the call is the way to stop a transfer.
 //
@@ -58,15 +62,21 @@ func (k *Kit) Offer(ctx context.Context, _ string, tools []agenttool.Tool) []age
 	}
 	extra := slices.Clone(tools)
 	union := func(ctx context.Context) []agenttool.Tool {
-		// A copy: current may hand back the set's own slice.
-		sources := append(slices.Clone(ts.current()), source{
+		// The transfers first, so one wins a name a kit tool also
+		// claims, and offered last, after the kit's own.
+		sources := append([]source{{
 			name: HandoffSource,
 			live: func(context.Context) []agenttool.Tool { return extra },
-		})
-		out, _, conflicts := ts.resolveSources(ctx, sources)
+		}}, ts.current()...)
+		out, origins, conflicts := ts.resolveSources(ctx, sources)
 		if len(conflicts) > 0 && ts.onConflict != nil {
 			ts.report(conflicts)
 		}
+		var transfers int
+		for transfers < len(origins) && origins[transfers].Source == HandoffSource {
+			transfers++
+		}
+		out = append(slices.Clone(out[transfers:]), out[:transfers]...)
 		k.remember(ctx, out)
 		return out
 	}

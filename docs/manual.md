@@ -531,14 +531,18 @@ its own tools, and the team's `Offer` sees the whole list on every
 request. `Kit.TeamConfig()` is `Config()` with `ToolProvider` nil, and
 `agentkit.TeamOffer(kits...)` is the `Offer` that sends each agent's
 list through `Kit.Offer` of the kit carrying its name: the block above
-with the list as one more source, last, labelled `"handoff"`
+with the list as one more source labelled `"handoff"`
 (`agentkit.HandoffSource`), so the filter, the wrappers, the duplicate
 check and `engine.ToolProvider` run once over the agent's tools and its
-transfers together:
+transfers together. The transfers are resolved first, so a transfer
+keeps its name over a kit tool that claims it too, which is dropped and
+reported as a `Conflict` kept by `"handoff"`, and offered last:
 
 ```go
 offer := func(ctx context.Context, _ string, transfers []agenttool.Tool) []agenttool.Tool {
-	all := append(slices.Clone(tools), transfers...) // labelled "handoff" for the filter and the wrapper
+	// labelled "handoff" for the filter and the wrapper; a kit tool
+	// named as a transfer is dropped and reported before this append
+	all := append(slices.Clone(tools), transfers...)
 	return engine.ToolProvider(func(context.Context) []agenttool.Tool { return all })(
 		agentpolicy.ContextWithGrantScope(ctx, scopeOf(ctx)))
 }
