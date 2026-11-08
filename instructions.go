@@ -94,7 +94,8 @@ type Omission struct {
 	// Reason is the layer's own word for why.
 	Reason string
 	// Size is the bytes the thing would have added, zero when the
-	// layer does not say.
+	// layer does not say. For an AGENTS.md file cut short, reason
+	// "truncated", it is the bytes cut off it.
 	Size int64
 	// By names what took its place, for an omission that is a
 	// shadowing rather than a bound.
@@ -570,16 +571,21 @@ func isMemoryWrite(t openresponses.Tool) bool {
 var errMemoryDropped = agentmemory.ErrBlockDropped
 
 // agentsMDPart reads the AGENTS.md chain and renders it, bounded to
-// limit bytes when limit is positive.
+// limit bytes when limit is positive, and left out whole when limit is
+// negative.
 //
-// [agentsmd.Options.Budget] bounds the bytes of the files, and the
-// rendered part is those bytes plus the wrapper agentsmd puts around
-// each one. So the bound handed to a second chain is the share less the
-// wrapper the first chain's files cost. That is safe without a third
-// pass: a smaller budget can only select a prefix of the same files, so
-// the wrapper can only shrink, and the rendered part comes out at or
-// under the share.
+// A share that binds is handed to a second chain as
+// [agentsmd.Options.RenderedBudget], which bounds Render's output,
+// wrapper and paths included: the same number the share is. The
+// caller's own Budget and RenderedBudget stay set, and the share is the
+// smaller of the two rendered bounds, since the first chain's render
+// was within the caller's and is over the share. Under
+// [agentsmd.Options.Truncate] that second chain cuts the first file
+// over the share, against the rendered size.
 func agentsMDPart(s *settings, limit int64) (Part, []Omission, error) {
+	if limit < 0 {
+		return agentsMDDropped(s)
+	}
 	res, err := agentsmd.Chain(s.agentsMDPath, s.agentsMD)
 	if err != nil {
 		return Part{}, nil, fmt.Errorf("agentkit: reading the AGENTS.md chain: %w", err)
@@ -587,32 +593,49 @@ func agentsMDPart(s *settings, limit int64) (Part, []Omission, error) {
 	text := agentsmd.Render(res.Files)
 
 	if limit > 0 && int64(len(text)) > limit {
-		wrapper := int64(len(text))
-		for _, f := range res.Files {
-			wrapper -= int64(len(f.Content))
-		}
 		opts := s.agentsMD
-		opts.Budget = limit - wrapper
-		if opts.Budget > 0 {
-			if res, err = agentsmd.Chain(s.agentsMDPath, opts); err != nil {
-				return Part{}, nil, fmt.Errorf("agentkit: reading the AGENTS.md chain: %w", err)
-			}
-			text = agentsmd.Render(res.Files)
+		opts.RenderedBudget = limit
+		if res, err = agentsmd.Chain(s.agentsMDPath, opts); err != nil {
+			return Part{}, nil, fmt.Errorf("agentkit: reading the AGENTS.md chain: %w", err)
+		}
+		text = agentsmd.Render(res.Files)
+		if int64(len(text)) > limit {
+			// agentsmd holds Render's output to RenderedBudget, so this
+			// is a guard, not a path: the share is not exceeded.
+			return agentsMDDropped(s)
 		}
 	}
-	if limit < 0 || (limit > 0 && int64(len(text)) > limit) {
-		for _, f := range res.Files {
-			res.Omitted = append(res.Omitted, agentsmd.Omitted{
-				Path:   f.Path,
-				Size:   int64(len(f.Content)),
-				Reason: agentsmd.OverBudget,
-			})
-		}
-		res.Files, text = nil, ""
-	}
+	return Part{ID: agentsmd.PartID, Text: text, Source: SourceAgentsMD}, agentsMDOmissions(res.Omitted), nil
+}
 
-	omitted := make([]Omission, 0, len(res.Omitted))
-	for _, o := range res.Omitted {
+// agentsMDDropped is the AGENTS.md part when the share leaves it no
+// room: empty, with every file the chain would include reported
+// OverBudget. The chain is read without [agentsmd.Options.Truncate],
+// since nothing of a file is sent and no file is cut: a file the
+// caller's options would have cut is reported with its whole size,
+// as agentsmd reports a file it leaves out whole, and once, so its
+// path stays the omission's one key.
+func agentsMDDropped(s *settings) (Part, []Omission, error) {
+	opts := s.agentsMD
+	opts.Truncate = false
+	res, err := agentsmd.Chain(s.agentsMDPath, opts)
+	if err != nil {
+		return Part{}, nil, fmt.Errorf("agentkit: reading the AGENTS.md chain: %w", err)
+	}
+	for _, f := range res.Files {
+		res.Omitted = append(res.Omitted, agentsmd.Omitted{
+			Path:   f.Path,
+			Size:   int64(len(f.Content)),
+			Reason: agentsmd.OverBudget,
+		})
+	}
+	return Part{ID: agentsmd.PartID, Source: SourceAgentsMD}, agentsMDOmissions(res.Omitted), nil
+}
+
+// agentsMDOmissions is agentsmd's omissions as the kit's.
+func agentsMDOmissions(om []agentsmd.Omitted) []Omission {
+	omitted := make([]Omission, 0, len(om))
+	for _, o := range om {
 		omitted = append(omitted, Omission{
 			Part:   agentsmd.PartID,
 			Source: SourceAgentsMD,
@@ -622,5 +645,5 @@ func agentsMDPart(s *settings, limit int64) (Part, []Omission, error) {
 			By:     o.By,
 		})
 	}
-	return Part{ID: agentsmd.PartID, Text: text, Source: SourceAgentsMD}, omitted, nil
+	return omitted
 }

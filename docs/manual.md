@@ -172,7 +172,7 @@ it is decided, before any policy asks a person, and again when a call
 decided before the drop runs (below).
 
 Under `WithInstructionBudget`, the layers that take a bound are given
-one: `agentsmd.Options.Budget` and `agentmemory.WithMaxTotalBytes`, in
+one: `agentsmd.Options.RenderedBudget` and `agentmemory.WithMaxTotalBytes`, in
 the allocation [ordering.md](ordering.md) argues for, the memory
 block's bound less the usage paragraph, which cannot be bounded. Both are
 exported, and a product that wants to spend the budget differently sets
