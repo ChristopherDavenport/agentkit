@@ -2,6 +2,7 @@ package agentkit_test
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -13,70 +14,86 @@ import (
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// describedTool is a tool with a description of its own, which counts
-// its calls.
-func describedTool(name, description string, calls *atomic.Int32) agenttool.Tool {
-	return agenttool.New(name, description, func(context.Context, agenttool.NoArgs) (string, error) {
-		if calls != nil {
-			calls.Add(1)
-		}
-		return name + " ran", nil
-	})
-}
-
-// deferNamed holds back the tools of the given names, whatever their
-// source.
-func deferNamed(names ...string) func(string, agenttool.Tool) bool {
-	return func(_ string, t agenttool.Tool) bool { return slices.Contains(names, t.Name()) }
-}
-
-// searchTools is the set the tests below hold back two of.
-func searchTools(weatherCalls *atomic.Int32) []agenttool.Tool {
-	return []agenttool.Tool{
-		describedTool("read", "Read a file.", nil),
-		describedTool("weather_lookup", "Look up the weather for a city. Returns the temperature and the sky, in metric units, for today and the next six days, from the national service.", weatherCalls),
-		describedTool("stock_quote", "Quote a stock's last price.\n\nIt says nothing of the weather.", nil),
+// heldServer serves, over an in-memory MCP transport, the two tools the
+// tests below hold back, counting weather_lookup's calls.
+func heldServer(t *testing.T, weatherCalls *atomic.Int32) sdk.Transport {
+	t.Helper()
+	srv := sdk.NewServer(&sdk.Implementation{Name: "test", Version: "0"}, nil)
+	sdk.AddTool(srv, &sdk.Tool{Name: "weather_lookup", Description: "Look up the weather for a city. Returns the temperature and the sky, in metric units, for today and the next six days, from the national service."},
+		func(context.Context, *sdk.CallToolRequest, struct{}) (*sdk.CallToolResult, any, error) {
+			if weatherCalls != nil {
+				weatherCalls.Add(1)
+			}
+			return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "sunny"}}}, nil, nil
+		})
+	sdk.AddTool(srv, &sdk.Tool{Name: "stock_quote", Description: "Quote a stock's last price.\n\nIt says nothing of the weather."},
+		func(context.Context, *sdk.CallToolRequest, struct{}) (*sdk.CallToolResult, any, error) {
+			return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "42"}}}, nil, nil
+		})
+	client, server := sdk.NewInMemoryTransports()
+	session, err := srv.Connect(t.Context(), server, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = session.Close() })
+	return client
+}
+
+// searchKit is the options of a kit offering read and holding back the
+// server's two tools.
+func searchKit(t *testing.T, model agentturn.Model, weatherCalls *atomic.Int32, extra ...agentkit.Option) []agentkit.Option {
+	return append([]agentkit.Option{
+		agentkit.WithModel(model, "m"),
+		agentkit.WithTools(namedTool(t, "read")),
+		agentkit.WithMCPTransport(heldServer(t, weatherCalls)),
+		agentkit.WithToolSearch(agentkit.DeferMCPTools),
+	}, extra...)
+}
+
+func listingOf(kit *agentkit.Kit) string {
+	for _, p := range kit.Parts() {
+		if p.ID == agentkit.PartToolSearch {
+			return p.Text
+		}
+	}
+	return ""
 }
 
 func TestTheListingNamesEachHeldToolWithItsFirstSentence(t *testing.T) {
-	kit, err := agentkit.New(t.Context(),
-		agentkit.WithModel(stubModel{}, "m"),
+	kit, err := agentkit.New(t.Context(), searchKit(t, stubModel{}, nil,
 		agentkit.WithInstructions("Be brief."),
 		agentkit.WithMemory(memStore(t), "user"),
-		agentkit.WithTools(searchTools(nil)...),
-		agentkit.WithToolSearch(deferNamed("weather_lookup", "stock_quote")),
-	)
+	)...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer kit.Close()
 
-	var listing string
-	for _, p := range kit.Parts() {
-		if p.ID == agentkit.PartToolSearch {
-			listing = p.Text
-			if p.Source != agentkit.SourceToolSearch {
-				t.Errorf("source = %q, want %q", p.Source, agentkit.SourceToolSearch)
-			}
-		}
-	}
+	listing := listingOf(kit)
 	for _, want := range []string{
 		"## Tools loaded on request",
 		agentkit.ToolSearchTool,
 		"\n- weather_lookup: Look up the weather for a city.\n",
-		"\n- stock_quote: Quote a stock's last price.",
+		"\n- stock_quote: Quote a stock's last price.\n",
 	} {
 		if !strings.Contains(listing+"\n", want) {
 			t.Errorf("listing lacks %q:\n%s", want, listing)
 		}
 	}
-	if strings.Contains(listing, "read") && strings.Contains(listing, "- read") {
+	if strings.Contains(listing, "- read") {
 		t.Errorf("listing names a tool that is not held:\n%s", listing)
 	}
-	if !strings.Contains(kit.Config().Instructions, listing) {
+	for _, p := range kit.Parts() {
+		if p.ID == agentkit.PartToolSearch && p.Source != agentkit.SourceToolSearch {
+			t.Errorf("source = %q, want %q", p.Source, agentkit.SourceToolSearch)
+		}
+	}
+	// Rendered at New, so the configuration's instructions are the first
+	// request's.
+	if listing == "" || !strings.Contains(kit.Config().Instructions, listing) {
 		t.Error("the configuration's instructions lack the listing New rendered")
 	}
 	// After the product's prompt, before the memory block.
@@ -93,7 +110,6 @@ func TestTheListingNamesEachHeldToolWithItsFirstSentence(t *testing.T) {
 }
 
 func TestASummaryIsOneSentenceAndCapped(t *testing.T) {
-	long := strings.Repeat("word ", 60)
 	cases := []struct{ in, want string }{
 		{"Search the web.  Use it\nfor news.", "Search the web."},
 		{"no period at all", "no period at all"},
@@ -104,18 +120,16 @@ func TestASummaryIsOneSentenceAndCapped(t *testing.T) {
 			t.Errorf("ToolSummary(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
-	got := agentkit.ToolSummary(long)
+	got := agentkit.ToolSummary(strings.Repeat("word ", 60))
 	if n := len([]rune(got)); n != agentkit.ToolSummaryRunes || !strings.HasSuffix(got, "…") {
 		t.Errorf("a long description's summary is %d runes, %q; want %d ending in an ellipsis", n, got, agentkit.ToolSummaryRunes)
 	}
 }
 
 func TestNothingHeldSendsNeitherTheListingNorTheTool(t *testing.T) {
-	kit, err := agentkit.New(t.Context(),
-		agentkit.WithModel(stubModel{}, "m"),
-		agentkit.WithTools(searchTools(nil)...),
-		agentkit.WithToolSearch(deferNamed()),
-	)
+	kit, err := agentkit.New(t.Context(), searchKit(t, stubModel{}, nil,
+		agentkit.WithToolSearch(func(string, []agenttool.Tool) bool { return false }),
+	)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,8 +137,8 @@ func TestNothingHeldSendsNeitherTheListingNorTheTool(t *testing.T) {
 	if ids := groupIDs(kit.Parts()); slices.Contains(ids, agentkit.PartToolSearch) {
 		t.Errorf("parts = %v, want no listing when nothing is held", ids)
 	}
-	if names := toolNames(kit.Config().ResolveTools(t.Context())); slices.Contains(names, agentkit.ToolSearchTool) {
-		t.Errorf("tools = %v, want no tool_search when nothing is held", names)
+	if names := toolNames(kit.Config().ResolveTools(t.Context())); slices.Contains(names, agentkit.ToolSearchTool) || !slices.Contains(names, "stock_quote") {
+		t.Errorf("tools = %v, want every tool and no tool_search when nothing is held", names)
 	}
 }
 
@@ -138,11 +152,7 @@ func TestLoadedToolsAreAppendedFromTheNextRequestOn(t *testing.T) {
 		callTurn("weather_lookup", `{}`),
 		callTurn(agentkit.ToolSearchTool, `{"query":"stock price"}`),
 	}}
-	kit, err := agentkit.New(t.Context(),
-		agentkit.WithModel(model, "m"),
-		agentkit.WithTools(searchTools(&weather)...),
-		agentkit.WithToolSearch(deferNamed("weather_lookup", "stock_quote")),
-	)
+	kit, err := agentkit.New(t.Context(), searchKit(t, model, &weather)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,27 +180,28 @@ func TestLoadedToolsAreAppendedFromTheNextRequestOn(t *testing.T) {
 		{"read", agentkit.ToolSearchTool, "weather_lookup", "stock_quote"},
 	}
 	for i, req := range reqs {
-		got := requestToolNames(req)
-		if !slices.Equal(got, want[i]) {
+		if got := requestToolNames(req); !slices.Equal(got, want[i]) {
 			t.Errorf("request %d tools = %v, want %v", i+1, got, want[i])
 		}
-		if i > 0 {
-			prev := reqs[i-1].Tools
-			if len(req.Tools) < len(prev) {
-				t.Fatalf("request %d sent fewer tools than the one before", i+1)
-			}
-			for j := range prev {
-				if prev[j].(*openresponses.FunctionTool).Name != req.Tools[j].(*openresponses.FunctionTool).Name {
-					t.Errorf("request %d moved tool %d; the prefix must hold", i+1, j)
-				}
+		if i == 0 {
+			continue
+		}
+		// The previous request's tools, definitions and all, are this
+		// one's prefix.
+		prev := reqs[i-1].Tools
+		if len(req.Tools) < len(prev) {
+			t.Fatalf("request %d sent fewer tools than the one before", i+1)
+		}
+		for j := range prev {
+			a, _ := json.Marshal(prev[j])
+			b, _ := json.Marshal(req.Tools[j])
+			if string(a) != string(b) {
+				t.Errorf("request %d changed tool %d; the prefix must hold", i+1, j)
 			}
 		}
-	}
-	// The instructions are the same in every request: the listing does
-	// not change as tools are loaded.
-	for i, req := range reqs[1:] {
+		// The listing does not change as tools are loaded.
 		if req.Instructions != reqs[0].Instructions {
-			t.Errorf("request %d changed the instructions", i+2)
+			t.Errorf("request %d changed the instructions", i+1)
 		}
 	}
 	if got := kit.ToolSearch().Loaded(t.Context()); !slices.Equal(got, []string{"weather_lookup", "stock_quote"}) {
@@ -199,7 +210,10 @@ func TestLoadedToolsAreAppendedFromTheNextRequestOn(t *testing.T) {
 }
 
 func TestToolSearchSaysWhatItLoaded(t *testing.T) {
-	held := searchTools(nil)[1:]
+	held := []agenttool.Tool{
+		agenttool.New("weather_lookup", "Look up the weather for a city.", func(context.Context, agenttool.NoArgs) (string, error) { return "", nil }),
+		agenttool.New("stock_quote", "Quote a stock's last price. It says nothing of the weather.", func(context.Context, agenttool.NoArgs) (string, error) { return "", nil }),
+	}
 	s := agentkit.NewToolSearch(func(context.Context) []agenttool.Tool { return held }, nil)
 	run := func(args string) string {
 		t.Helper()
@@ -216,7 +230,7 @@ func TestToolSearchSaysWhatItLoaded(t *testing.T) {
 		t.Errorf("a second select = %q, want it said to be loaded already", out)
 	}
 	// "weather" is in weather_lookup's name and only in stock_quote's
-	// description: the name match first, and +weather keeps it alone.
+	// description; +weather requires it in the name.
 	if out := run(`{"query":"+weather"}`); !strings.Contains(out, "weather_lookup") || strings.Contains(out, "stock_quote") {
 		t.Errorf("+weather = %q, want weather_lookup alone", out)
 	}
@@ -235,11 +249,7 @@ func TestToolSearchSaysWhatItLoaded(t *testing.T) {
 // runs under a scope of its own, so it starts with none loaded and sees
 // the same listing.
 func TestAnotherConversationStartsWithNoneLoaded(t *testing.T) {
-	kit, err := agentkit.New(t.Context(),
-		agentkit.WithModel(stubModel{}, "m"),
-		agentkit.WithTools(searchTools(nil)...),
-		agentkit.WithToolSearch(deferNamed("weather_lookup", "stock_quote")),
-	)
+	kit, err := agentkit.New(t.Context(), searchKit(t, stubModel{}, nil)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,26 +276,21 @@ func TestTheEngineDecidesALoadedToolsCall(t *testing.T) {
 		callTurn(agentkit.ToolSearchTool, `{"query":"select:weather_lookup"}`),
 		callTurn("weather_lookup", `{}`),
 	}}
-	kit, err := agentkit.New(t.Context(),
-		agentkit.WithModel(model, "m"),
-		agentkit.WithTools(searchTools(&weather)...),
-		agentkit.WithToolSearch(deferNamed("weather_lookup", "stock_quote")),
+	kit, err := agentkit.New(t.Context(), searchKit(t, model, &weather,
 		agentkit.WithPolicy(agentpolicy.Policy{
 			Default: agentpolicy.Ask(),
 			Allow:   []agentpolicy.Rule{{Tool: agentkit.ToolSearchTool}},
 			Deny:    []agentpolicy.Rule{{Tool: "stock_quote"}},
 		}, nil),
-	)
+	)...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer kit.Close()
 
 	// A bare deny takes the tool off the listing as off the list.
-	for _, p := range kit.Parts() {
-		if p.ID == agentkit.PartToolSearch && strings.Contains(p.Text, "stock_quote") {
-			t.Errorf("the listing names stock_quote, which a bare deny removes:\n%s", p.Text)
-		}
+	if listing := listingOf(kit); strings.Contains(listing, "stock_quote") || !strings.Contains(listing, "weather_lookup") {
+		t.Errorf("listing = %q, want weather_lookup alone: a bare deny removes stock_quote", listing)
 	}
 
 	agent := agentturn.New(kit.Config())
@@ -309,14 +314,7 @@ func TestAResumedConversationKeepsItsLoadedTools(t *testing.T) {
 	model := &scriptModel{turns: []func(*openresponses.Emitter) error{
 		callTurn(agentkit.ToolSearchTool, `{"query":"select:stock_quote,weather_lookup"}`),
 	}}
-	opts := func(extra ...agentkit.Option) []agentkit.Option {
-		return append([]agentkit.Option{
-			agentkit.WithModel(model, "m"),
-			agentkit.WithTools(searchTools(nil)...),
-			agentkit.WithToolSearch(deferNamed("weather_lookup", "stock_quote")),
-		}, extra...)
-	}
-	first, err := agentkit.New(t.Context(), opts(agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))...)
+	first, err := agentkit.New(t.Context(), searchKit(t, model, nil, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,6 +329,9 @@ func TestAResumedConversationKeepsItsLoadedTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	lastFirst := requestToolNames(model.requests()[len(model.requests())-1])
+	if !slices.Equal(lastFirst, []string{"read", agentkit.ToolSearchTool, "stock_quote", "weather_lookup"}) {
+		t.Fatalf("the first kit's last request offered %v", lastFirst)
+	}
 
 	sess, err := sessions.Open(t.Context(), id)
 	if err != nil {
@@ -348,7 +349,7 @@ func TestAResumedConversationKeepsItsLoadedTools(t *testing.T) {
 		t.Errorf("tools_added on the path = %v, want the two loaded, in load order", added)
 	}
 
-	second, err := agentkit.New(t.Context(), opts(agentkit.WithResumedSession(sessions, id))...)
+	second, err := agentkit.New(t.Context(), searchKit(t, model, nil, agentkit.WithResumedSession(sessions, id))...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,59 +368,30 @@ func TestAResumedConversationKeepsItsLoadedTools(t *testing.T) {
 	}
 }
 
-func TestToolsLabelsTheHeldTools(t *testing.T) {
-	kit, err := agentkit.New(t.Context(),
-		agentkit.WithModel(stubModel{}, "m"),
-		agentkit.WithTools(searchTools(nil)...),
-		agentkit.WithToolSearch(deferNamed("stock_quote")),
-	)
+func TestToolsMarksTheHeldTools(t *testing.T) {
+	kit, err := agentkit.New(t.Context(), searchKit(t, stubModel{}, nil)...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer kit.Close()
 	got := kit.Tools()
-	want := []agentkit.ToolOrigin{
-		{Name: "read", Source: "WithTools"},
-		{Name: "weather_lookup", Source: "WithTools"},
-		{Name: "stock_quote", Source: "WithTools", Deferred: true},
-		{Name: agentkit.ToolSearchTool, Source: "WithToolSearch"},
-	}
-	if !slices.Equal(got, want) {
-		t.Errorf("Tools = %v, want %v", got, want)
-	}
-}
-
-func TestDeferMCPToolsHoldsAServersTools(t *testing.T) {
-	kit, err := agentkit.New(t.Context(),
-		agentkit.WithModel(stubModel{}, "m"),
-		agentkit.WithTools(namedTool(t, "read")),
-		agentkit.WithMCPTransport(serveMCP(t, "remote_one", "remote_two")),
-		agentkit.WithToolSearch(agentkit.DeferMCPTools),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer kit.Close()
-	if names := toolNames(kit.Config().ResolveTools(t.Context())); !slices.Equal(names, []string{"read", agentkit.ToolSearchTool}) {
-		t.Errorf("tools = %v, want the server's held", names)
-	}
-	var listing string
-	for _, p := range kit.Parts() {
-		if p.ID == agentkit.PartToolSearch {
-			listing = p.Text
+	var deferred []string
+	for _, o := range got {
+		if o.Deferred {
+			deferred = append(deferred, o.Name)
 		}
 	}
-	if !strings.Contains(listing, "- remote_one: remote_one does nothing") || !strings.Contains(listing, "- remote_two") {
-		t.Errorf("listing = %q, want both of the server's tools, listed at New", listing)
+	if !slices.Equal(deferred, []string{"stock_quote", "weather_lookup"}) { // the server lists them by name
+		t.Errorf("deferred = %v, want the server's two", deferred)
+	}
+	if last := got[len(got)-1]; last != (agentkit.ToolOrigin{Name: agentkit.ToolSearchTool, Source: "WithToolSearch"}) {
+		t.Errorf("last = %+v, want tool_search from WithToolSearch", last)
 	}
 }
 
 func TestAToolNamedToolSearchIsAConflict(t *testing.T) {
-	_, err := agentkit.New(t.Context(),
-		agentkit.WithModel(stubModel{}, "m"),
-		agentkit.WithTools(namedTool(t, agentkit.ToolSearchTool), namedTool(t, "x")),
-		agentkit.WithToolSearch(deferNamed("x")),
-	)
+	_, err := agentkit.New(t.Context(), searchKit(t, stubModel{}, nil,
+		agentkit.WithTools(namedTool(t, agentkit.ToolSearchTool)))...)
 	if err == nil || !strings.Contains(err.Error(), "WithToolSearch") {
 		t.Fatalf("err = %v, want a conflict naming WithToolSearch", err)
 	}

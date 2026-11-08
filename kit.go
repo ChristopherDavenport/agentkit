@@ -229,7 +229,7 @@ type Kit struct {
 	// listing New renders before the tool set exists is drawn from with
 	// the servers'.
 	search     *ToolSearch
-	deferTool  func(string, agenttool.Tool) bool
+	deferTool  func(string, []agenttool.Tool) bool
 	earlyTools []agenttool.Tool
 	// firstOmitted is the memory omissions of New's render, which go
 	// with first.
@@ -3070,9 +3070,19 @@ func (k *Kit) markHeld(out []ToolOrigin) []ToolOrigin {
 			byName[t.Name()] = t
 		}
 	}
+	bySource := map[string][]agenttool.Tool{}
+	for _, o := range out {
+		if t, ok := byName[o.Name]; ok {
+			bySource[o.Source] = append(bySource[o.Source], t)
+		}
+	}
+	decided := map[string]bool{}
+	for src, tools := range bySource {
+		decided[src] = k.deferTool(src, tools)
+	}
 	held := false
 	for i, o := range out {
-		if t, ok := byName[o.Name]; ok && k.deferTool(o.Source, t) {
+		if _, ok := byName[o.Name]; ok && decided[o.Source] {
 			out[i].Deferred, held = true, true
 		}
 	}

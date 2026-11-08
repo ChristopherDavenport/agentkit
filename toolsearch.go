@@ -456,10 +456,19 @@ func ToolsInForce(path []agentsession.Entry) []string {
 func (k *Kit) ToolSearch() *ToolSearch { return k.search }
 
 // splitHeld divides the union's tools, by their origins, into those
-// offered and those [WithToolSearch] holds back, each in union order.
+// offered and those [WithToolSearch] holds back, each in union order,
+// asking about each source once, with its tools.
 func (k *Kit) splitHeld(tools []agenttool.Tool, origins []ToolOrigin) (offered, held []agenttool.Tool) {
+	bySource := map[string][]agenttool.Tool{}
 	for i, t := range tools {
-		if k.deferTool(origins[i].Source, t) {
+		bySource[origins[i].Source] = append(bySource[origins[i].Source], t)
+	}
+	decided := make(map[string]bool, len(bySource))
+	for src, ts := range bySource {
+		decided[src] = k.deferTool(src, ts)
+	}
+	for i, t := range tools {
+		if decided[origins[i].Source] {
 			held = append(held, t)
 		} else {
 			offered = append(offered, t)

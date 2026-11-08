@@ -171,7 +171,7 @@ deny rule removes is never offered. Every source carries a label, so a
 conflict says which two to fix.
 
 `WithToolSearch` changes when a tool's definition is sent rather than
-whether: it holds back the tools a function picks, an MCP server's most often (`DeferMCPTools`), lists them by name
+whether: it holds back the tools of the sources a function picks, MCP servers most often (`DeferMCPTools`), lists them by name
 and summary in a part of their own, and offers `tool_search`, which
 loads a tool for the rest of the conversation. A loaded tool is
 appended after the tools already sent, so each request's tools are the

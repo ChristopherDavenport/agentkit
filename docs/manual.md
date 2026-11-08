@@ -344,7 +344,8 @@ spawned it, the same person's; `SearchFilter`'s `TopLevel` leaves
 subsessions out.
 
 Under `WithToolSearch` the list inside `engine.ToolProvider` is split
-before it is returned: the tools `deferred` holds back come out, and
+before it is returned: the tools of each source `deferred` holds back,
+asked once per source with that source's tools, come out, and
 `agentkit.ToolSearch.Offer` puts `tool_search` and the conversation's
 loaded tools after the rest. The listing is a part the product renders
 as it renders any of its own, `search.Part`, placed after the servers'
@@ -355,7 +356,7 @@ var search *agentkit.ToolSearch
 held := func(ctx context.Context) []agenttool.Tool {
 	var out []agenttool.Tool
 	for _, t := range unionNow(ctx) { // the list above, before the split
-		if deferred(sourceOf(t), t) {
+		if isHeld(t) { // deferred(label, that label's tools), per source
 			out = append(out, t)
 		}
 	}
@@ -378,7 +379,7 @@ search = agentkit.NewToolSearch(held, scopeOf, agentkit.ToolSearchSeed(func(ctx 
 inner := func(ctx context.Context) []agenttool.Tool {
 	var offered, heldNow []agenttool.Tool
 	for _, t := range unionNow(ctx) {
-		if deferred(sourceOf(t), t) {
+		if isHeld(t) {
 			heldNow = append(heldNow, t)
 		} else {
 			offered = append(offered, t)

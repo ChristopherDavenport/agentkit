@@ -7,9 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- `WithToolSearch(deferred)` holds back the tools `deferred` returns
-  true for, so their definitions are not sent until the model asks for
-  them (#130). A held tool is listed by name and the first sentence of
+- `WithToolSearch(deferred)` holds back the tools of each source
+  `deferred(label, tools)` returns true for, an MCP server's whole list
+  or none of it, so their definitions are not sent until the model asks
+  for them (#130). A held tool is listed by name and the first sentence of
   its description (`ToolSummary`) in the part `tool_search`
   (`PartToolSearch`, source `agentkit`), placed right after the MCP
   servers' instructions unless `WithOrder` places it, and the
