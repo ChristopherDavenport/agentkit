@@ -170,6 +170,15 @@ that appears at turn time and tells `WithToolConflict`, and puts
 deny rule removes is never offered. Every source carries a label, so a
 conflict says which two to fix.
 
+`WithToolSearch` changes when a tool's definition is sent rather than
+whether: it holds back the tools a function picks, an MCP server's most often (`DeferMCPTools`), lists them by name
+and summary in a part of their own, and offers `tool_search`, which
+loads a tool for the rest of the conversation. A loaded tool is
+appended after the tools already sent, so each request's tools are the
+last one's plus the new ones and the cached prefix holds, and the
+recorder writes it as `tools_added`. Each conversation loads its own,
+and a resumed one starts with what its record has in force.
+
 `WithToolFilter` is the other thing a union can do that its parts
 cannot: it sees each tool with the label of the source that produced
 it, which is how a product takes five tools from a server offering

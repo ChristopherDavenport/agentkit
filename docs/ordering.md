@@ -18,6 +18,10 @@ None of them is a default chosen because it was convenient.
 | 4 | `memory` | `agentmemory` | what the agent knows, before what the repo says |
 | 5 | `agentsmd` | `agentsmd` | the repository has the last word |
 
+Under `WithToolSearch` a sixth, `tool_search`, the listing of the tools
+held back, goes right after `mcp`, whatever order the product gave
+unless it names `tool_search` itself.
+
 A product's own parts, `WithPart`, follow the kit's in the order they
 were added, unless `WithOrder` places them.
 
@@ -36,6 +40,14 @@ word over them and a third party's text never follows the product's
 last word. A server's instructions are given only while the conversation is
 offered one of its tools, after the filter, the wrapper, the duplicate
 check and the policy's offer.
+
+**`tool_search` follows `mcp`.** It is a catalogue too, of tools by
+name and summary, and it moves only when the held tools do, never when
+one is loaded, so it sits early, in the prefix a provider caches, ahead
+of the memory block, which moves whenever memory is written. Its
+summaries are each tool's own first sentence, collapsed and cut to
+`ToolSummaryRunes`; the kit writes the heading and the paragraph around
+them. It is charged to the budget as a `WithPart` part is, whole.
 
 ## The argument
 

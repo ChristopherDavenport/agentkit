@@ -6,6 +6,7 @@ import (
 	"io"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/ChristopherDavenport/agentmemory"
@@ -102,6 +103,8 @@ type settings struct {
 	conflict          func(Conflict)
 	toolFilter        func(source string, t agenttool.Tool) bool
 	toolWrap          func(source string, t agenttool.Tool) agenttool.Tool
+	// toolSearch is WithToolSearch's: which tools the union holds back.
+	toolSearch func(source string, t agenttool.Tool) bool
 
 	engine      *agentpolicy.Engine
 	policy      agentpolicy.Policy
@@ -300,7 +303,7 @@ type productPart struct {
 // the budget by what the part added. The input guards run over
 // it as over every part, and [Kit.PartsFor] gives it with the rest. An
 // id the kit composes ([PartProduct], [PartSkills], agentsmd.PartID,
-// [PartMemoryUsage]), one in agentmemory's reserved space (memory,
+// [PartMemoryUsage], [PartToolSearch]), one in agentmemory's reserved space (memory,
 // memory/…, memory:…), an empty one, or one added twice is refused by
 // New. An error from render fails New, or the request.
 func WithPart(id, source string, render func(context.Context) (PartRender, error)) Option {
@@ -921,6 +924,57 @@ func WithToolProvider(fn func(context.Context) []agenttool.Tool) Option {
 // that claim a name resolves the conflict rather than reporting it.
 func WithToolFilter(fn func(source string, t agenttool.Tool) bool) Option {
 	return func(s *settings) { s.toolFilter = fn }
+}
+
+// WithToolSearch holds back the tools deferred returns true for, so
+// their definitions are not sent until the model asks for them. deferred
+// is called as [WithToolFilter]'s function is, once per tool per turn
+// with the label of the tool's source ("mcp:#1 some-server",
+// "WithTools", …), after the filter and the product's wrapper; it must
+// answer the same for a tool throughout a session, or the tool moves
+// between the two lists. [DeferMCPTools] defers every MCP server's tools;
+// a product deferring some servers and not others decides by the label
+// or by the tool's name.
+//
+// A held tool is listed in [PartToolSearch] by its name and its
+// [ToolSummary], and the conversation is offered tool_search
+// ([ToolSearchTool]), which loads tools by exact name ("select:a,b") or
+// by keywords over their names and descriptions. A loaded tool is
+// offered from the conversation's next request on, after every tool not
+// held and after tool_search, in the order the conversation loaded them,
+// and stays for the rest of the conversation: each request's tools are
+// the last one's with the newly loaded appended, so the prefix a
+// provider caches holds, and the recorder writes the change as a config
+// entry's tools_added. When nothing is held, a session in which every
+// server is small, neither the part nor tool_search is sent.
+//
+// The loaded set is per conversation, by [Kit.GrantScope]: a child
+// agent, under a scope of its own, starts with none loaded, sees the same
+// listing when its configuration takes [PartToolSearch], and loads its
+// own. A conversation the kit has not seen in this process starts with
+// the tools its session has in force at its leaf ([ToolsInForce]), the
+// run's recorder's session, so a resumed conversation offers what its
+// last request did.
+//
+// The policy is unchanged. A held tool is still its source's tool, and
+// the engine decides its call as any other; the policy's offer filter
+// takes a tool a bare deny removes off the listing and off the list
+// once loaded. tool_search itself only changes what the model is
+// offered, and is read-only; the kit does not allow it, as it allows no
+// library's tool, so a product whose default asks names it to the
+// policy as it names the others through [Kit.Tools].
+//
+// [Kit.ToolSearch] is the state, for a front that shows what is loaded.
+// By hand it is [NewToolSearch], its Offer inside the ToolProvider and
+// its Part as a [WithPart]; see docs/manual.md.
+func WithToolSearch(deferred func(source string, t agenttool.Tool) bool) Option {
+	return func(s *settings) { s.toolSearch = deferred }
+}
+
+// DeferMCPTools is a [WithToolSearch] function that holds back every MCP
+// server's tools, those [Kit.AddMCP] connects included, and nothing else.
+func DeferMCPTools(source string, _ agenttool.Tool) bool {
+	return strings.HasPrefix(source, "mcp:")
 }
 
 // WithToolWrap replaces tools in the union with what fn returns: fn is

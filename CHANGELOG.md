@@ -3,6 +3,38 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- `WithToolSearch(deferred)` holds back the tools `deferred` returns
+  true for, so their definitions are not sent until the model asks for
+  them (#130). A held tool is listed by name and the first sentence of
+  its description (`ToolSummary`) in the part `tool_search`
+  (`PartToolSearch`, source `agentkit`), placed right after the MCP
+  servers' instructions unless `WithOrder` places it, and the
+  conversation is offered `tool_search` (`ToolSearchTool`), which loads
+  tools by exact name (`"select:a,b"`) or by keywords over names and
+  descriptions. A loaded tool is offered from the next request on,
+  appended after every tool not held, `tool_search` and the tools loaded
+  before it, and stays for the rest of the conversation, so each
+  request's tools are the last one's with the loaded appended and the
+  cached prefix holds; the recorder writes the change as the config
+  entry's `tools_added`. The loaded set is per conversation, by
+  `Kit.GrantScope`, so a child agent starts with none loaded, and a
+  conversation the kit has not seen starts with the tools its session
+  has in force at the leaf (`ToolsInForce`), so a resumed one offers
+  what its last request did. Nothing is sent when nothing is held. The
+  policy is unchanged: a held tool is decided when it is called, a bare
+  deny takes it off the listing, and the kit does not allow
+  `tool_search` itself. `DeferMCPTools` holds back every MCP server's
+  tools. `Kit.ToolSearch()` returns the state (`ToolSearch.Loaded`,
+  `Load`), `Kit.Tools()` sets the new `ToolOrigin.Deferred` on a held
+  tool and lists `tool_search` from the source `WithToolSearch`, and
+  `NewToolSearch`, `ToolSearch.Offer`, `ToolSearch.Part` and
+  `ToolSearchListing` are the manual path (docs/manual.md). A
+  `WithPart` id of `tool_search` is refused.
+
 ## v0.0.17 - 2026-11-06
 
 ### Changed

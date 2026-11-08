@@ -32,6 +32,9 @@ func (c Conflict) Error() string {
 type ToolOrigin struct {
 	Name   string
 	Source string
+	// Deferred is set on a tool [WithToolSearch] holds back: listed to
+	// the model by name, and offered once a conversation loads it.
+	Deferred bool
 }
 
 // source is one contributor to the tool set, in the order the kit

@@ -439,7 +439,7 @@ func checkPartIDs(parts []productPart) error {
 		switch {
 		case p.id == "":
 			return errors.New("agentkit: WithPart needs an id")
-		case p.id == PartProduct || p.id == PartSkills || p.id == agentsmd.PartID || group(p.id) == PartMemory || group(p.id) == PartMCP:
+		case p.id == PartProduct || p.id == PartSkills || p.id == agentsmd.PartID || p.id == PartToolSearch || group(p.id) == PartMemory || group(p.id) == PartMCP:
 			return fmt.Errorf("agentkit: WithPart %q names a part the kit composes", p.id)
 		case seen[p.id]:
 			return fmt.Errorf("agentkit: WithPart %q is given twice", p.id)

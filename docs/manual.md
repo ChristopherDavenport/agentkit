@@ -34,9 +34,9 @@ and no fold is recorded.
 | `Model`, `ModelName` | `WithModel` | assign them; the kit builds no adapter, so a model that is an `openresponses.ClientAdapter` over a provider's own API is the product's `client.AsAdapter(openresponses.WithProviderSlugs())`, which leaves out an item under another provider's slug that the loop keeps (`Config.Model`'s doc, agentturn v0.0.35) |
 | `Request`, `RequestExtra`, `Reasoning`, `Text`, `MaxTurns`, `Filter` | `WithRequest`, `WithRequestExtra`, `WithReasoning`, `WithText`, `WithMaxTurns`, `WithFilter` | assign them; the kit copies them through and owns no member of any |
 | `Retry`, `ToolExecution`, `MaxParallelTools` | `WithRetry`, `WithToolExecution`, `WithMaxParallelTools` | assign them; the kit contests none of them and reads none of them |
-| `Instructions` | `WithInstructions`, `WithSkills`, `WithMemory`, `WithMemoryArchive`, `WithAgentsMD`, `WithPart`, `WithMCP`, `WithTrustedMCPInstructions` | `strings.Join` of the four blocks, each MCP server's instructions part and each `WithPart` part's first render, in the order of [ordering.md](ordering.md) — see below |
+| `Instructions` | `WithInstructions`, `WithSkills`, `WithMemory`, `WithMemoryArchive`, `WithAgentsMD`, `WithPart`, `WithMCP`, `WithTrustedMCPInstructions`, `WithToolSearch` | `strings.Join` of the four blocks, each MCP server's instructions part and each `WithPart` part's first render, in the order of [ordering.md](ordering.md) — see below |
 | `Tools` | — | the kit never sets it; it sets `ToolProvider`, which the loop reads in its place |
-| `ToolProvider` | `WithTools`, `WithSkills`, `WithMemory`, `WithMemoryArchive`, `WithSessionSearch`, `WithMCP`, `WithMCPResourceTools`, `WithChildAgent`, `WithDeferredTools`, `WithToolProvider`, `WithToolFilter`, `WithToolWrap`, `WithPolicy` | `append` the slices, wrap each tool, and wrap the list in `engine.ToolProvider` — see below |
+| `ToolProvider` | `WithTools`, `WithSkills`, `WithMemory`, `WithMemoryArchive`, `WithSessionSearch`, `WithMCP`, `WithMCPResourceTools`, `WithChildAgent`, `WithDeferredTools`, `WithToolProvider`, `WithToolFilter`, `WithToolWrap`, `WithToolSearch`, `WithPolicy` | `append` the slices, wrap each tool, split off the held ones through `search.Offer`, and wrap the list in `engine.ToolProvider` — see below |
 | `BeforeTurn` | `WithSkillGrantScope`, `WithBeforeTurn` | `agentturn.ChainBeforeTurn(revokeOnUserMessage, yours...)` — see below |
 | `BeforeModelCall` | `WithMemory`, `WithPart`, `WithGuards`, `WithPolicy`, `WithSkillGrants`, `WithVerdictObserver`, `WithBeforeModelCall` | `agentturn.ChainBeforeModelCall(instructions, chain.BeforeModelCall(), yours...)` — see below |
 | `BeforeToolCall` | `WithPolicy`, `WithMemory`, `WithSkillGrants`, `WithSkillGrantScope`, `WithBeforeToolCall` | `agentturn.ChainBeforeToolCall(keepSaveBase, decide)`, `decide` being `engine.BeforeToolCall()` under the call's grant scope, the engine built with `agentpolicy.WithHooks(refuseEndedGrant, yours...)`; with `WithEngine` or no policy, `yours...` after the engine and no `refuseEndedGrant` — see below |
@@ -342,6 +342,62 @@ hook, the product decides who may read what. A child agent's search
 starts from the child's own session, so it finds the conversation that
 spawned it, the same person's; `SearchFilter`'s `TopLevel` leaves
 subsessions out.
+
+Under `WithToolSearch` the list inside `engine.ToolProvider` is split
+before it is returned: the tools `deferred` holds back come out, and
+`agentkit.ToolSearch.Offer` puts `tool_search` and the conversation's
+loaded tools after the rest. The listing is a part the product renders
+as it renders any of its own, `search.Part`, placed after the servers'
+instructions:
+
+```go
+var search *agentkit.ToolSearch
+held := func(ctx context.Context) []agenttool.Tool {
+	var out []agenttool.Tool
+	for _, t := range unionNow(ctx) { // the list above, before the split
+		if deferred(sourceOf(t), t) {
+			out = append(out, t)
+		}
+	}
+	// The policy's offer filter, so a bare deny takes a tool off the
+	// listing as it takes it off the list.
+	return engine.ToolProvider(func(context.Context) []agenttool.Tool { return out })(
+		agentpolicy.ContextWithGrantScope(ctx, scopeOf(ctx)))
+}
+search = agentkit.NewToolSearch(held, scopeOf, agentkit.ToolSearchSeed(func(ctx context.Context) []string {
+	r := recorderFor(ctx)
+	if r == nil {
+		return nil
+	}
+	sess, err := r.Store().Open(ctx, runSessionID(ctx, r))
+	if err != nil {
+		return nil
+	}
+	return agentkit.ToolsInForce(sess.Path(sess.Leaf())) // a resumed conversation keeps its loads
+}))
+inner := func(ctx context.Context) []agenttool.Tool {
+	var offered, heldNow []agenttool.Tool
+	for _, t := range unionNow(ctx) {
+		if deferred(sourceOf(t), t) {
+			heldNow = append(heldNow, t)
+		} else {
+			offered = append(offered, t)
+		}
+	}
+	return search.Offer(ctx, offered, heldNow) // offered, tool_search, then the loaded, in load order
+}
+// The listing, rendered for every request as a part of the product's:
+// listing := search.Part(ctx) -> agentkit.ToolSearchListing(held(ctx))
+```
+
+`tool_search` is `agenttool.New` over `search`: a `select:` query loads
+the held tools it names, any other query loads the best keyword matches
+(two for a word in the name, one for a word only in the description, a
+`+word` required in the name), and `search.Load` keeps them under
+`scopeOf(ctx)`, the conversation's grant scope, so a child starts with
+none. The loop asks the provider once per turn, so a loaded tool is in
+the next request, and the recorder writes the list that grew as
+`tools_added`.
 
 `grant` is `WithSkillGrants`, under "What the kit does" below. The
 product's wrapper runs inside it, so what `grant` wraps is the tool the
