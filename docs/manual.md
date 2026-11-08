@@ -365,7 +365,11 @@ held := func(ctx context.Context) []agenttool.Tool {
 	return engine.ToolProvider(func(context.Context) []agenttool.Tool { return out })(
 		agentpolicy.ContextWithGrantScope(ctx, scopeOf(ctx)))
 }
-search = agentkit.NewToolSearch(held, scopeOf, agentkit.ToolSearchSeed(func(ctx context.Context) []string {
+search = agentkit.NewToolSearch(held, scopeOf, agentkit.ToolSearchTrust(func(ctx context.Context) *agentsession.Trust {
+	// What the held tools' servers' instructions read, less those you
+	// trust (WithTrustedMCPInstructions); untrusted when left out.
+	return &agentsession.Trust{Reads: heldServersReads(ctx)}
+}), agentkit.ToolSearchSeed(func(ctx context.Context) []string {
 	r := recorderFor(ctx)
 	if r == nil {
 		return nil

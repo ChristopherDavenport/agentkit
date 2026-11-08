@@ -577,7 +577,7 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 		// The listing is a part the kit renders for each request as it
 		// renders a WithPart part, from the tools it holds back then.
 		k.deferTool, k.earlyTools = s.toolSearch, s.tools
-		k.search = NewToolSearch(k.heldTools, k.GrantScope, ToolSearchSeed(k.toolsInForce))
+		k.search = NewToolSearch(k.heldTools, k.GrantScope, ToolSearchSeed(k.toolsInForce), ToolSearchTrust(k.listingTrust))
 		s.parts = append(s.parts, productPart{id: PartToolSearch, source: SourceToolSearch, render: k.search.Part})
 	}
 	var partOm []Omission

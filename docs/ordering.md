@@ -45,9 +45,14 @@ check and the policy's offer.
 name and summary, and it moves only when the held tools do, never when
 one is loaded, so it sits early, in the prefix a provider caches, ahead
 of the memory block, which moves whenever memory is written. Its
-summaries are each tool's own first sentence, collapsed and cut to
-`ToolSummaryRunes`; the kit writes the heading and the paragraph around
-them. It is charged to the budget as a `WithPart` part is, whole.
+summaries are each tool's own first sentence, collapsed to one line
+with no control character and cut to `ToolSummaryRunes`; the kit writes
+the heading and the paragraph around them. The names and summaries are
+the tools' providers' text, so, like an MCP server's instructions, they
+are fenced under a line saying who wrote them, and the part reads what
+those servers' instructions read, untrusted unless
+`WithTrustedMCPInstructions` names the server. It is charged to the
+budget as a `WithPart` part is, whole.
 
 ## The argument
 

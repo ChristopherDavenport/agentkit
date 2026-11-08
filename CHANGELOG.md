@@ -34,7 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   tool and lists `tool_search` from the source `WithToolSearch`, and
   `NewToolSearch`, `ToolSearch.Offer`, `ToolSearch.Part` and
   `ToolSearchListing` are the manual path (docs/manual.md). A
-  `WithPart` id of `tool_search` is refused.
+  `WithPart` id of `tool_search` is refused. The listing is the held
+  tools' own text, so it is labelled and fenced as the MCP servers'
+  instructions are: the part reads each held server's
+  `InstructionsReads` (untrusted) unless `WithTrustedMCPInstructions`
+  names it, and the names and summaries sit under a line saying who
+  wrote them, inside a code fence longer than any backtick run they
+  hold, each collapsed to its own line with no control character.
+  `ToolSearchTrust` sets the trust by hand; without it the part reads
+  untrusted.
 
 ## v0.0.17 - 2026-11-06
 
