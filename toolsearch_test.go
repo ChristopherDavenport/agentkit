@@ -21,7 +21,17 @@ import (
 // tests below hold back, counting weather_lookup's calls.
 func heldServer(t *testing.T, weatherCalls *atomic.Int32) sdk.Transport {
 	t.Helper()
-	srv := sdk.NewServer(&sdk.Implementation{Name: "test", Version: "0"}, nil)
+	return heldServerWith(t, weatherCalls, "")
+}
+
+// heldServerWith is heldServer giving instructions, none when empty.
+func heldServerWith(t *testing.T, weatherCalls *atomic.Int32, instructions string) sdk.Transport {
+	t.Helper()
+	var opts *sdk.ServerOptions
+	if instructions != "" {
+		opts = &sdk.ServerOptions{Instructions: instructions}
+	}
+	srv := sdk.NewServer(&sdk.Implementation{Name: "test", Version: "0"}, opts)
 	sdk.AddTool(srv, &sdk.Tool{Name: "weather_lookup", Description: "Look up the weather for a city. Returns the temperature and the sky, in metric units, for today and the next six days, from the national service."},
 		func(context.Context, *sdk.CallToolRequest, struct{}) (*sdk.CallToolResult, any, error) {
 			if weatherCalls != nil {
@@ -465,5 +475,217 @@ func TestADescriptionStaysOnItsOwnLine(t *testing.T) {
 		if strings.HasPrefix(l, "#") && l != "## Tools loaded on request" {
 			t.Errorf("a heading outside the kit's own: %q", l)
 		}
+	}
+}
+
+// A load is in the record from the moment tool_search returns, as its
+// output: a conversation that stops before the next request, so before
+// any config entry carries the tool, still has it loaded on resume.
+func TestALoadSurvivesAStopBeforeTheNextRequest(t *testing.T) {
+	sessions := agentsession.NewMemoryStore()
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn(agentkit.ToolSearchTool, `{"query":"select:weather_lookup"}`),
+	}}
+	first, err := agentkit.New(t.Context(), searchKit(t, model, nil,
+		agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}),
+		agentkit.WithMaxTurns(1))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := agentturn.New(first.Config())
+	unsubscribe := first.Attach(agent)
+	end, err := agent.Prompt(t.Context(), openresponses.UserText("load it"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsubscribe()
+	if end.Reason != agentturn.ReasonStopped || len(model.requests()) != 1 {
+		t.Fatalf("reason = %q after %d requests, want a stop after the first", end.Reason, len(model.requests()))
+	}
+	id := first.SessionID()
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := sessions.Open(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := sess.Path(sess.Leaf())
+	if got := agentkit.ToolsInForce(path); slices.Contains(got, "weather_lookup") {
+		t.Fatalf("tools in force = %v; the stop came after a request carried the tool", got)
+	}
+	if got := agentkit.ToolSearchLoads(path); !slices.Equal(got, []string{"weather_lookup"}) {
+		t.Fatalf("ToolSearchLoads = %v, want the load the output records", got)
+	}
+
+	second, err := agentkit.New(t.Context(), searchKit(t, model, nil, agentkit.WithResumedSession(sessions, id))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if got := second.ToolSearch().Loaded(t.Context()); !slices.Equal(got, []string{"weather_lookup"}) {
+		t.Errorf("the resumed conversation has %v loaded, want weather_lookup", got)
+	}
+	resumed := agentturn.New(second.Config(), second.AgentOptions()...)
+	defer second.Attach(resumed)()
+	n := len(model.requests())
+	if _, err := resumed.Prompt(t.Context(), openresponses.UserText("again")); err != nil {
+		t.Fatal(err)
+	}
+	if got := requestToolNames(model.requests()[n]); !slices.Equal(got, []string{"read", agentkit.ToolSearchTool, "weather_lookup"}) {
+		t.Errorf("the resumed first request offers %v, want the load appended", got)
+	}
+}
+
+func TestToolSearchLoadsReadsOnlyToolSearchOutputs(t *testing.T) {
+	item := func(it openresponses.Item, failed bool) agentsession.Entry {
+		return &agentsession.ItemEntry{Item: it, Failed: failed}
+	}
+	out := func(id, text string) openresponses.Item {
+		return &openresponses.FunctionCallOutput{CallID: id, Output: openresponses.FunctionCallOutputData{Text: text}}
+	}
+	path := []agentsession.Entry{
+		item(&openresponses.FunctionCall{CallID: "a", Name: agentkit.ToolSearchTool}, false),
+		item(out("a", "2 tool(s) loaded; each can be called from your next step on:\n- weather_lookup: Look up the weather.\n- stock_quote (loaded already)\nNo deferred tool is named \"x\"."), false),
+		// Another tool's output in the same words loads nothing.
+		item(&openresponses.FunctionCall{CallID: "b", Name: "read"}, false),
+		item(out("b", "1 tool(s) loaded; each can be called from your next step on:\n- not_loaded"), false),
+		// Nor does a failed call, or a refusal.
+		item(&openresponses.FunctionCall{CallID: "c", Name: agentkit.ToolSearchTool}, false),
+		item(out("c", "1 tool(s) loaded; each can be called from your next step on:\n- failed_one"), true),
+		item(&openresponses.FunctionCall{CallID: "d", Name: agentkit.ToolSearchTool}, false),
+		item(out("d", "denied by policy"), false),
+		item(&openresponses.FunctionCall{CallID: "e", Name: agentkit.ToolSearchTool}, false),
+		item(out("e", "1 tool(s) loaded; each can be called from your next step on:\n- weather_lookup (loaded already)\n- late: one."), false),
+	}
+	if got := agentkit.ToolSearchLoads(path); !slices.Equal(got, []string{"weather_lookup", "stock_quote", "late"}) {
+		t.Errorf("ToolSearchLoads = %v, want weather_lookup, stock_quote, late", got)
+	}
+}
+
+// A held server's instructions are about tools the model does not have
+// yet: they are sent from the request that first carries one of its
+// tools, the one whose tool list grew, and kept from then on.
+func TestAHeldServersInstructionsWaitForItsFirstLoad(t *testing.T) {
+	const instructions = "Ask for metric units unless the user names a country."
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn(agentkit.ToolSearchTool, `{"query":"select:weather_lookup"}`),
+		callTurn("weather_lookup", `{}`),
+	}}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(model, "m"),
+		agentkit.WithInstructions("Be brief."),
+		agentkit.WithTools(namedTool(t, "read")),
+		agentkit.WithMCPTransport(heldServerWith(t, nil, instructions)),
+		agentkit.WithToolSearch(agentkit.DeferMCPTools),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	if strings.Contains(kit.Config().Instructions, instructions) {
+		t.Error("the configuration sends a held server's instructions before any of its tools is loaded")
+	}
+	if ids := groupIDs(kit.Parts()); slices.Contains(ids, agentkit.PartMCP) {
+		t.Errorf("parts = %v, want no MCP part while nothing is loaded", ids)
+	}
+
+	agent := agentturn.New(kit.Config())
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("weather")); err != nil {
+		t.Fatal(err)
+	}
+	reqs := model.requests()
+	if len(reqs) != 3 {
+		t.Fatalf("%d requests, want 3", len(reqs))
+	}
+	if strings.Contains(reqs[0].Instructions, instructions) {
+		t.Error("the first request sends the held server's instructions")
+	}
+	if !strings.Contains(reqs[1].Instructions, instructions) || !slices.Contains(requestToolNames(reqs[1]), "weather_lookup") {
+		t.Errorf("the request after the load has tools %v; want the tool and its server's instructions together", requestToolNames(reqs[1]))
+	}
+	if reqs[2].Instructions != reqs[1].Instructions {
+		t.Error("the instructions changed again after the load")
+	}
+	// Fenced and labelled as any server's.
+	if !strings.Contains(reqs[1].Instructions, "## Instructions from the MCP server") {
+		t.Error("the server's instructions are not under the kit's heading")
+	}
+}
+
+// A conversation resumed with a held server's tool loaded has that
+// server's instructions in its configuration, as in its first request.
+func TestAResumedLoadBringsItsServersInstructions(t *testing.T) {
+	const instructions = "Ask for metric units unless the user names a country."
+	sessions := agentsession.NewMemoryStore()
+	model := &scriptModel{turns: []func(*openresponses.Emitter) error{
+		callTurn(agentkit.ToolSearchTool, `{"query":"select:weather_lookup"}`),
+	}}
+	opts := func(extra ...agentkit.Option) []agentkit.Option {
+		return append([]agentkit.Option{
+			agentkit.WithModel(model, "m"),
+			agentkit.WithTools(namedTool(t, "read")),
+			agentkit.WithMCPTransport(heldServerWith(t, nil, instructions)),
+			agentkit.WithToolSearch(agentkit.DeferMCPTools),
+		}, extra...)
+	}
+	first, err := agentkit.New(t.Context(), opts(agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := agentturn.New(first.Config())
+	unsubscribe := first.Attach(agent)
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("load it")); err != nil {
+		t.Fatal(err)
+	}
+	unsubscribe()
+	id := first.SessionID()
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := agentkit.New(t.Context(), opts(agentkit.WithResumedSession(sessions, id))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if !strings.Contains(second.Config().Instructions, instructions) {
+		t.Error("the resumed configuration lacks the loaded server's instructions")
+	}
+	resumed := agentturn.New(second.Config(), second.AgentOptions()...)
+	defer second.Attach(resumed)()
+	n := len(model.requests())
+	if _, err := resumed.Prompt(t.Context(), openresponses.UserText("again")); err != nil {
+		t.Fatal(err)
+	}
+	if got := model.requests()[n].Instructions; got != second.Config().Instructions {
+		t.Errorf("the resumed first request's instructions differ from the configuration's:\n%s\n---\n%s", got, second.Config().Instructions)
+	}
+}
+
+// The listing in the configuration is the first request's, held tools of
+// a provider included, which assemble renders before the tool set is
+// built.
+func TestTheConfigurationsListingIsTheFirstRequests(t *testing.T) {
+	late := namedTool(t, "late_tool")
+	model := &scriptModel{}
+	kit, err := agentkit.New(t.Context(), searchKit(t, model, nil,
+		agentkit.WithToolProvider(func(context.Context) []agenttool.Tool { return []agenttool.Tool{late} }),
+		agentkit.WithToolSearch(func(source string, _ []agenttool.Tool) bool { return source != "WithTools" }),
+	)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	if listing := listingOf(kit); !strings.Contains(listing, "- late_tool") || !strings.Contains(listing, "- weather_lookup") {
+		t.Errorf("listing = %q, want the provider's held tool beside the server's", listing)
+	}
+	agent := agentturn.New(kit.Config())
+	if _, err := agent.Prompt(t.Context(), openresponses.UserText("hi")); err != nil {
+		t.Fatal(err)
+	}
+	if got := model.requests()[0].Instructions; got != kit.Config().Instructions {
+		t.Errorf("the first request's instructions differ from the configuration's:\n%s\n---\n%s", got, kit.Config().Instructions)
 	}
 }

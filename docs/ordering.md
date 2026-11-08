@@ -39,7 +39,14 @@ product prompt or ends on it, so the parts after them have the last
 word over them and a third party's text never follows the product's
 last word. A server's instructions are given only while the conversation is
 offered one of its tools, after the filter, the wrapper, the duplicate
-check and the policy's offer.
+check and the policy's offer. A tool `WithToolSearch` holds back is
+offered once the conversation has loaded it, so a held server's
+instructions join at the request that first carries one of its tools,
+the same request whose tool list grew, and stay. They join at their
+server's place in `mcp` and not at the end of the instructions, since a
+third party's text after the repository's would take the last word;
+the instructions from `mcp` on change once per server that way, at a
+request whose tools changed already.
 
 **`tool_search` follows `mcp`.** It is a catalogue too, of tools by
 name and summary, and it moves only when the held tools do, never when

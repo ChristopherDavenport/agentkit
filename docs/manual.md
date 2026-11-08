@@ -378,7 +378,11 @@ search = agentkit.NewToolSearch(held, scopeOf, agentkit.ToolSearchTrust(func(ctx
 	if err != nil {
 		return nil
 	}
-	return agentkit.ToolsInForce(sess.Path(sess.Leaf())) // a resumed conversation keeps its loads
+	path := sess.Path(sess.Leaf())
+	// A resumed conversation keeps its loads: those a request carried,
+	// and those whose tool_search output is recorded with no request
+	// after it.
+	return append(agentkit.ToolsInForce(path), agentkit.ToolSearchLoads(path)...)
 }))
 inner := func(ctx context.Context) []agenttool.Tool {
 	var offered, heldNow []agenttool.Tool
@@ -393,7 +397,15 @@ inner := func(ctx context.Context) []agenttool.Tool {
 }
 // The listing, rendered for every request as a part of the product's:
 // listing := search.Part(ctx) -> agentkit.ToolSearchListing(held(ctx))
+// rendered once more after the tool set and the session exist, so the
+// configuration's instructions are the first request's.
 ```
+
+A held server's instructions part is rendered by the same rule as any
+server's, "while the conversation is offered one of its tools", and a
+held tool is offered once `search.Loaded(ctx)` names it: before
+deciding which servers' instructions go in, drop from the list the held
+tools the conversation has not loaded.
 
 `tool_search` is `agenttool.New` over `search`: a `select:` query loads
 the held tools it names, any other query loads the best keyword matches

@@ -440,6 +440,9 @@ func New(ctx context.Context, opts ...Option) (*Kit, error) {
 	if err := k.build(ctx, &s); err != nil {
 		return fail(err)
 	}
+	if err := k.settleHeld(ctx, &s); err != nil {
+		return fail(err)
+	}
 	if sess := k.sess.Load(); k.grants != nil && sess != nil {
 		k.grants.gmu.Lock()
 		var opts []session.ReadOption
@@ -2734,7 +2737,9 @@ func mcpShare(budget int64, base []Part) int64 {
 // WithToolWrap, the duplicate check once the tool set is built, and the
 // engine's offer filter under the conversation's grant scope, the pass
 // Kit.Tools and the ToolProvider make, resource tools included under
-// WithMCPResourceTools.
+// WithMCPResourceTools. Under WithToolSearch a held tool counts once the
+// conversation has loaded it, since until then the model has its name
+// and summary and not the tool.
 func (k *Kit) offeredServers(ctx context.Context, servers []mcpServer) map[string]bool {
 	var (
 		tools   []agenttool.Tool
@@ -2763,6 +2768,9 @@ func (k *Kit) offeredServers(ctx context.Context, servers []mcpServer) map[strin
 				origins = append(origins, ToolOrigin{Name: t.Name(), Source: sv.label})
 			}
 		}
+	}
+	if k.search != nil {
+		tools, origins = k.withoutUnloaded(ctx, tools, origins)
 	}
 	kept := map[string]bool{}
 	if k.engine != nil {

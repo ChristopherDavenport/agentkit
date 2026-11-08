@@ -6,15 +6,18 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/ChristopherDavenport/agentpolicy"
+	"github.com/ChristopherDavenport/agentpolicy/guard"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agenttool/mcpclient"
+	"github.com/ChristopherDavenport/openresponses"
 )
 
 // ToolSearchTool is the name of the tool [WithToolSearch] offers, which
@@ -97,7 +100,9 @@ type ToolSearchOption func(*ToolSearch)
 // its last one did. seed is called once per conversation, before its
 // first list or load, with that conversation's context; a name that is
 // not a held tool is kept and offers nothing. [WithToolSearch] seeds from
-// the session the run records into, [ToolsInForce] of its path.
+// the session the run records into: [ToolsInForce] of its path, then
+// [ToolSearchLoads] of it, the loads no request carried before the
+// conversation stopped.
 func ToolSearchSeed(seed func(context.Context) []string) ToolSearchOption {
 	return func(s *ToolSearch) { s.seed = seed }
 }
@@ -394,7 +399,7 @@ func (s *ToolSearch) search(ctx context.Context, args toolSearchArgs) (string, e
 	case len(found) == 0 && len(unknown) == 0:
 		fmt.Fprintf(&b, "No deferred tool matched %q. The tools you can load are listed in your instructions under \"Tools loaded on request\".", q)
 	case len(found) > 0:
-		fmt.Fprintf(&b, "%d tool(s) loaded; each can be called from your next step on:", len(found))
+		b.WriteString(strconv.Itoa(len(found)) + loadedHead)
 		for _, t := range found {
 			b.WriteString("\n- ")
 			b.WriteString(t.Name())
@@ -403,7 +408,7 @@ func (s *ToolSearch) search(ctx context.Context, args toolSearchArgs) (string, e
 				b.WriteString(sum)
 			}
 			if !slices.Contains(added, t.Name()) {
-				b.WriteString(" (loaded already)")
+				b.WriteString(loadedAlready)
 			}
 		}
 	}
@@ -414,6 +419,40 @@ func (s *ToolSearch) search(ctx context.Context, args toolSearchArgs) (string, e
 		fmt.Fprintf(&b, "No deferred tool is named %s; the tools you can load are listed in your instructions under \"Tools loaded on request\".", strings.Join(quoteAll(unknown), ", "))
 	}
 	return b.String(), nil
+}
+
+// The output of a tool_search call that loaded tools: the count and
+// loadedHead, then a line per tool, "- " and its name, then ": " and its
+// summary when it has one, then loadedAlready when the conversation had
+// it loaded before. [ToolSearchLoads] reads it back from a record.
+const (
+	loadedHead    = " tool(s) loaded; each can be called from your next step on:"
+	loadedAlready = " (loaded already)"
+)
+
+// loadedNames is the names a tool_search output says it loaded, in its
+// order; none for an output that loaded nothing or is not one.
+func loadedNames(text string) []string {
+	head, rest, _ := strings.Cut(text, "\n")
+	count, ok := strings.CutSuffix(head, loadedHead)
+	if !ok {
+		return nil
+	}
+	if n, err := strconv.Atoi(count); err != nil || n < 1 {
+		return nil
+	}
+	var out []string
+	for line := range strings.SplitSeq(rest, "\n") {
+		item, ok := strings.CutPrefix(line, "- ")
+		if !ok {
+			break
+		}
+		name, _, _ := strings.Cut(item, ": ")
+		if name = strings.TrimSuffix(name, loadedAlready); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 func quoteAll(ss []string) []string {
@@ -501,6 +540,42 @@ func ToolsInForce(path []agentsession.Entry) []string {
 	return out
 }
 
+// ToolSearchLoads is the names the tool_search calls on path loaded, in
+// the order they loaded them, read from each call's output as the model
+// read it. A load is in the record from the moment the call returns,
+// as its output, while the tool joins a config entry's tools_added only
+// with the next request; so a conversation that stopped in between has
+// the load here and not in [ToolsInForce]. A load is never undone, so a
+// name here that the tools in force hold already is the same load
+// twice. A call that failed, or whose output is not tool_search's, a
+// refusal or a guard's rewrite, loaded nothing.
+func ToolSearchLoads(path []agentsession.Entry) []string {
+	calls := map[string]bool{}
+	var out []string
+	for _, e := range path {
+		ie, ok := e.(*agentsession.ItemEntry)
+		if !ok {
+			continue
+		}
+		switch it := ie.Item.(type) {
+		case *openresponses.FunctionCall:
+			if it.Name == ToolSearchTool {
+				calls[it.CallID] = true
+			}
+		case *openresponses.FunctionCallOutput:
+			if ie.Failed || !calls[it.CallID] {
+				continue
+			}
+			for _, n := range loadedNames(it.Output.Text) {
+				if !slices.Contains(out, n) {
+					out = append(out, n)
+				}
+			}
+		}
+	}
+	return out
+}
+
 // ToolSearch is the kit's [WithToolSearch] state, which a front reads to
 // show the tools a conversation has loaded, [ToolSearch.Loaded], or
 // loads one ahead of the model; nil without WithToolSearch.
@@ -535,7 +610,8 @@ func (k *Kit) splitHeld(tools []agenttool.Tool, origins []ToolOrigin) (offered, 
 // listing New renders, it is drawn from the product's tools and the
 // servers', the sources there are then, through the filter and the
 // wrapper; a held tool of a source built later, such as a provider's,
-// joins the listing from the first request.
+// joins it when New renders the listing again after the tool set
+// (settleHeld).
 func (k *Kit) heldTools(ctx context.Context) []agenttool.Tool {
 	held, _ := k.heldOrigins(ctx)
 	return held
@@ -603,7 +679,8 @@ func (k *Kit) listingTrust(ctx context.Context) *agentsession.Trust {
 
 // toolsInForce seeds a conversation the kit's [ToolSearch] has not seen:
 // the tools in force at the leaf of the session the run on ctx records
-// into, or none without one.
+// into, then those its tool_search calls loaded that no request has
+// carried yet, or none without a session.
 func (k *Kit) toolsInForce(ctx context.Context) []string {
 	rec := k.recorderFor(ctx)
 	if rec == nil {
@@ -613,5 +690,89 @@ func (k *Kit) toolsInForce(ctx context.Context) []string {
 	if sess == nil {
 		return nil
 	}
-	return ToolsInForce(sess.Path(sess.Leaf()))
+	path := sess.Path(sess.Leaf())
+	return append(ToolsInForce(path), ToolSearchLoads(path)...)
+}
+
+// withoutUnloaded is tools, with their origins by position, less the
+// held tools the conversation on ctx has not loaded: what it is offered
+// once [WithToolSearch] has split the union. Before the tool set exists
+// none is loaded; New renders the parts that depend on it again once it
+// does (settleHeld).
+func (k *Kit) withoutUnloaded(ctx context.Context, tools []agenttool.Tool, origins []ToolOrigin) ([]agenttool.Tool, []ToolOrigin) {
+	_, held := k.splitHeld(tools, origins)
+	if len(held) == 0 {
+		return tools, origins
+	}
+	var loaded []string
+	if k.tools != nil {
+		_, loaded = k.search.names(ctx)
+	}
+	waiting := map[string]bool{}
+	for _, t := range held {
+		if !slices.Contains(loaded, t.Name()) {
+			waiting[t.Name()] = true
+		}
+	}
+	var (
+		outTools   []agenttool.Tool
+		outOrigins []ToolOrigin
+	)
+	for i, t := range tools {
+		if !waiting[t.Name()] {
+			outTools, outOrigins = append(outTools, t), append(outOrigins, origins[i])
+		}
+	}
+	return outTools, outOrigins
+}
+
+// settleHeld renders the two parts [WithToolSearch] moves again once the
+// tool set and the session exist, so Config().Instructions is the first
+// request's: the listing, which assemble drew from the product's tools
+// and the servers' alone, before a provider's, a WithDeferredTools
+// source's or a library's held tools were built; and the servers'
+// instructions, which wait for one of a held server's tools to be
+// loaded, as a resumed conversation may have. Each group is guarded as
+// New guarded the first render.
+func (k *Kit) settleHeld(ctx context.Context, s *settings) error {
+	if k.search == nil {
+		return nil
+	}
+	k.mu.Lock()
+	base, sent := k.base, k.parts
+	k.mu.Unlock()
+	set := func(id string, g []Part) error {
+		base = withGroup(base, id, g, k.order)
+		if len(s.guards) > 0 && len(g) > 0 {
+			var err error
+			if g, err = guardParts(ctx, guard.Chain{Guards: s.guards}, g); err != nil {
+				return fmt.Errorf("agentkit: an input guard refused the instructions: %w", err)
+			}
+		}
+		sent = withGroup(sent, id, g, k.order)
+		return nil
+	}
+	g, _, err := renderPart(ctx, productPart{id: PartToolSearch, source: SourceToolSearch, render: k.search.Part})
+	if err != nil {
+		return err
+	}
+	if err := set(PartToolSearch, g); err != nil {
+		return err
+	}
+	var om []Omission
+	if k.mcpParts {
+		servers := k.mcpServers()
+		g, om = mcpGroup(servers, k.mcpTrusted, k.offeredServers(ctx, servers), mcpShare(s.budget, base))
+		if err := set(PartMCP, g); err != nil {
+			return err
+		}
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.base, k.parts, k.first = base, sent, sent
+	if k.mcpParts {
+		k.mcpOmitted, k.firstMCPOmitted = om, om
+	}
+	k.cfg.Instructions = agentsession.JoinInstructions(sent)
+	return nil
 }

@@ -43,6 +43,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   hold, each collapsed to its own line with no control character.
   `ToolSearchTrust` sets the trust by hand; without it the part reads
   untrusted.
+- `ToolSearchLoads(path)`: the tools the `tool_search` calls on a path
+  loaded, read from their outputs. The kit's seed for a conversation it
+  has not seen is `ToolsInForce` and then these, so a load is kept from
+  the moment the call returns: a conversation that stopped after a
+  `tool_search` output and before the next request resumes with the
+  tool loaded, where the config entry's `tools_added` would only have
+  come with that request (#132).
+- A held MCP server's instructions are sent from the request that first
+  carries one of its tools, the one whose tool list grew, at the
+  server's place in the `mcp` part, and stay; before that the server's
+  tools are listed, not offered, and its instructions are not sent
+  (#133).
+- `Kit.Config()`'s instructions are the first request's under
+  `WithToolSearch`: the listing and the servers' instructions are
+  rendered again once the tool set and the session exist, so a held
+  tool of a provider, a `WithDeferredTools` source or a library is
+  listed, and a resumed conversation's loaded servers' instructions are
+  in (#134).
 
 ## v0.0.17 - 2026-11-06
 

@@ -956,7 +956,16 @@ func WithToolFilter(fn func(source string, t agenttool.Tool) bool) Option {
 // own. A conversation the kit has not seen in this process starts with
 // the tools its session has in force at its leaf ([ToolsInForce]), the
 // run's recorder's session, so a resumed conversation offers what its
-// last request did.
+// last request did, and with those its tool_search outputs say were
+// loaded after that request ([ToolSearchLoads]), so a load is kept from
+// the moment the call returns.
+//
+// A held server's MCP instructions wait with its tools: they are sent
+// from the request that first carries one of its tools, at the server's
+// place in [PartMCP], and stay. [Kit.Config]'s instructions are rendered
+// once the tool set and the session exist, so they are the first
+// request's, the held tools of a provider or a WithDeferredTools source
+// listed and a resumed conversation's loaded servers' instructions in.
 //
 // The policy is unchanged. A held tool is still its source's tool, and
 // the engine decides its call as any other; the policy's offer filter
