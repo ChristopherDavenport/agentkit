@@ -360,7 +360,7 @@ a2a.
 | `agenttool`, `agenttool/mcpclient` | v0.0.30 |
 | `agentturn`, `agentturn/session` | v0.0.38 |
 | `agentsession` | v0.0.38 |
-| `agentsmd` | v0.0.4 |
+| `agentsmd` | v0.0.5 |
 | `agentskill` | v0.0.12 |
 | `agentmemory` | v0.0.12 |
 | `agentpolicy` | v0.0.20 |
