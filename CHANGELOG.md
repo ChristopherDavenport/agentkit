@@ -62,6 +62,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   listed, and a resumed conversation's loaded servers' instructions are
   in (#134).
 
+### Changed
+
+- Requires agentsmd v0.0.5, up from v0.0.4, in the root and in
+  `examples/a2a`, for `agentsmd.Options.Truncate`: a product that sets
+  it in `WithAgentsMD`'s options has the first AGENTS.md file over the
+  bound cut at a line with agentsmd's marker instead of left out, and
+  the kit reports it as an omission with reason `truncated` and the
+  bytes cut off as its `Size`.
+- Under `WithInstructionBudget`, a share that binds the AGENTS.md part
+  is handed to the second chain as `agentsmd.Options.RenderedBudget`
+  rather than as `Budget` less the first chain's wrapper (#136). The
+  part still comes out at or under the share, and now keeps the longest
+  run of files that renders within it: the old arithmetic charged the
+  wrapper of files the share then left out, so it could leave out one
+  more file than it had to. Under `Truncate` the cut is made against
+  the rendered size.
+
+### Fixed
+
+- A share with no room for the AGENTS.md part reports every file the
+  chain would include as over budget with its whole size, read without
+  `Truncate` (#136). Under `Truncate` it used to report a file the
+  caller's options cut twice, once `truncated` with the bytes cut off
+  and once over budget with the cut part's size, marker included, though
+  nothing of it was sent.
+
 ## v0.0.17 - 2026-11-06
 
 ### Changed

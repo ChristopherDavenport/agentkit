@@ -24,7 +24,7 @@ require (
 	github.com/ChristopherDavenport/agentmemory v0.0.12 // indirect
 	github.com/ChristopherDavenport/agentpolicy v0.0.20 // indirect
 	github.com/ChristopherDavenport/agentskill v0.0.12 // indirect
-	github.com/ChristopherDavenport/agentsmd v0.0.4 // indirect
+	github.com/ChristopherDavenport/agentsmd v0.0.5 // indirect
 	github.com/ChristopherDavenport/agenttool/mcpclient v0.0.30 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect

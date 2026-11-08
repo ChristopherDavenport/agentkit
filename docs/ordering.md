@@ -144,7 +144,9 @@ order the parts are joined in:
    is bounded in practice by what people are willing to write into
    files. `agentsmd.Options.Budget` already degrades it gracefully: the
    first file that would go over, and every file after it, is left out
-   and reported, and no file is ever cut short.
+   and reported, and no file is cut short unless the caller sets
+   `agentsmd.Options.Truncate`, under which that first file is cut at a
+   line instead and the files after it are left out.
 3. **`memory` gets what `agents.md` did not use.** Memory is the
    layer that has to live within what is left, because it is the only
    one that grows on its own: an agent that remembers things
@@ -165,12 +167,18 @@ Three details of the mechanism, all of which the tests pin:
 - A layer's own bound and the kit's share both apply, and the smaller
   binds. The kit renders once with the caller's options, and only
   re-renders under its share if that first render was over it.
-- `agentsmd.Options.Budget` counts the bytes of the files, and the part
-  is those bytes plus the wrapper `agentsmd.Render` puts around each
-  one. So the share handed to a second chain is the share less the
-  wrapper the first chain's files cost. One pass is enough: a smaller
-  budget can only select a prefix of the same files, so the wrapper can
-  only shrink.
+- The share is handed to a second chain as
+  `agentsmd.Options.RenderedBudget`, which counts `agentsmd.Render`'s
+  output, wrapper and paths included, so the part comes out at or under
+  the share with no arithmetic of the kit's. The caller's own `Budget`
+  stays set beside it. Under `agentsmd.Options.Truncate` the first file
+  over the share is cut at a line, with agentsmd's marker, and reported
+  `truncated` with the bytes cut off as its size.
+- A share with no room at all leaves the part out, and every file the
+  chain would include is reported over budget with its whole size: the
+  chain is read without `Truncate` then, since nothing of a file is
+  sent, so a file the caller's options would have cut is reported once,
+  whole.
 - A share too small for a layer's own floor buys nothing. The memory
   block always writes a header and one heading per scope, so a share
   under that cannot be met; rather than send a block the budget said
