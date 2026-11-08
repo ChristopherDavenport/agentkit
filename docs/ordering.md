@@ -18,6 +18,10 @@ None of them is a default chosen because it was convenient.
 | 4 | `memory` | `agentmemory` | what the agent knows, before what the repo says |
 | 5 | `agentsmd` | `agentsmd` | the repository has the last word |
 
+Under `WithToolSearch` a sixth, `tool_search`, the listing of the tools
+held back, goes right after `mcp`, whatever order the product gave
+unless it names `tool_search` itself.
+
 A product's own parts, `WithPart`, follow the kit's in the order they
 were added, unless `WithOrder` places them.
 
@@ -35,7 +39,27 @@ product prompt or ends on it, so the parts after them have the last
 word over them and a third party's text never follows the product's
 last word. A server's instructions are given only while the conversation is
 offered one of its tools, after the filter, the wrapper, the duplicate
-check and the policy's offer.
+check and the policy's offer. A tool `WithToolSearch` holds back is
+offered once the conversation has loaded it, so a held server's
+instructions join at the request that first carries one of its tools,
+the same request whose tool list grew, and stay. They join at their
+server's place in `mcp` and not at the end of the instructions, since a
+third party's text after the repository's would take the last word;
+the instructions from `mcp` on change once per server that way, at a
+request whose tools changed already.
+
+**`tool_search` follows `mcp`.** It is a catalogue too, of tools by
+name and summary, and it moves only when the held tools do, never when
+one is loaded, so it sits early, in the prefix a provider caches, ahead
+of the memory block, which moves whenever memory is written. Its
+summaries are each tool's own first sentence, collapsed to one line
+with no control character and cut to `ToolSummaryRunes`; the kit writes
+the heading and the paragraph around them. The names and summaries are
+the tools' providers' text, so, like an MCP server's instructions, they
+are fenced under a line saying who wrote them, and the part reads what
+those servers' instructions read, untrusted unless
+`WithTrustedMCPInstructions` names the server. It is charged to the
+budget as a `WithPart` part is, whole.
 
 ## The argument
 

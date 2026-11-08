@@ -224,6 +224,13 @@ type Kit struct {
 	mcpTrusted map[string]bool
 	toolFilter func(string, agenttool.Tool) bool
 	toolWrap   func(string, agenttool.Tool) agenttool.Tool
+	// search is WithToolSearch's state, nil without it; deferTool is
+	// its function, and earlyTools the product's tools, which the
+	// listing New renders before the tool set exists is drawn from with
+	// the servers'.
+	search     *ToolSearch
+	deferTool  func(string, []agenttool.Tool) bool
+	earlyTools []agenttool.Tool
 	// firstOmitted is the memory omissions of New's render, which go
 	// with first.
 	firstOmitted []Omission
@@ -433,6 +440,9 @@ func New(ctx context.Context, opts ...Option) (*Kit, error) {
 	if err := k.build(ctx, &s); err != nil {
 		return fail(err)
 	}
+	if err := k.settleHeld(ctx, &s); err != nil {
+		return fail(err)
+	}
 	if sess := k.sess.Load(); k.grants != nil && sess != nil {
 		k.grants.gmu.Lock()
 		var opts []session.ReadOption
@@ -565,6 +575,14 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 	if err := checkPartIDs(s.parts); err != nil {
 		return err
 	}
+	k.mcpParts, k.mcpTrusted, k.toolFilter, k.toolWrap = !s.mcpNoInstructions, s.mcpTrusted, s.toolFilter, s.toolWrap
+	if s.toolSearch != nil {
+		// The listing is a part the kit renders for each request as it
+		// renders a WithPart part, from the tools it holds back then.
+		k.deferTool, k.earlyTools = s.toolSearch, s.tools
+		k.search = NewToolSearch(k.heldTools, k.GrantScope, ToolSearchSeed(k.toolsInForce), ToolSearchTrust(k.listingTrust))
+		s.parts = append(s.parts, productPart{id: PartToolSearch, source: SourceToolSearch, render: k.search.Part})
+	}
 	var partOm []Omission
 	for _, pp := range s.parts {
 		g, om, err := renderPart(ctx, pp)
@@ -576,13 +594,14 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 		configured[pp.id] = true
 	}
 	k.partOmitted, k.firstPartOmitted = partOm, partOm
-	k.mcpParts, k.mcpTrusted, k.toolFilter, k.toolWrap = !s.mcpNoInstructions, s.mcpTrusted, s.toolFilter, s.toolWrap
 
 	order := s.order
 	if order == nil {
 		order = slices.Clone(DefaultOrder)
 		for _, pp := range s.parts {
-			order = append(order, pp.id)
+			if pp.id != PartToolSearch {
+				order = append(order, pp.id)
+			}
 		}
 	}
 	if !slices.Contains(order, PartMCP) {
@@ -597,6 +616,12 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 			at = 0
 		}
 		order = slices.Insert(slices.Clone(order), at, PartMCP)
+	}
+	if k.search != nil && !slices.Contains(order, PartToolSearch) {
+		// The listing right after the servers' instructions, the other
+		// text about what the agent can reach, whatever order the
+		// product gave.
+		order = slices.Insert(slices.Clone(order), slices.Index(order, PartMCP)+1, PartToolSearch)
 	}
 	if s.memStore != nil {
 		configured[PartMemory] = true
@@ -1059,6 +1084,23 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 	k.remember(ctx, tools)
 
 	union := ts.provider()
+	if k.search != nil {
+		for _, o := range origins {
+			if o.Name == ToolSearchTool {
+				return Conflict{Name: ToolSearchTool, Kept: o.Source, Dropped: "WithToolSearch"}
+			}
+		}
+		// The tools not held in the union's order, then tool_search and
+		// the conversation's loaded tools after them.
+		union = func(ctx context.Context) []agenttool.Tool {
+			tools, origins, conflicts := ts.resolve(ctx)
+			if len(conflicts) > 0 && ts.onConflict != nil {
+				ts.report(conflicts)
+			}
+			offered, held := k.splitHeld(tools, origins)
+			return k.search.Offer(ctx, offered, held)
+		}
+	}
 	provider := func(ctx context.Context) []agenttool.Tool {
 		tools := union(ctx)
 		k.remember(ctx, tools)
@@ -2695,7 +2737,9 @@ func mcpShare(budget int64, base []Part) int64 {
 // WithToolWrap, the duplicate check once the tool set is built, and the
 // engine's offer filter under the conversation's grant scope, the pass
 // Kit.Tools and the ToolProvider make, resource tools included under
-// WithMCPResourceTools.
+// WithMCPResourceTools. Under WithToolSearch a held tool counts once the
+// conversation has loaded it, since until then the model has its name
+// and summary and not the tool.
 func (k *Kit) offeredServers(ctx context.Context, servers []mcpServer) map[string]bool {
 	var (
 		tools   []agenttool.Tool
@@ -2724,6 +2768,9 @@ func (k *Kit) offeredServers(ctx context.Context, servers []mcpServer) map[strin
 				origins = append(origins, ToolOrigin{Name: t.Name(), Source: sv.label})
 			}
 		}
+	}
+	if k.search != nil {
+		tools, origins = k.withoutUnloaded(ctx, tools, origins)
 	}
 	kept := map[string]bool{}
 	if k.engine != nil {
@@ -3018,6 +3065,41 @@ func (k *Kit) LookupTool(name string) (agenttool.Tool, bool) {
 	return t, ok
 }
 
+// markHeld sets Deferred on each origin [WithToolSearch] holds back,
+// and lists tool_search after the rest when any is held.
+func (k *Kit) markHeld(out []ToolOrigin) []ToolOrigin {
+	if k.search == nil {
+		return out
+	}
+	byName := map[string]agenttool.Tool{}
+	if k.tools != nil {
+		tools, _, _ := k.tools.resolve(context.Background())
+		for _, t := range tools {
+			byName[t.Name()] = t
+		}
+	}
+	bySource := map[string][]agenttool.Tool{}
+	for _, o := range out {
+		if t, ok := byName[o.Name]; ok {
+			bySource[o.Source] = append(bySource[o.Source], t)
+		}
+	}
+	decided := map[string]bool{}
+	for src, tools := range bySource {
+		decided[src] = k.deferTool(src, tools)
+	}
+	held := false
+	for i, o := range out {
+		if _, ok := byName[o.Name]; ok && decided[o.Source] {
+			out[i].Deferred, held = true, true
+		}
+	}
+	if held {
+		out = append(out, ToolOrigin{Name: ToolSearchTool, Source: "WithToolSearch"})
+	}
+	return out
+}
+
 // Tools lists the tools the kit offers, after [WithToolFilter],
 // [WithToolWrap] and the policy's offer filter, each with the source it
 // came from. It is how a product names the tools a library
@@ -3038,7 +3120,9 @@ func (k *Kit) LookupTool(name string) (agenttool.Tool, bool) {
 // its list now, as the model is offered it each turn, through the same
 // filter and duplicate check, so a tool a server adds or a restart
 // brings is here and one it removed is not; after [Kit.Close] they are
-// gone. A provider's list is fetched each turn too and is listed as it
+// gone. Under [WithToolSearch] a tool held back is listed with
+// Deferred set, since the model may load it, and tool_search, from the
+// source "WithToolSearch", after the rest while any is held. A provider's list is fetched each turn too and is listed as it
 // was at New, so a tool a [WithToolProvider] adds later is not here.
 // The filter, the product's wrapper and the kit's own run on every
 // listing, under context.Background, so a wrapper with side effects has
@@ -3068,6 +3152,7 @@ func (k *Kit) Tools() []ToolOrigin {
 			out = append(out, o)
 		}
 	}
+	out = k.markHeld(out)
 	if k.engine == nil {
 		return out
 	}

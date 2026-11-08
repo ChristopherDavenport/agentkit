@@ -3,6 +3,65 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- `WithToolSearch(deferred)` holds back the tools of each source
+  `deferred(label, tools)` returns true for, an MCP server's whole list
+  or none of it, so their definitions are not sent until the model asks
+  for them (#130). A held tool is listed by name and the first sentence of
+  its description (`ToolSummary`) in the part `tool_search`
+  (`PartToolSearch`, source `agentkit`), placed right after the MCP
+  servers' instructions unless `WithOrder` places it, and the
+  conversation is offered `tool_search` (`ToolSearchTool`), which loads
+  tools by exact name (`"select:a,b"`) or by keywords over names and
+  descriptions. A loaded tool is offered from the next request on,
+  appended after every tool not held, `tool_search` and the tools loaded
+  before it, and stays for the rest of the conversation, so each
+  request's tools are the last one's with the loaded appended and the
+  cached prefix holds; the recorder writes the change as the config
+  entry's `tools_added`. The loaded set is per conversation, by
+  `Kit.GrantScope`, so a child agent starts with none loaded, and a
+  conversation the kit has not seen starts with the tools its session
+  has in force at the leaf (`ToolsInForce`), so a resumed one offers
+  what its last request did. Nothing is sent when nothing is held. The
+  policy is unchanged: a held tool is decided when it is called, a bare
+  deny takes it off the listing, and the kit does not allow
+  `tool_search` itself. `DeferMCPTools` holds back every MCP server's
+  tools. `Kit.ToolSearch()` returns the state (`ToolSearch.Loaded`,
+  `Load`), `Kit.Tools()` sets the new `ToolOrigin.Deferred` on a held
+  tool and lists `tool_search` from the source `WithToolSearch`, and
+  `NewToolSearch`, `ToolSearch.Offer`, `ToolSearch.Part` and
+  `ToolSearchListing` are the manual path (docs/manual.md). A
+  `WithPart` id of `tool_search` is refused. The listing is the held
+  tools' own text, so it is labelled and fenced as the MCP servers'
+  instructions are: the part reads each held server's
+  `InstructionsReads` (untrusted) unless `WithTrustedMCPInstructions`
+  names it, and the names and summaries sit under a line saying who
+  wrote them, inside a code fence longer than any backtick run they
+  hold, each collapsed to its own line with no control character.
+  `ToolSearchTrust` sets the trust by hand; without it the part reads
+  untrusted.
+- `ToolSearchLoads(path)`: the tools the `tool_search` calls on a path
+  loaded, read from their outputs. The kit's seed for a conversation it
+  has not seen is `ToolsInForce` and then these, so a load is kept from
+  the moment the call returns: a conversation that stopped after a
+  `tool_search` output and before the next request resumes with the
+  tool loaded, where the config entry's `tools_added` would only have
+  come with that request (#132).
+- A held MCP server's instructions are sent from the request that first
+  carries one of its tools, the one whose tool list grew, at the
+  server's place in the `mcp` part, and stay; before that the server's
+  tools are listed, not offered, and its instructions are not sent
+  (#133).
+- `Kit.Config()`'s instructions are the first request's under
+  `WithToolSearch`: the listing and the servers' instructions are
+  rendered again once the tool set and the session exist, so a held
+  tool of a provider, a `WithDeferredTools` source or a library is
+  listed, and a resumed conversation's loaded servers' instructions are
+  in (#134).
+
 ## v0.0.17 - 2026-11-06
 
 ### Changed
