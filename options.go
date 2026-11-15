@@ -78,6 +78,7 @@ type settings struct {
 	skillGrantScope  bool
 	skillSource      func(*agentskill.Skill) agentpolicy.Source
 	skillGrant       func(SkillGrant)
+	skillFilter      func(context.Context, agentskill.Skill) bool
 
 	memStore   agentmemory.Store
 	memScopes  []agentmemory.Scope
@@ -402,6 +403,33 @@ func WithoutSkillTool() Option {
 	return func(s *settings) { s.skillToolWithout = true }
 }
 
+// WithSkillFilter leaves out of a request's skill catalogue, and out of
+// what the skill tool serves in that run, each skill keep returns false
+// for on the run's context: one conversation's catalogue can leave out
+// skills another's lists, such as a person's own learned skills from a
+// caller the product trusts less than its person. keep sees each skill
+// the catalogue holds, a copy, and decides on the context of the
+// request or the call, so the product decides who is a caller.
+//
+// The catalogue part is rendered again from the kit's catalogue for
+// every request, a child's included, [agentskill.Catalog.Prompt] of the
+// skills keep leaves, and the usage paragraph when the tool is offered,
+// or nothing at all when keep leaves no skill; the skill tool runs each
+// call, and answers its facts claim, on that
+// catalogue's tool, so a name it left out is refused as unknown, the
+// refusal listing only the names left, and claims the call alone, never
+// the left-out skill's file. The memory block's share under
+// [WithInstructionBudget] is what the filtered catalogue leaves.
+// Instructions a product rewrote, such as a conversation's built from
+// [Kit.Parts], keep the rewrite, with each catalogue in them replaced by
+// the filtered one. [Kit.Config]'s instructions, which no run's context
+// has made, and [Kit.Catalog] hold the whole catalogue, and
+// [Kit.Omitted] does not list a skill keep left out. It has no effect
+// without skills. The last call holds.
+func WithSkillFilter(keep func(ctx context.Context, s agentskill.Skill) bool) Option {
+	return func(s *settings) { s.skillFilter = keep }
+}
+
 // WithSkillGrants grants a skill's allowed-tools to the policy engine
 // each time the model reads that skill. source builds the
 // [agentpolicy.Source] the grant is attributed to; nil means a source
@@ -609,8 +637,9 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 // call no answer could let through. One decided before the drop is
 // refused when it runs, which may be in a Resume: the render kept for
 // the call says the block was dropped, and after a restart the manifest
-// recorded at the call does ([agentmemory.Manifest.Dropped]). memory_search stays
-// offered, and [Kit.Omitted] lists every entry the drop left out. The
+// recorded at the call does ([agentmemory.Manifest.Dropped]). memory_search
+// stays offered, and memory_read is, to read an entry by name, and
+// [Kit.Omitted] lists every entry the drop left out. The
 // block, and the writes, come back on the first render that fits.
 //
 // The block is recorded as one part per piece
@@ -618,19 +647,29 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 // each entry and the summary line, so a write to one entry is recorded
 // as that entry's part and the summary rather than the whole block.
 //
-// memory_save is given [agentmemory.WithRendered] with the render its
-// own run's model was shown, ahead of [WithMemoryTools]: a save is based
-// on the entry the block showed the model, so a write another session
-// made after the render is reported by [agentmemory.LostUpdates] and the
-// model is told, rather than silently discarded. The render is looked up
-// by [agentturn.RunIDFromContext], so concurrent runs off one kit each
-// save over their own. A call held for approval keeps its run's render,
+// The memory tools are one tool set, built with [agentmemory.WithRendered]
+// ahead of [WithMemoryTools], and each write, memory_save, memory_patch,
+// memory_forget and memory_insert, is run against the render its own
+// run's model was shown: a save is based on the entry the block showed
+// the model, so a write another session made after the render is
+// reported by [agentmemory.LostUpdates] and the model is told, rather
+// than silently discarded, and a forget removes an entry only while it
+// holds what that render showed. The render is looked up by
+// [agentturn.RunIDFromContext], so concurrent runs off one kit each
+// write over their own. A call held for approval keeps its run's render,
 // kept by a BeforeToolCall hook of the kit's ahead of whatever holds it,
 // for the Resume that runs it; after a restart, or once the kit has
 // dropped the run, a call is based on the manifest in force on its
-// session's path where the model made it. A call in a run for which the
-// kit has none of these is refused, and the model told to look at the
-// entry again, rather than based on another run's render. A
+// session's path where the model made it. A save or a forget in a run
+// for which the kit has none of these is refused, and the model told to
+// read the entry again, rather than based on another run's render; a
+// patch or an insert, which do not rest on the render, runs on none. Because the tool set is one, agentmemory's record of a session's
+// own writes ([agentmemory.SessionFrom], which [Control.RunContext] and
+// a child's run context set) holds across a run's calls, so a save then
+// a forget of one entry in a batch is not refused as another's change.
+// The writes take turns across the kit until agentmemory has read the
+// calling write's render, since [agentmemory.WithRendered] takes no
+// context; the store writes run side by side. A
 // [WithMemoryTools] option of the same kind replaces the kit's.
 //
 // With a session, each render that differs from the manifest in force
@@ -719,17 +758,43 @@ func (s *settings) readScopes() []agentmemory.Scope {
 	return out
 }
 
+// memToolOptions is the options the memory tools are built with and
+// [agentmemory.Usage] is given, after the kit's [agentmemory.WithRendered]:
+// the read scopes, the scopes the render shows as an index
+// ([agentmemory.WithIndexScopesOf] of [WithMemoryRender]'s options),
+// and then the product's [WithMemoryTools].
+func (s *settings) memToolOptions() []agentmemory.ToolOption {
+	var opts []agentmemory.ToolOption
+	if read := s.readScopes(); len(read) > 0 {
+		opts = append(opts, agentmemory.WithReadScopes(read...))
+	}
+	opts = append(opts, agentmemory.WithIndexScopesOf(s.memRender...))
+	return append(opts, s.memTools...)
+}
+
 // WithMemoryRender passes options to [agentmemory.RenderParts], both
-// for the first render and for the per-turn one.
+// for the first render and for the per-turn one. A scope
+// [agentmemory.WithScopeIndex] renders as an index is passed to the
+// memory tools and the usage paragraph as well,
+// [agentmemory.WithIndexScopesOf], and must be one of [WithMemory]'s or
+// [WithMemoryReadScopes]' scopes; [New] fails otherwise. Its entries are
+// in the block as their index entry parts, so [Kit.Omitted] does not
+// list them, and one left out over the budget is sized by its index
+// entry part, [agentmemory.EntryPartFor].
 func WithMemoryRender(opts ...agentmemory.RenderOption) Option {
 	return func(s *settings) { s.memRender = append(s.memRender, opts...) }
 }
 
-// WithMemoryTools passes options to [agentmemory.Tools], after the
-// kit's own [agentmemory.WithRendered] and, under
-// [WithMemoryReadScopes], [agentmemory.WithReadScopes]. A read scope
-// given here that [WithMemory] also names is an error from [New]; name
-// it in [WithMemoryReadScopes] instead.
+// WithMemoryTools passes options to [agentmemory.Tools], and to
+// [agentmemory.Usage], after the kit's own: [agentmemory.WithRendered],
+// under [WithMemoryReadScopes] [agentmemory.WithReadScopes], and
+// [agentmemory.WithIndexScopesOf] of [WithMemoryRender]'s options, so
+// memory_read is offered in every request when a scope renders as an
+// index. Without one it is offered only in a request whose block the
+// budget dropped, beside memory_search; [agentmemory.WithRead] given
+// here offers it in every request, and the usage paragraph names it. A
+// read scope given here that [WithMemory] also names is an error from
+// [New]; name it in [WithMemoryReadScopes] instead.
 func WithMemoryTools(opts ...agentmemory.ToolOption) Option {
 	return func(s *settings) { s.memTools = append(s.memTools, opts...) }
 }

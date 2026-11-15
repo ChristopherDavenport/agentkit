@@ -8,23 +8,23 @@ go 1.26.0
 require (
 	github.com/ChristopherDavenport/agentkit v0.0.0
 	github.com/ChristopherDavenport/agenttool v0.0.30
-	github.com/ChristopherDavenport/agentturn v0.0.38
-	github.com/ChristopherDavenport/agentturn/front/a2a v0.0.38
-	github.com/ChristopherDavenport/agentturn/tools/a2a v0.0.38
+	github.com/ChristopherDavenport/agentturn v0.0.40
+	github.com/ChristopherDavenport/agentturn/front/a2a v0.0.40
+	github.com/ChristopherDavenport/agentturn/tools/a2a v0.0.40
 	github.com/a2aproject/a2a-go v0.3.15
 )
 
 require (
-	github.com/ChristopherDavenport/agentsession v0.0.38
-	github.com/ChristopherDavenport/agentturn/session v0.0.38
-	github.com/ChristopherDavenport/openresponses v0.0.19
+	github.com/ChristopherDavenport/agentsession v0.0.39
+	github.com/ChristopherDavenport/agentturn/session v0.0.40
+	github.com/ChristopherDavenport/openresponses v0.0.20
 )
 
 require (
-	github.com/ChristopherDavenport/agentmemory v0.0.12 // indirect
+	github.com/ChristopherDavenport/agentmemory v0.0.13 // indirect
 	github.com/ChristopherDavenport/agentpolicy v0.0.20 // indirect
 	github.com/ChristopherDavenport/agentskill v0.0.12 // indirect
-	github.com/ChristopherDavenport/agentsmd v0.0.5 // indirect
+	github.com/ChristopherDavenport/agentsmd v0.0.6 // indirect
 	github.com/ChristopherDavenport/agenttool/mcpclient v0.0.30 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect

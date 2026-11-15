@@ -254,6 +254,8 @@ func (k *Kit) childInstructions(c *childComposition) func(context.Context, *open
 		req.Instructions = agentsession.JoinInstructions(parts)
 		if r.dropped {
 			req.Tools = withoutMemoryWrites(req.Tools)
+		} else if k.readOnDrop {
+			req.Tools = withoutMemoryRead(req.Tools)
 		}
 		return nil
 	}

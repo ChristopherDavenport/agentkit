@@ -3,6 +3,86 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- `Omission.Kept`: for an AGENTS.md file cut short under
+  `agentsmd.Options.Truncate`, reason `truncated`, the bytes of the file
+  kept ahead of the marker, agentsmd's `Omitted.Kept`, so `Kit.Omitted`
+  reports them and a product need not parse the marker; `Kept` plus
+  `Size` is the file's size (#140).
+- `WithSkillFilter(keep)`: a per-request filter on the skill catalogue.
+  Each request's catalogue part is rendered again from the kit's
+  catalogue with the skills `keep(ctx, skill)` refuses left out, and
+  left out whole, usage paragraph and all, when none is left, a
+  child's request included, and the skill tool runs each call, and
+  answers its facts claim (`agentskill.WithFileClaim`), on that
+  catalogue's tool, so a name left out is refused as unknown, the refusal
+  naming only the skills left, and claims the call alone, never the
+  hidden skill's file. Instructions a product rewrote keep the rewrite,
+  with each catalogue in them replaced by the filtered one. One
+  conversation's catalogue can leave out skills another's lists, such as a person's learned skills
+  from an A2A caller; the product decides who is a caller from the
+  context. `Kit.Config()`'s instructions and `Kit.Catalog()` hold the
+  whole catalogue (#129).
+
+### Changed
+
+- `WithMemory` offers `memory_read`, agentmemory's read by name, beside
+  `memory_search` in a request whose block the budget dropped. A scope
+  `WithMemoryRender(agentmemory.WithScopeIndex(scope))` renders as an
+  index is passed to the tools and the usage paragraph
+  (`agentmemory.WithIndexScopesOf`), which then offer and name
+  `memory_read` in every request; its entries are parts of the block,
+  so `Kit.Omitted` no longer lists them as omitted with reason `index`,
+  and an entry left out over the budget is sized by the part it would
+  have added under the render's options (`agentmemory.EntryPartFor`), an
+  index entry part in an index scope.
+- The memory tools are one tool set, and every write, not only
+  `memory_save`, runs against the render its own run was shown:
+  `memory_forget` is held to the hash that render showed, where it was
+  held to whichever run rendered last, and a forget in a run whose render
+  the kit no longer has is refused, as such a save is; a patch or an
+  insert there runs on no render rather than on another conversation's. Because the tool
+  set is one, agentmemory's record of a session's own writes sees every
+  write, so a save then a forget of one entry in a batch is no longer
+  refused as another session's change. The writes take turns across the
+  kit only while agentmemory reads each one's render, not across the
+  store write, and a write waiting for its turn gives up when its
+  context ends. The refusals for a save or a forget with no known
+  render tell the model to read the entry with `memory_read` under an
+  index scope, and `memory_search` otherwise.
+
+### Fixed
+
+- Under `WithToolSearch` and `WithInstructionBudget`, `Kit.Config()`'s
+  memory block is the first request's: once the tool set exists, the
+  block is rendered again under the share the other parts leave, as each
+  request renders it, so a listing that grew with a provider's held tool
+  bounds the block, or drops it, in the configuration too, with
+  `Kit.MemoryManifest` and `Kit.Omitted` following (#138).
+
+### Dependencies
+
+- **Breaking**: requires agentturn and agentturn/session v0.0.40, up
+  from v0.0.38, agentsession v0.0.39, up from v0.0.38, agentmemory
+  v0.0.13, up from v0.0.12, agentsmd v0.0.6, up from v0.0.5, and
+  openresponses v0.0.20, up from v0.0.19, in the root and in
+  `examples/a2a` (front/a2a and tools/a2a v0.0.40 there). agenttool,
+  agenttool/mcpclient, agentpolicy and agentskill are at their latest
+  releases already. A response its provider ended `incomplete` now
+  ends the run `ReasonStopped` with agentturn's `StopContentFilter` or
+  `StopMaxOutputTokens`, its details on `RunEnd.Incomplete` and the
+  refusal on `RunEnd.Refusal`, and the recorder writes such a run as
+  `aborted`; `Control` returns that end as the agent gave it, and a
+  `WithChildAgent` child the content filter stopped fails its call with
+  the refusal, where v0.0.38 called it a stop without an answer. A
+  delivery an abort stopped before a run took its items returns
+  agentturn's `ErrAborted` from `Control.Deliver` and `Control.Accept`.
+  agentmemory's `Store.Forget` takes `PutOption`s: a product's own
+  `Store` must add the parameter.
+
 ## v0.0.18 - 2026-11-08
 
 ### Added

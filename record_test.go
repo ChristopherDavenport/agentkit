@@ -1343,11 +1343,11 @@ func TestASaveHeldByAnyHookKeepsItsBase(t *testing.T) {
 	}
 }
 
-// A save in a run whose render the kit no longer has, after a restart
+// A save or a forget in a run whose render the kit no longer has, after a restart
 // with no session to fold it from or once a thousand other runs have
 // rendered, is refused and the model told to look again, rather than
 // based on whichever run rendered last. (#41)
-func TestASaveWhoseBaseIsGoneIsRefused(t *testing.T) {
+func TestAWriteWhoseBaseIsGoneIsRefused(t *testing.T) {
 	store := memStore(t, agentmemory.Entry{Scope: "user", Name: "profile", Content: "Chris."})
 	kit, err := agentkit.New(t.Context(),
 		agentkit.WithModel(&scriptModel{}, "m"),
@@ -1366,10 +1366,22 @@ func TestASaveWhoseBaseIsGoneIsRefused(t *testing.T) {
 	ctx := agentturn.ContextWithRunID(t.Context(), "a-run-that-never-rendered")
 	_, err = save.Execute(ctx, agenttool.Call{ID: "call-1", Args: json.RawMessage(`{"scope":"user","name":"profile","content":"Chris. Lives in Bristol."}`)})
 	if err == nil || !strings.Contains(err.Error(), agentmemory.SearchTool) {
-		t.Fatalf("the save = %v, want a refusal naming %s", err, agentmemory.SearchTool)
+		t.Fatalf("the save = %v, want a refusal naming %s, the reader the request offers", err, agentmemory.SearchTool)
 	}
 	if e, err := store.Get(t.Context(), "user", "profile"); err != nil || e.Content != "Chris." {
 		t.Fatalf("profile = %+v, %v; want it untouched", e, err)
+	}
+	// A forget in that run is refused too: it is held to the block its
+	// run rendered, and the kit no longer knows it.
+	forget, ok := kit.LookupTool(agentmemory.ForgetTool)
+	if !ok {
+		t.Fatal("no memory_forget")
+	}
+	if _, err := forget.Execute(ctx, agenttool.Call{ID: "call-3", Args: json.RawMessage(`{"scope":"user","name":"profile"}`)}); err == nil || !strings.Contains(err.Error(), agentmemory.SearchTool) {
+		t.Fatalf("the forget = %v, want a refusal naming %s", err, agentmemory.SearchTool)
+	}
+	if _, err := store.Get(t.Context(), "user", "profile"); err != nil {
+		t.Fatalf("profile: %v; want it kept", err)
 	}
 	// Outside any run there is nothing to be based on but the last render.
 	if _, err := save.Execute(t.Context(), agenttool.Call{ID: "call-2", Args: json.RawMessage(`{"scope":"user","name":"profile","content":"Chris. Lives in Bristol."}`)}); err != nil {

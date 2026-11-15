@@ -153,7 +153,7 @@ order the parts are joined in:
    accumulates them without anyone deciding to write a file.
    `agentmemory.Render` already skips an entry that does not fit, keeps
    considering the ones after it, and lists what it skipped by name so
-   the model knows `memory_search` can fetch it.
+   the model knows `memory_search` or `memory_read` can fetch it.
 
 So the render order is `agents.md`, then `memory`, and the join order
 is `memory`, then `agents.md`. A caller who wants the opposite
@@ -184,7 +184,7 @@ Three details of the mechanism, all of which the tests pin:
   under that cannot be met; rather than send a block the budget said
   there was no room for, the kit drops the part and reports every entry
   as omitted.
-- The memory group is the block's parts and `agentmemory.Usage()`
+- The memory group is the block's parts and `agentmemory.Usage` (with the tools' options)
   after them, and the paragraph cannot be bounded, so it is paid for
   first: the block is rendered under the share less the paragraph and
   its separator. A share that cannot hold the paragraph drops the group,

@@ -1964,6 +1964,7 @@ func TestAResumedKitBacksOffFromAFoldThatFailed(t *testing.T) {
 // of the request, and a write the model makes anyway is refused: shown
 // no block and no word on the tools, it saved over entries it was never
 // shown. (#53) memory_insert is a writer too, agentmemory.WriteTools.
+// memory_search and memory_read, which read by words and by name, stay.
 func TestADroppedMemoryBlockWithholdsTheWrites(t *testing.T) {
 	const prompt = "be brief"
 	store := memStore(t, agentmemory.Entry{Scope: "user", Name: "go-version", Content: "This project pins Go 1.25. " + strings.Repeat("c", 4000)})
@@ -2002,8 +2003,10 @@ func TestADroppedMemoryBlockWithholdsTheWrites(t *testing.T) {
 			t.Errorf("%s was offered with the block dropped: %v", name, offered)
 		}
 	}
-	if !slices.Contains(offered, agentmemory.SearchTool) {
-		t.Errorf("%s was withheld too: %v", agentmemory.SearchTool, offered)
+	for _, name := range []string{agentmemory.SearchTool, agentmemory.ReadTool} {
+		if !slices.Contains(offered, name) {
+			t.Errorf("%s was withheld too: %v", name, offered)
+		}
 	}
 	got, err := store.Get(t.Context(), "user", "go-version")
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/url"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -43,7 +44,7 @@ import (
 // other: they share the kit's memory state, because they share the hook
 // that renders it. Two runs off one kit each render memory for
 // themselves and each build their own instructions, so neither sees a
-// prompt the other assembled, and each run's memory_save is based on
+// prompt the other assembled, and each run's memory writes are based on
 // that run's own render. What they share is [Kit.Parts] and
 // [Kit.MemoryManifest], which describe the render that happened last,
 // and the record of the manifest, which is written once per distinct
@@ -239,8 +240,20 @@ type Kit struct {
 	// memDropped is true when the last render's block was dropped by the
 	// budget, which withholds the memory writes; see memoryPart.
 	memDropped bool
+	// writing is the memory write whose render writeManifest hands to
+	// agentmemory next, and writeTurn, holding one token, is the turn to
+	// set it: a write takes the token and the read of its render gives
+	// it back; see writeAsRendered.
+	writing   *pendingWrite
+	writeTurn chan struct{}
+	// memReader is the tool the refusals of a write with no known render
+	// name for reading an entry again, and readOnDrop is set when
+	// memory_read is offered only in a request whose block was dropped;
+	// see memoryTools.
+	memReader  string
+	readOnDrop bool
 	// rendered is each run's last render, keyed by the run's ID, which is
-	// what memory_save is based on for a call in that run: the block its
+	// what a memory write is based on for a call in that run: the block its
 	// model composed from, not whichever run rendered last. saveBase is
 	// the render a memory write was composed from, keyed by the call's
 	// ID, kept by the kit's BeforeToolCall hook when the call is decided,
@@ -414,7 +427,7 @@ func New(ctx context.Context, opts ...Option) (*Kit, error) {
 		return nil, errors.New("agentkit: WithSkillGrants and WithoutSkillTool both set; a grant happens when the model reads a skill through the catalogue's tool, so withholding that tool withholds every grant")
 	}
 
-	k := &Kit{memory: s.memStore != nil}
+	k := &Kit{memory: s.memStore != nil, writeTurn: make(chan struct{}, 1)}
 	k.closeCtx, k.cancelClose = context.WithCancel(context.Background())
 	fail := func(err error) (*Kit, error) {
 		return nil, errors.Join(err, k.Close())
@@ -474,6 +487,38 @@ func share(budget, avail int64) int64 {
 	default:
 		return -1
 	}
+}
+
+// filteredSkillTool is the skill tool under [WithSkillFilter]: each call,
+// and the facts claim a policy decides it on, is answered by the tool of
+// the kit's catalogue in force as keep leaves it on the call's context.
+// A skill the request's catalogue did not list is refused as unknown,
+// the refusal naming only the skills keep left, and its claim is the
+// call alone, as agentskill's claim for an unknown name is, so no policy
+// decides on, and no refusal carries, the file of a skill the
+// conversation was not shown. It is a tool of its own rather than
+// [agenttool.Wrap] of whole, since Wrap answers the claim from whole,
+// the catalogue unfiltered. whole gives the name, the description, the
+// schema and whether the tool claims at all ([agentskill.WithFileClaim]);
+// agentskill's tool declares no other property.
+func (k *Kit) filteredSkillTool(whole agenttool.Tool, keep func(context.Context, agentskill.Skill) bool) agenttool.Tool {
+	forCtx := func(ctx context.Context) agenttool.Tool {
+		k.mu.Lock()
+		cat, opts := k.catalog, k.skillToolOpts
+		k.mu.Unlock()
+		return filterCatalogue(ctx, cat, keep).Tool(opts...)
+	}
+	var opts []agenttool.Option
+	if agenttool.IsFactual(whole) {
+		opts = append(opts, agenttool.WithFacts(func(ctx context.Context, args json.RawMessage) (agenttool.Facts, error) {
+			f, _, err := agenttool.FactsOf(ctx, forCtx(ctx), args)
+			return f, err
+		}))
+	}
+	return agenttool.NewFunc(whole.Name(), whole.Description(), whole.Parameters(),
+		func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+			return forCtx(ctx).Execute(ctx, call)
+		}, opts...)
 }
 
 // offersSkillTool reports whether the catalogue's tool is offered: yes
@@ -1012,6 +1057,9 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 			defer k.mu.Unlock()
 			return k.skillTool
 		})
+		if s.skillFilter != nil {
+			tool = k.filteredSkillTool(tool, s.skillFilter)
+		}
 		src := source{name: "WithSkills", tools: []agenttool.Tool{tool}}
 		if s.skillGrants && k.engine != nil {
 			k.grants = &skillGrants{
@@ -1121,9 +1169,17 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 	return nil
 }
 
-// memoryTools builds agentmemory's tools over the writable scopes, with
-// memory_save based on the render its run's model was shown and the
-// read scopes named read-only, ahead of the product's own options.
+// memoryTools builds agentmemory's tools over the writable scopes, one
+// tool set, with [agentmemory.WithRendered] returning the render the
+// calling write's run was shown, [Kit.writeAsRendered], and the kit's
+// other options, [settings.memToolOptions], ahead of the product's.
+// That set offers memory_read when a scope renders as an index, or the
+// product asked for it, and then in every request, as agentmemory RFC
+// 0001 §6.11 requires. Otherwise memory_read comes from a second set
+// built with [agentmemory.WithRead], and is offered only in a request
+// whose block the budget dropped, [withoutMemoryRead], beside
+// memory_search: that request has no usage paragraph and no writer, so
+// nothing in it names a tool it does not offer.
 // agentmemory.Tools panics on scopes it cannot build over, and New is
 // the call documented to fail, so the panic is returned as an error.
 func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
@@ -1136,11 +1192,6 @@ func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
 	if len(writable) == 0 {
 		return nil, errors.New("agentkit: WithMemory has no writable scope; agentmemory's tools need one, so leave at least one scope out of WithMemoryReadScopes")
 	}
-	var rest []agentmemory.ToolOption
-	if read := s.readScopes(); len(read) > 0 {
-		rest = append(rest, agentmemory.WithReadScopes(read...))
-	}
-	rest = append(rest, s.memTools...)
 	defer func() {
 		if r := recover(); r != nil {
 			tools, err = nil, fmt.Errorf("agentkit: building the memory tools: %v", r)
@@ -1149,65 +1200,149 @@ func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
 			}
 		}
 	}()
-	based := func(rendered func() agentmemory.Manifest) []agenttool.Tool {
-		return agentmemory.Tools(s.memStore, writable,
-			append([]agentmemory.ToolOption{agentmemory.WithRendered(rendered)}, rest...)...)
-	}
-	tools = based(k.MemoryManifest)
-	for i, t := range tools {
-		if t.Name() == agentmemory.SaveTool {
-			tools[i] = k.saveAsRendered(t, based)
+	tools = agentmemory.Tools(s.memStore, writable,
+		append([]agentmemory.ToolOption{agentmemory.WithRendered(k.writeManifest)}, s.memToolOptions()...)...)
+	k.memReader = agentmemory.SearchTool
+	if slices.ContainsFunc(tools, func(t agenttool.Tool) bool { return t.Name() == agentmemory.ReadTool }) {
+		k.memReader = agentmemory.ReadTool
+	} else {
+		for _, t := range agentmemory.Tools(s.memStore, writable, append(s.memToolOptions(), agentmemory.WithRead())...) {
+			if t.Name() == agentmemory.ReadTool {
+				tools = append(tools, t)
+				k.readOnDrop = true
+			}
 		}
+	}
+	for i, t := range tools {
 		if memoryWrites[t.Name()] {
-			tools[i] = k.refuseWhenDropped(tools[i])
+			tools[i] = k.writeAsRendered(t)
 		}
 	}
 	return tools, nil
 }
 
-// refuseWhenDropped refuses a memory write composed from a render the
-// budget dropped, or, outside any run, when the last render was dropped.
-// The request did not offer the tool, so only a model that calls it
-// anyway reaches this. The render read is, in the order [saveAsRendered]
-// takes its base: the one kept for the call when it was decided,
-// [Kit.keepSaveBase], which is how a write held for approval and run by
-// a Resume, a run with no render of its own, is refused as it would have
-// been outright; the render of the call's run; and, after a restart or
-// once the bounded maps have dropped the run, the manifest in force at
-// the call on the run's session's path, [Kit.manifestAtCall], refused
-// when it is a dropped render's, [droppedRender]. A manifest the
-// path cannot attribute to the call's run, or whose shape does not say,
-// is let through to the base saveAsRendered finds, or refuses for.
+// pendingWrite is a memory write [Kit.writeAsRendered] has handed its
+// render to [Kit.writeManifest] for, and done once the turn it took is
+// given back.
+type pendingWrite struct {
+	man  agentmemory.Manifest
+	done bool
+}
+
+// writeManifest is the [agentmemory.WithRendered] function of the kit's
+// memory tools: the render of the write [Kit.writeAsRendered] is
+// running, and outside one, the last render. agentmemory reads it once
+// at the start of each write, before the write touches the store, and
+// takes no context, so a write holds the turn to put its render here
+// from before its call until this read, which gives the turn back
+// ([Kit.endWrite]). The store write after it runs beside other writes.
+func (k *Kit) writeManifest() agentmemory.Manifest {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	w := k.writing
+	if w == nil {
+		return k.manifest
+	}
+	k.endWriteLocked(w)
+	return w.man
+}
+
+// endWrite gives back the turn w took, once: at the read of its render,
+// or when its call returns without having read it. The caller of
+// endWriteLocked holds mu.
+func (k *Kit) endWrite(w *pendingWrite) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.endWriteLocked(w)
+}
+
+func (k *Kit) endWriteLocked(w *pendingWrite) {
+	if w.done {
+		return
+	}
+	w.done = true
+	if k.writing == w {
+		k.writing = nil
+	}
+	<-k.writeTurn
+}
+
+// writeAsRendered runs a memory write against the render its call was
+// composed from, on the kit's one tool set, so two runs off one kit each
+// write over the block their model read, and agentmemory's record of a
+// session's own writes, which lives in the tool set, sees every write of
+// the session's. The render another run made in between may already
+// hold a write a third session made after this run's render: a save
+// based on it discards that write with nothing reported, and a forget
+// held to it removes the change. The base is, in order: the render kept
+// for the call when it was decided, [Kit.keepSaveBase], which is how a
+// write held for approval and run by a Resume, a run that has not
+// rendered, keeps its base; the render of the call's run,
+// [agentturn.RunIDFromContext]; and the manifest in force on the path of
+// the run's session where the model made the call, folded from its
+// [agentmemory.ManifestNS] records, which is what is left after a
+// restart or once the bounded maps have dropped the run. A call outside
+// any run is based on [Kit.MemoryManifest].
 //
-// The kept render is consumed here for memory_patch, memory_forget and
-// memory_insert, and for a memory_save refused here, since none of them reaches
-// saveAsRendered, which consumes the one it bases a save on.
-func (k *Kit) refuseWhenDropped(t agenttool.Tool) agenttool.Tool {
-	save := t.Name() == agentmemory.SaveTool
+// A write whose base is a render the budget dropped is refused,
+// [errMemoryDropped]: the request did not offer the tool, so only a
+// model that calls it anyway, or a call decided before the drop, reaches
+// this. A save or a forget in a run that finds no base is refused, with
+// a result telling the model to read the entry again, rather than based
+// on whichever run rendered last; a patch, anchored in the stored text,
+// and an insert, which writes a name nobody holds, run on no render, the
+// empty manifest, rather than on another conversation's.
+//
+// agentmemory reads the manifest through [Kit.writeManifest], which
+// takes no context, so the writes take turns from before each call until
+// agentmemory has read its render, the first thing a write does, and not
+// across the store write: a slow store holds up no other conversation's
+// write. A write waiting for its turn gives up when its context ends.
+// One tool set per session would avoid the turn, but a session's runs
+// can still write concurrently, and the session-less calls a product
+// makes would share one; the turn is a field read wide.
+func (k *Kit) writeAsRendered(t agenttool.Tool) agenttool.Tool {
+	name := t.Name()
 	return agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
 		run := agentturn.RunIDFromContext(ctx)
 		key := saveKey(ctx, call.ID)
 		k.mu.Lock()
-		r, kept := k.saveBase.get(key)
-		known := kept
-		if !known && run != "" {
-			r, known = k.rendered.get(run)
-		}
-		dropped := known && r.dropped
-		if run == "" {
-			dropped, known = k.memDropped, true
-		}
-		if kept && (!save || dropped) {
+		r, ok := k.saveBase.get(key)
+		if ok {
 			k.saveBase.delete(key)
+		} else if run != "" {
+			r, ok = k.rendered.get(run)
+		} else {
+			r, ok = memoryRender{man: k.manifest, dropped: k.memDropped}, true
 		}
 		k.mu.Unlock()
-		if !known {
-			man, ok := k.manifestAtCall(ctx, call.ID)
-			dropped = ok && droppedRender(man)
+		if !ok {
+			if man, found := k.manifestAtCall(ctx, call.ID); found {
+				r, ok = memoryRender{man: man, dropped: droppedRender(man)}, true
+			}
 		}
-		if dropped {
+		switch {
+		case ok && r.dropped:
 			return agenttool.Result{}, errMemoryDropped
+		case !ok && name == agentmemory.SaveTool:
+			return agenttool.Result{}, errSaveBase(k.memReader)
+		case !ok && name == agentmemory.ForgetTool:
+			return agenttool.Result{}, errForgetBase(k.memReader)
+		case !ok:
+			// No render: not another conversation's, whose drop would
+			// refuse this write and whose hashes are not this model's.
+			r.man = agentmemory.Manifest{}
 		}
+		select {
+		case k.writeTurn <- struct{}{}:
+		case <-ctx.Done():
+			return agenttool.Result{}, context.Cause(ctx)
+		}
+		w := &pendingWrite{man: r.man}
+		k.mu.Lock()
+		k.writing = w
+		k.mu.Unlock()
+		defer k.endWrite(w)
 		return t.Execute(ctx, call)
 	})
 }
@@ -1225,60 +1360,20 @@ func droppedRender(m agentmemory.Manifest) bool {
 	return m.Dropped()
 }
 
-// saveAsRendered runs a memory_save call against a memory_save based on
-// the render the call was composed from, so two runs off one kit each
-// save over the block their model read. The render another run made in
-// between may already hold a write a third session made after this
-// run's render, and a save based on it discards that write with nothing
-// reported. The base is, in order: the render kept for the call when it
-// was decided, [Kit.keepSaveBase], which is how a save held for approval
-// and run by a Resume, a run that has not rendered, keeps its base; the
-// render of the call's run, [agentturn.RunIDFromContext]; and the
-// manifest in force on the path of the run's session where the model
-// made the call, folded from its [agentmemory.ManifestNS] records, which
-// is what is left after a restart or once the bounded maps have dropped
-// the run. A call in a run that finds none of them is refused, with a
-// result telling the model to look again, rather than based on whichever
-// run rendered last; a call outside any run is based on [Kit.MemoryManifest].
-// agentmemory.WithRendered takes no context, so the tool is built per
-// call over the render; building one is a few allocations and touches
-// no store.
-func (k *Kit) saveAsRendered(t agenttool.Tool, based func(func() agentmemory.Manifest) []agenttool.Tool) agenttool.Tool {
-	return agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
-		run := agentturn.RunIDFromContext(ctx)
-		k.mu.Lock()
-		key := saveKey(ctx, call.ID)
-		r, ok := k.saveBase.get(key)
-		if ok {
-			k.saveBase.delete(key)
-		} else {
-			r, ok = k.rendered.get(run)
-		}
-		man := r.man
-		k.mu.Unlock()
-		if !ok {
-			man, ok = k.manifestAtCall(ctx, call.ID)
-		}
-		if !ok {
-			if run != "" {
-				return agenttool.Result{}, errSaveBase
-			}
-			return t.Execute(ctx, call)
-		}
-		for _, own := range based(func() agentmemory.Manifest { return man }) {
-			if own.Name() == agentmemory.SaveTool {
-				return own.Execute(ctx, call)
-			}
-		}
-		return t.Execute(ctx, call)
-	})
+// errSaveBase and errForgetBase are what a memory_save or a
+// memory_forget gets when the kit no longer knows the block its call was
+// composed from. Saving over another render could discard a write the
+// model never saw with nothing reported, and forgetting under one could
+// remove it, so the model is told to read the entry again with reader:
+// memory_read when the request offers it, under an index scope, and
+// memory_search otherwise, as agentmemory's own messages name them.
+func errSaveBase(reader string) error {
+	return errors.New("the memory block this save was composed from is no longer known, so the save could overwrite a change you have not seen; read the entry with " + reader + " and save again")
 }
 
-// errSaveBase is what a memory_save gets when the kit no longer knows
-// the block its call was composed from. Saving over another render could
-// discard a write the model never saw with nothing reported, so the
-// model is told to look at the entry again.
-var errSaveBase = errors.New("the memory block this save was composed from is no longer known, so the save could overwrite a change you have not seen; search for the entry with " + agentmemory.SearchTool + " and save again")
+func errForgetBase(reader string) error {
+	return errors.New("the memory block this forget was composed from is no longer known, so the forget could remove a change you have not seen; read the entry with " + reader + ", and forget it again if it should still go")
+}
 
 // manifestAtCall is the manifest the model was shown when it made the
 // memory_save call callID, folded from the manifest records on the path
@@ -1430,7 +1525,7 @@ func (k *Kit) buildHooks(s *settings) {
 	// part guarded, then the guards over the whole request, then the
 	// product's own.
 	var before []func(context.Context, *openresponses.Request) error
-	if s.memStore != nil || len(s.parts) > 0 || (k.mcpParts && k.tools != nil) || (len(s.guards) > 0 && len(k.base) > 0) {
+	if s.memStore != nil || len(s.parts) > 0 || (k.mcpParts && k.tools != nil) || (len(s.guards) > 0 && len(k.base) > 0) || (s.skillFilter != nil && k.catalog != nil) {
 		before = append(before, k.instructions(s, guards))
 	}
 	if len(s.guards) > 0 {
@@ -1588,6 +1683,37 @@ func (k *Kit) onFold(s *settings) func(context.Context, compact.Fold) error {
 	}
 }
 
+// catalogueBlock is a catalogue as [agentskill.Catalog.Prompt] renders
+// it. The names and descriptions inside are HTML-escaped, so the closing
+// tag is the block's own. catalogueWhole is the block as a part, with
+// the separator before it and the usage paragraph after it when they
+// are there, which an empty catalogue takes out with it.
+var (
+	catalogueBlock = regexp.MustCompile(`(?s)<available_skills>\n.*?</available_skills>`)
+	catalogueWhole = regexp.MustCompile(`(?s)(?:` + regexp.QuoteMeta(Separator) + `)?<available_skills>\n.*?</available_skills>(?:` +
+		regexp.QuoteMeta(Separator+(&agentskill.Catalog{}).Usage()) + `)?`)
+)
+
+// filterRewritten is text, instructions a product rewrote, with each
+// skill catalogue in it replaced by the kit's catalogue as
+// [WithSkillFilter] leaves it on ctx: a product that built a
+// conversation's instructions from [Kit.Parts], which hold whichever
+// catalogue the last request carried, sends the one this conversation
+// may see.
+func (k *Kit) filterRewritten(ctx context.Context, s *settings, text string) string {
+	k.mu.Lock()
+	cat := k.catalog
+	k.mu.Unlock()
+	if cat == nil {
+		return text
+	}
+	filtered := filterCatalogue(ctx, cat, s.skillFilter)
+	if len(filtered.Listed()) == 0 {
+		return catalogueWhole.ReplaceAllLiteralString(text, "")
+	}
+	return catalogueBlock.ReplaceAllLiteralString(text, filtered.Prompt())
+}
+
 // chain1 returns nil for no hooks, the one hook for one, and the
 // package's own chain for more, so a config field a product did not
 // contest stays nil and the loop's own default applies.
@@ -1623,8 +1749,12 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 		// request whose instructions are neither a configuration's the kit
 		// returned nor the layers' join is one a product rewrote, through
 		// Agent.SetConfig or a hook of its own, and the guards see it
-		// whole, after this, as they would without the kit.
+		// whole, after this, as they would without the kit. Under
+		// WithSkillFilter the catalogue in it is still filtered.
 		if s.memStore == nil && !ours && req.Instructions != agentsession.JoinInstructions(base) {
+			if s.skillFilter != nil {
+				req.Instructions = k.filterRewritten(ctx, s, req.Instructions)
+			}
 			return nil
 		}
 
@@ -1654,6 +1784,8 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 			// No block and no word on the tools, so no tool that writes
 			// over what the block would have shown.
 			req.Tools = withoutMemoryWrites(req.Tools)
+		} else if k.readOnDrop {
+			req.Tools = withoutMemoryRead(req.Tools)
 		}
 		return nil
 	}
@@ -1692,6 +1824,27 @@ func (k *Kit) render(ctx context.Context, s *settings, guards guard.Chain, base,
 		return append(slices.Clone(own), selectGroups(base, want)...)
 	}
 	var r rendered
+	// The catalogue as WithSkillFilter leaves it for this request's
+	// context, first, so the memory block is bounded by what it leaves.
+	// base keeps the whole catalogue, which the next request filters
+	// again on its own context.
+	var whole []Part
+	if s.skillFilter != nil && takes(PartSkills) {
+		k.mu.Lock()
+		cat := k.catalog
+		k.mu.Unlock()
+		if cat != nil {
+			whole = selectGroups(base, map[string]bool{PartSkills: true})
+			// A catalogue the filter left empty is no part: no empty
+			// block, and no usage paragraph for a tool with nothing to
+			// serve.
+			var g []Part
+			if filtered := filterCatalogue(ctx, cat, s.skillFilter); len(filtered.Listed()) > 0 {
+				g = single(Part{ID: PartSkills, Text: catalogueText(filtered, offersSkillTool(s)), Source: SourceSkills})
+			}
+			base = withGroup(base, PartSkills, g, k.order)
+		}
+	}
 	// The product's parts first, so the memory block is bounded by
 	// what they leave of the budget this request.
 	for _, pp := range s.parts {
@@ -1731,6 +1884,9 @@ func (k *Kit) render(ctx context.Context, s *settings, guards guard.Chain, base,
 		}
 	}
 	r.base, r.sent = base, carried()
+	if whole != nil {
+		r.base = withGroup(base, PartSkills, whole, k.order)
+	}
 	if len(guards.Guards) > 0 {
 		var err error
 		if r.sent, err = guardParts(ctx, guards, r.sent); err != nil {
@@ -2462,7 +2618,7 @@ func (k *Kit) lostBetweenRuns(ctx context.Context) error {
 // person asked about it would be asked a question with no answer
 // (agentmemory RFC 0001 §6.8). Otherwise it decides nothing. A call
 // decided before the block was dropped is refused when it runs,
-// [Kit.refuseWhenDropped].
+// [Kit.writeAsRendered].
 func (k *Kit) keepSaveBase(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
 	if info.Call == nil || !memoryWrites[info.Call.Name] || info.Call.CallID == "" {
 		return nil, nil
@@ -3362,8 +3518,8 @@ const earlierConfigs = 8
 // from the next request, of the run in flight too, of a kit that renders
 // its instructions each request: one with MCP servers' instructions on,
 // the default, which a kit with a skill tool has a tool set for, or one
-// with [WithMemory], a [WithPart] part, or [WithGuards] beside
-// instructions to guard. A kit with none of them, under
+// with [WithMemory], a [WithPart] part, [WithSkillFilter], or
+// [WithGuards] beside instructions to guard. A kit with none of them, under
 // [WithoutMCPInstructions], sends them from the next run of an agent
 // given the new [Kit.Config], with SetConfig between runs, since a
 // config is a value and the loop sends its instructions as they are.
@@ -3597,8 +3753,8 @@ func (k *Kit) Attach(a *agentturn.Agent) func() {
 // MemoryManifest is what the last render put in the memory block, of
 // whichever run rendered last, and the hash a product compares to record
 // the render only when it moved. The kit records it itself when a
-// session is configured. memory_save is based on its own run's render,
-// and on this only for a call made outside any run.
+// session is configured. A memory write is based on its own run's
+// render, and on this only for a call made outside any run.
 func (k *Kit) MemoryManifest() agentmemory.Manifest {
 	k.mu.Lock()
 	defer k.mu.Unlock()

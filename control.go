@@ -385,7 +385,11 @@ var _ agentturn.Deliverer = (*Control)(nil)
 // wait for the host's next run. While calls are pending it starts none
 // either, [agentturn.ErrInputRequired], and the Resume that answers them
 // takes the items, so unlike [Control.Prompt] it never starts a run
-// that settles what the kit's engine held.
+// that settles what the kit's engine held. An abort ([Control.Abort])
+// that arrives after the delivery and before a run takes its items
+// starts none and returns [agentturn.ErrAborted], wrapping the abort's
+// cause, with no end when it found no run to stop: the items stay
+// queued for the host's next run (agentturn v0.0.39).
 //
 // The recorder is the kit's, or, for a kit with no session of its own
 // that serves several conversations, the conversation's on ctx

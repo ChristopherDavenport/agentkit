@@ -88,6 +88,13 @@ func TestTheManualPathIsTheSamePath(t *testing.T) {
 	tools := append([]agenttool.Tool(nil), product...)
 	tools = append(tools, cat.Tool())
 	tools = append(tools, agentmemory.Tools(store, []agentmemory.Scope{"user"})...)
+	// memory_read from a set built WithRead, offered only in a request
+	// whose block was dropped, since no scope renders as an index.
+	for _, t := range agentmemory.Tools(store, []agentmemory.Scope{"user"}, agentmemory.WithRead()) {
+		if t.Name() == agentmemory.ReadTool {
+			tools = append(tools, t)
+		}
+	}
 
 	want := agentturn.Config{
 		Model:     stubModel{},
