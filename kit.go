@@ -487,19 +487,36 @@ func share(budget, avail int64) int64 {
 	}
 }
 
-// filteredSkillTool is the skill tool under [WithSkillFilter]: each call
-// runs on the tool of the kit's catalogue as keep leaves it on the
-// call's context, so a skill the request's catalogue did not list is not
-// served, and the refusal names only the skills keep left. t is the
-// tool that follows the catalogue in force, which answers every other
-// property.
-func (k *Kit) filteredSkillTool(t agenttool.Tool, keep func(context.Context, agentskill.Skill) bool) agenttool.Tool {
-	return agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+// filteredSkillTool is the skill tool under [WithSkillFilter]: each call,
+// and the facts claim a policy decides it on, is answered by the tool of
+// the kit's catalogue in force as keep leaves it on the call's context.
+// A skill the request's catalogue did not list is refused as unknown,
+// the refusal naming only the skills keep left, and its claim is the
+// call alone, as agentskill's claim for an unknown name is, so no policy
+// decides on, and no refusal carries, the file of a skill the
+// conversation was not shown. It is a tool of its own rather than
+// [agenttool.Wrap] of whole, since Wrap answers the claim from whole,
+// the catalogue unfiltered. whole gives the name, the description, the
+// schema and whether the tool claims at all ([agentskill.WithFileClaim]);
+// agentskill's tool declares no other property.
+func (k *Kit) filteredSkillTool(whole agenttool.Tool, keep func(context.Context, agentskill.Skill) bool) agenttool.Tool {
+	forCtx := func(ctx context.Context) agenttool.Tool {
 		k.mu.Lock()
 		cat, opts := k.catalog, k.skillToolOpts
 		k.mu.Unlock()
-		return filterCatalogue(ctx, cat, keep).Tool(opts...).Execute(ctx, call)
-	})
+		return filterCatalogue(ctx, cat, keep).Tool(opts...)
+	}
+	var opts []agenttool.Option
+	if agenttool.IsFactual(whole) {
+		opts = append(opts, agenttool.WithFacts(func(ctx context.Context, args json.RawMessage) (agenttool.Facts, error) {
+			f, _, err := agenttool.FactsOf(ctx, forCtx(ctx), args)
+			return f, err
+		}))
+	}
+	return agenttool.NewFunc(whole.Name(), whole.Description(), whole.Parameters(),
+		func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+			return forCtx(ctx).Execute(ctx, call)
+		}, opts...)
 }
 
 // offersSkillTool reports whether the catalogue's tool is offered: yes

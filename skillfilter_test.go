@@ -11,6 +11,7 @@ import (
 	"github.com/ChristopherDavenport/agentkit"
 	"github.com/ChristopherDavenport/agentmemory"
 	"github.com/ChristopherDavenport/agentskill"
+	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
 )
@@ -146,5 +147,51 @@ func TestASkillFilterLeavesASkillOutOfOneConversation(t *testing.T) {
 	person := model.requestsFor("from the person")
 	if len(person) == 0 || !strings.Contains(person[0].Instructions, "PERSONS-OWN-NOTES") {
 		t.Errorf("the person's request does not list the skill the caller's left out")
+	}
+}
+
+// The skill tool's file claim is the filtered catalogue's: a call from a
+// conversation whose catalogue leaves a skill out, naming that skill,
+// claims the call alone, as a call naming no skill does, so no policy
+// decides on, and no refusal carries, the hidden skill's file. The
+// person's conversation still claims the file. (#129)
+func TestASkillFilterHidesTheSkillsFileFromTheClaim(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "skills")
+	skillDir(t, root, "digging", "how to dig", "dig with care")
+	skillDir(t, root, "secret-recipe", "PERSONS-OWN-NOTES", "the person's own")
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithSkills(root),
+		agentkit.WithSkillTool(agentskill.WithFileClaim(func(_ context.Context, s *agentskill.Skill, file string) ([]agenttool.FactCall, error) {
+			args, _ := json.Marshal(map[string]string{"path": filepath.Join(filepath.Dir(s.Location), file)})
+			return []agenttool.FactCall{{Tool: "read", Args: args}}, nil
+		})),
+		agentkit.WithSkillFilter(func(ctx context.Context, s agentskill.Skill) bool {
+			return ctx.Value(callerKey{}) == nil || s.Name != "secret-recipe"
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	tool, ok := kit.LookupTool(agentskill.ToolName)
+	if !ok {
+		t.Fatal("no skill tool")
+	}
+	args := json.RawMessage(`{"name":"secret-recipe"}`)
+	claim := func(ctx context.Context) string {
+		t.Helper()
+		facts, ok, err := agenttool.FactsOf(ctx, tool, args)
+		if err != nil || !ok {
+			t.Fatalf("facts = %+v, %v, %v; want a claim", facts, ok, err)
+		}
+		out, _ := json.Marshal(facts)
+		return string(out)
+	}
+	if got := claim(context.WithValue(t.Context(), callerKey{}, true)); strings.Contains(got, "secret-recipe/") {
+		t.Errorf("the caller's claim names the hidden skill's file: %s", got)
+	}
+	if got := claim(t.Context()); !strings.Contains(got, "secret-recipe/") {
+		t.Errorf("the person's claim does not name the skill's file: %s", got)
 	}
 }

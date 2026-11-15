@@ -248,16 +248,28 @@ tools = append(tools, childagent.New(childCfg,
 skillTool := agenttool.Follow(func() agenttool.Tool {
 	return currentTool() // currentCat().Tool(skillToolOpts...), kept beside the catalogue, under a lock
 })
-if keep != nil { // WithSkillFilter: each call on the catalogue keep leaves on the call's context
-	skillTool = agenttool.Wrap(skillTool, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+if keep != nil { // WithSkillFilter: each call, and its claim, on the catalogue keep leaves on the call's context
+	forCtx := func(ctx context.Context) agenttool.Tool {
 		filtered := &agentskill.Catalog{Shadowed: currentCat().Shadowed, Problems: currentCat().Problems}
 		for _, sk := range currentCat().Skills {
 			if keep(ctx, *sk) {
 				filtered.Skills = append(filtered.Skills, sk)
 			}
 		}
-		return filtered.Tool(skillToolOpts...).Execute(ctx, call)
-	})
+		return filtered.Tool(skillToolOpts...)
+	}
+	var opts []agenttool.Option
+	if agenttool.IsFactual(skillTool) { // agentskill.WithFileClaim
+		opts = append(opts, agenttool.WithFacts(func(ctx context.Context, args json.RawMessage) (agenttool.Facts, error) {
+			f, _, err := agenttool.FactsOf(ctx, forCtx(ctx), args) // a hidden name claims the call alone
+			return f, err
+		}))
+	}
+	// Not agenttool.Wrap, which answers the claim from the whole catalogue.
+	skillTool = agenttool.NewFunc(skillTool.Name(), skillTool.Description(), skillTool.Parameters(),
+		func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+			return forCtx(ctx).Execute(ctx, call)
+		}, opts...)
 }
 tools = append(tools, skillTool)
 

@@ -414,9 +414,10 @@ func WithoutSkillTool() Option {
 // The catalogue part is rendered again from the kit's catalogue for
 // every request, a child's included, [agentskill.Catalog.Prompt] of the
 // skills keep leaves, and the usage paragraph when the tool is offered;
-// the skill tool runs each call on that catalogue's tool, so a name it
-// left out is refused as unknown, and the refusal lists only the names
-// left. The memory block's share under [WithInstructionBudget] is what
+// the skill tool runs each call, and answers its facts claim, on that
+// catalogue's tool, so a name it left out is refused as unknown, the
+// refusal listing only the names left, and claims the call alone, never
+// the left-out skill's file. The memory block's share under [WithInstructionBudget] is what
 // the filtered catalogue leaves. [Kit.Config]'s instructions, which no
 // run's context has made, and [Kit.Catalog] hold the whole catalogue,
 // and [Kit.Omitted] does not list a skill keep left out. It has no
