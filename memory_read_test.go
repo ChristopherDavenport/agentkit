@@ -1,10 +1,12 @@
 package agentkit_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ChristopherDavenport/agentkit"
 	"github.com/ChristopherDavenport/agentmemory"
@@ -277,5 +279,71 @@ func TestMemoryReadIsOfferedOnlyWhenTheBlockIsDropped(t *testing.T) {
 				t.Errorf("the request names %s without offering it", agentmemory.ReadTool)
 			}
 		})
+	}
+}
+
+// slowStore holds a write of the entry named slow until release is
+// closed, and says on entered when one is held.
+type slowStore struct {
+	*agentmemory.MemStore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *slowStore) Put(ctx context.Context, e agentmemory.Entry, opts ...agentmemory.PutOption) (*agentmemory.Change, error) {
+	if e.Name == "slow" {
+		close(s.entered)
+		<-s.release
+	}
+	return s.MemStore.Put(ctx, e, opts...)
+}
+
+// A memory write waits on another only for the read of its render, not
+// for the other's store write: one conversation's slow store write does
+// not hold up another's save.
+func TestAMemoryWriteDoesNotWaitOutAnothersStoreWrite(t *testing.T) {
+	store := &slowStore{MemStore: agentmemory.NewMemStore(), entered: make(chan struct{}), release: make(chan struct{})}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithMemory(store, "user"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	cfg := kit.Config()
+	for _, run := range []string{"run-a", "run-b"} {
+		if err := cfg.BeforeModelCall(agentturn.ContextWithRunID(t.Context(), run), &openresponses.Request{Instructions: cfg.Instructions}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save, _ := kit.LookupTool(agentmemory.SaveTool)
+	slowDone := make(chan error, 1)
+	go func() {
+		_, err := save.Execute(agentturn.ContextWithRunID(t.Context(), "run-a"), agenttool.Call{ID: "a", Args: json.RawMessage(`{"scope":"user","name":"slow","content":"x"}`)})
+		slowDone <- err
+	}()
+	<-store.entered
+	fastDone := make(chan error, 1)
+	go func() {
+		_, err := save.Execute(agentturn.ContextWithRunID(t.Context(), "run-b"), agenttool.Call{ID: "b", Args: json.RawMessage(`{"scope":"user","name":"fast","content":"y"}`)})
+		fastDone <- err
+	}()
+	waited := false
+	select {
+	case err := <-fastDone:
+		if err != nil {
+			t.Errorf("the second save = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("the second save waited out the first's store write")
+		waited = true
+	}
+	close(store.release)
+	if err := <-slowDone; err != nil {
+		t.Errorf("the first save = %v", err)
+	}
+	if waited {
+		<-fastDone
 	}
 }

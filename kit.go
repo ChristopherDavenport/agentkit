@@ -240,11 +240,12 @@ type Kit struct {
 	// memDropped is true when the last render's block was dropped by the
 	// budget, which withholds the memory writes; see memoryPart.
 	memDropped bool
-	// writing is the render of the memory write writeAsRendered is
-	// running, which writeManifest returns, and writeMu runs one write
-	// at a time; see writeAsRendered.
-	writing *agentmemory.Manifest
-	writeMu sync.Mutex
+	// writing is the memory write whose render writeManifest hands to
+	// agentmemory next, and writeTurn, holding one token, is the turn to
+	// set it: a write takes the token and the read of its render gives
+	// it back; see writeAsRendered.
+	writing   *pendingWrite
+	writeTurn chan struct{}
 	// memReader is the tool the refusals of a write with no known render
 	// name for reading an entry again, and readOnDrop is set when
 	// memory_read is offered only in a request whose block was dropped;
@@ -426,7 +427,7 @@ func New(ctx context.Context, opts ...Option) (*Kit, error) {
 		return nil, errors.New("agentkit: WithSkillGrants and WithoutSkillTool both set; a grant happens when the model reads a skill through the catalogue's tool, so withholding that tool withholds every grant")
 	}
 
-	k := &Kit{memory: s.memStore != nil}
+	k := &Kit{memory: s.memStore != nil, writeTurn: make(chan struct{}, 1)}
 	k.closeCtx, k.cancelClose = context.WithCancel(context.Background())
 	fail := func(err error) (*Kit, error) {
 		return nil, errors.Join(err, k.Close())
@@ -1220,18 +1221,50 @@ func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
 	return tools, nil
 }
 
+// pendingWrite is a memory write [Kit.writeAsRendered] has handed its
+// render to [Kit.writeManifest] for, and done once the turn it took is
+// given back.
+type pendingWrite struct {
+	man  agentmemory.Manifest
+	done bool
+}
+
 // writeManifest is the [agentmemory.WithRendered] function of the kit's
 // memory tools: the render of the write [Kit.writeAsRendered] is
 // running, and outside one, the last render. agentmemory reads it once
-// at the start of each write and takes no context, so the kit runs one
-// write at a time and puts its render here for the call.
+// at the start of each write, before the write touches the store, and
+// takes no context, so a write holds the turn to put its render here
+// from before its call until this read, which gives the turn back
+// ([Kit.endWrite]). The store write after it runs beside other writes.
 func (k *Kit) writeManifest() agentmemory.Manifest {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if k.writing != nil {
-		return *k.writing
+	w := k.writing
+	if w == nil {
+		return k.manifest
 	}
-	return k.manifest
+	k.endWriteLocked(w)
+	return w.man
+}
+
+// endWrite gives back the turn w took, once: at the read of its render,
+// or when its call returns without having read it. The caller of
+// endWriteLocked holds mu.
+func (k *Kit) endWrite(w *pendingWrite) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.endWriteLocked(w)
+}
+
+func (k *Kit) endWriteLocked(w *pendingWrite) {
+	if w.done {
+		return
+	}
+	w.done = true
+	if k.writing == w {
+		k.writing = nil
+	}
+	<-k.writeTurn
 }
 
 // writeAsRendered runs a memory write against the render its call was
@@ -1260,9 +1293,14 @@ func (k *Kit) writeManifest() agentmemory.Manifest {
 // and an insert, which writes a name nobody holds, run on the last
 // render.
 //
-// The writes run one at a time across the kit, under writeMu, because
 // agentmemory reads the manifest through [Kit.writeManifest], which
-// takes no context.
+// takes no context, so the writes take turns from before each call until
+// agentmemory has read its render, the first thing a write does, and not
+// across the store write: a slow store holds up no other conversation's
+// write. A write waiting for its turn gives up when its context ends.
+// One tool set per session would avoid the turn, but a session's runs
+// can still write concurrently, and the session-less calls a product
+// makes would share one; the turn is a field read wide.
 func (k *Kit) writeAsRendered(t agenttool.Tool) agenttool.Tool {
 	name := t.Name()
 	return agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
@@ -1293,16 +1331,16 @@ func (k *Kit) writeAsRendered(t agenttool.Tool) agenttool.Tool {
 		case !ok:
 			r.man = k.MemoryManifest()
 		}
-		k.writeMu.Lock()
-		defer k.writeMu.Unlock()
+		select {
+		case k.writeTurn <- struct{}{}:
+		case <-ctx.Done():
+			return agenttool.Result{}, context.Cause(ctx)
+		}
+		w := &pendingWrite{man: r.man}
 		k.mu.Lock()
-		k.writing = &r.man
+		k.writing = w
 		k.mu.Unlock()
-		defer func() {
-			k.mu.Lock()
-			k.writing = nil
-			k.mu.Unlock()
-		}()
+		defer k.endWrite(w)
 		return t.Execute(ctx, call)
 	})
 }

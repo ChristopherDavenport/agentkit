@@ -280,8 +280,10 @@ tools = append(tools, skillTool)
 // BeforeModelCall hook keeps, then the manifest in force on the run's
 // session's path at the call. A save or a forget in a run that finds
 // none of them is refused; a patch or an insert, and a call outside any
-// run, take the last. WithRendered takes no context, so the writes run
-// one at a time with the call's render in writing.
+// run, take the last. WithRendered takes no context, so the writes take
+// turns, a channel holding one token, from before each call until
+// agentmemory reads the call's render from writing, the first thing a
+// write does; the store write runs beside the others.
 memToolOpts := []agentmemory.ToolOption{
 	agentmemory.WithReadScopes(read...),          // WithMemoryReadScopes
 	agentmemory.WithIndexScopesOf(renderOpts...), // WithMemoryRender's index scopes: memory_read in every request
@@ -289,8 +291,10 @@ memToolOpts := []agentmemory.ToolOption{
 }
 memTools := agentmemory.Tools(store, writable, append([]agentmemory.ToolOption{
 	agentmemory.WithRendered(func() agentmemory.Manifest { // the block the model read
-		if writing != nil {
-			return *writing
+		if w := writing; w != nil { // under a lock
+			writing = nil
+			<-turn // the read gives the turn back
+			return w.man
 		}
 		return last
 	}),
@@ -338,10 +342,14 @@ for i, t := range memTools {
 		case !ok:
 			r.man = last
 		}
-		writeMu.Lock() // one write at a time, under a lock of its own
-		defer writeMu.Unlock()
-		writing = &r.man
-		defer func() { writing = nil }()
+		select { // wait for the turn, or for the call's end
+		case turn <- struct{}{}:
+		case <-ctx.Done():
+			return agenttool.Result{}, context.Cause(ctx)
+		}
+		w := &pendingWrite{man: r.man}
+		writing = w
+		defer endWrite(w) // gives the turn back if the call returned before reading it
 		return t.Execute(ctx, call)
 	})
 }

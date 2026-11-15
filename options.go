@@ -667,8 +667,9 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 // own writes ([agentmemory.SessionFrom], which [Control.RunContext] and
 // a child's run context set) holds across a run's calls, so a save then
 // a forget of one entry in a batch is not refused as another's change.
-// The writes run one at a time across the kit, since the manifest
-// [agentmemory.WithRendered] returns is the calling write's. A
+// The writes take turns across the kit until agentmemory has read the
+// calling write's render, since [agentmemory.WithRendered] takes no
+// context; the store writes run side by side. A
 // [WithMemoryTools] option of the same kind replaces the kit's.
 //
 // With a session, each render that differs from the manifest in force

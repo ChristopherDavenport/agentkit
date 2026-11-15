@@ -45,8 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the kit no longer has is refused, as such a save is. Because the tool
   set is one, agentmemory's record of a session's own writes sees every
   write, so a save then a forget of one entry in a batch is no longer
-  refused as another session's change. The writes run one at a time
-  across the kit. The refusals for a save or a forget with no known
+  refused as another session's change. The writes take turns across the
+  kit only while agentmemory reads each one's render, not across the
+  store write, and a write waiting for its turn gives up when its
+  context ends. The refusals for a save or a forget with no known
   render tell the model to read the entry with `memory_read` under an
   index scope, and `memory_search` otherwise.
 
