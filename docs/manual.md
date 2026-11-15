@@ -36,9 +36,9 @@ and no fold is recorded.
 | `Retry`, `ToolExecution`, `MaxParallelTools` | `WithRetry`, `WithToolExecution`, `WithMaxParallelTools` | assign them; the kit contests none of them and reads none of them |
 | `Instructions` | `WithInstructions`, `WithSkills`, `WithMemory`, `WithMemoryArchive`, `WithAgentsMD`, `WithPart`, `WithMCP`, `WithTrustedMCPInstructions`, `WithToolSearch` | `strings.Join` of the four blocks, each MCP server's instructions part and each `WithPart` part's first render, in the order of [ordering.md](ordering.md) — see below |
 | `Tools` | — | the kit never sets it; it sets `ToolProvider`, which the loop reads in its place |
-| `ToolProvider` | `WithTools`, `WithSkills`, `WithMemory`, `WithMemoryArchive`, `WithSessionSearch`, `WithMCP`, `WithMCPResourceTools`, `WithChildAgent`, `WithDeferredTools`, `WithToolProvider`, `WithToolFilter`, `WithToolWrap`, `WithToolSearch`, `WithPolicy` | `append` the slices, wrap each tool, split off the held ones through `search.Offer`, and wrap the list in `engine.ToolProvider` — see below |
+| `ToolProvider` | `WithTools`, `WithSkills`, `WithSkillFilter`, `WithMemory`, `WithMemoryArchive`, `WithSessionSearch`, `WithMCP`, `WithMCPResourceTools`, `WithChildAgent`, `WithDeferredTools`, `WithToolProvider`, `WithToolFilter`, `WithToolWrap`, `WithToolSearch`, `WithPolicy` | `append` the slices, wrap each tool, split off the held ones through `search.Offer`, and wrap the list in `engine.ToolProvider` — see below |
 | `BeforeTurn` | `WithSkillGrantScope`, `WithBeforeTurn` | `agentturn.ChainBeforeTurn(revokeOnUserMessage, yours...)` — see below |
-| `BeforeModelCall` | `WithMemory`, `WithPart`, `WithGuards`, `WithPolicy`, `WithSkillGrants`, `WithVerdictObserver`, `WithBeforeModelCall` | `agentturn.ChainBeforeModelCall(instructions, chain.BeforeModelCall(), yours...)` — see below |
+| `BeforeModelCall` | `WithMemory`, `WithPart`, `WithSkillFilter`, `WithGuards`, `WithPolicy`, `WithSkillGrants`, `WithVerdictObserver`, `WithBeforeModelCall` | `agentturn.ChainBeforeModelCall(instructions, chain.BeforeModelCall(), yours...)` — see below |
 | `BeforeToolCall` | `WithPolicy`, `WithMemory`, `WithSkillGrants`, `WithSkillGrantScope`, `WithBeforeToolCall` | `agentturn.ChainBeforeToolCall(keepSaveBase, decide)`, `decide` being `engine.BeforeToolCall()` under the call's grant scope, the engine built with `agentpolicy.WithHooks(refuseEndedGrant, yours...)`; with `WithEngine` or no policy, `yours...` after the engine and no `refuseEndedGrant` — see below |
 | `AfterToolCall` | `WithAfterToolCall` | assign it; the kit contests nothing here |
 | `OutputGuard` | `WithGuards`, `WithOutputGuard` | `agentturn.ChainOutputGuard(chain.OutputGuard(), yours...)` |
@@ -245,9 +245,21 @@ tools = append(tools, childagent.New(childCfg,
 // agenttool.Follow answers the facts claim, and every other property,
 // from the tool in force as well as the call, so a WithFileClaim claim
 // is the reloaded catalogue's (agenttool v0.0.29).
-tools = append(tools, agenttool.Follow(func() agenttool.Tool {
+skillTool := agenttool.Follow(func() agenttool.Tool {
 	return currentTool() // currentCat().Tool(skillToolOpts...), kept beside the catalogue, under a lock
-}))
+})
+if keep != nil { // WithSkillFilter: each call on the catalogue keep leaves on the call's context
+	skillTool = agenttool.Wrap(skillTool, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+		filtered := &agentskill.Catalog{Shadowed: currentCat().Shadowed, Problems: currentCat().Problems}
+		for _, sk := range currentCat().Skills {
+			if keep(ctx, *sk) {
+				filtered.Skills = append(filtered.Skills, sk)
+			}
+		}
+		return filtered.Tool(skillToolOpts...).Execute(ctx, call)
+	})
+}
+tools = append(tools, skillTool)
 
 // The memory tools are one tool set, so agentmemory's record of a
 // session's own writes sees all of them. Each write is run against the
@@ -743,6 +755,20 @@ guardParts := func(ctx context.Context, c guard.Chain, parts []agentsession.Inst
 }
 
 instructions := func(ctx context.Context, req *openresponses.Request) error {
+	// WithSkillFilter: the catalogue as keep leaves it on this request's
+	// context, first, so the memory share is what it leaves. The whole
+	// catalogue's part goes back once the request is built, for the next
+	// request to filter on its own context.
+	if keep != nil {
+		filtered := &agentskill.Catalog{Shadowed: cat.Shadowed, Problems: cat.Problems}
+		for _, sk := range cat.Skills {
+			if keep(ctx, *sk) {
+				filtered.Skills = append(filtered.Skills, sk)
+			}
+		}
+		layers = withGroup(layers, "skills", []agentsession.InstructionPart{{ID: "skills", Text: filtered.Prompt() + "\n\n" + filtered.Usage()}})
+		defer func() { layers = withGroup(layers, "skills", wholeSkills) }()
+	}
 	// Each WithPart part rendered again, in its place, {id, text, source,
 	// trust}; an empty text leaves it out of this request. The memory
 	// share is the budget less every part but memory's.

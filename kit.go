@@ -481,6 +481,21 @@ func share(budget, avail int64) int64 {
 	}
 }
 
+// filteredSkillTool is the skill tool under [WithSkillFilter]: each call
+// runs on the tool of the kit's catalogue as keep leaves it on the
+// call's context, so a skill the request's catalogue did not list is not
+// served, and the refusal names only the skills keep left. t is the
+// tool that follows the catalogue in force, which answers every other
+// property.
+func (k *Kit) filteredSkillTool(t agenttool.Tool, keep func(context.Context, agentskill.Skill) bool) agenttool.Tool {
+	return agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+		k.mu.Lock()
+		cat, opts := k.catalog, k.skillToolOpts
+		k.mu.Unlock()
+		return filterCatalogue(ctx, cat, keep).Tool(opts...).Execute(ctx, call)
+	})
+}
+
 // offersSkillTool reports whether the catalogue's tool is offered: yes
 // when skills are configured, unless WithSkillTool or WithoutSkillTool
 // said otherwise. The same answer decides whether the usage paragraph
@@ -1017,6 +1032,9 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 			defer k.mu.Unlock()
 			return k.skillTool
 		})
+		if s.skillFilter != nil {
+			tool = k.filteredSkillTool(tool, s.skillFilter)
+		}
 		src := source{name: "WithSkills", tools: []agenttool.Tool{tool}}
 		if s.skillGrants && k.engine != nil {
 			k.grants = &skillGrants{
@@ -1421,7 +1439,7 @@ func (k *Kit) buildHooks(s *settings) {
 	// part guarded, then the guards over the whole request, then the
 	// product's own.
 	var before []func(context.Context, *openresponses.Request) error
-	if s.memStore != nil || len(s.parts) > 0 || (k.mcpParts && k.tools != nil) || (len(s.guards) > 0 && len(k.base) > 0) {
+	if s.memStore != nil || len(s.parts) > 0 || (k.mcpParts && k.tools != nil) || (len(s.guards) > 0 && len(k.base) > 0) || (s.skillFilter != nil && k.catalog != nil) {
 		before = append(before, k.instructions(s, guards))
 	}
 	if len(s.guards) > 0 {
@@ -1683,6 +1701,21 @@ func (k *Kit) render(ctx context.Context, s *settings, guards guard.Chain, base,
 		return append(slices.Clone(own), selectGroups(base, want)...)
 	}
 	var r rendered
+	// The catalogue as WithSkillFilter leaves it for this request's
+	// context, first, so the memory block is bounded by what it leaves.
+	// base keeps the whole catalogue, which the next request filters
+	// again on its own context.
+	var whole []Part
+	if s.skillFilter != nil && takes(PartSkills) {
+		k.mu.Lock()
+		cat := k.catalog
+		k.mu.Unlock()
+		if cat != nil {
+			whole = selectGroups(base, map[string]bool{PartSkills: true})
+			text := catalogueText(filterCatalogue(ctx, cat, s.skillFilter), offersSkillTool(s))
+			base = withGroup(base, PartSkills, single(Part{ID: PartSkills, Text: text, Source: SourceSkills}), k.order)
+		}
+	}
 	// The product's parts first, so the memory block is bounded by
 	// what they leave of the budget this request.
 	for _, pp := range s.parts {
@@ -1722,6 +1755,9 @@ func (k *Kit) render(ctx context.Context, s *settings, guards guard.Chain, base,
 		}
 	}
 	r.base, r.sent = base, carried()
+	if whole != nil {
+		r.base = withGroup(base, PartSkills, whole, k.order)
+	}
 	if len(guards.Guards) > 0 {
 		var err error
 		if r.sent, err = guardParts(ctx, guards, r.sent); err != nil {
@@ -3353,8 +3389,8 @@ const earlierConfigs = 8
 // from the next request, of the run in flight too, of a kit that renders
 // its instructions each request: one with MCP servers' instructions on,
 // the default, which a kit with a skill tool has a tool set for, or one
-// with [WithMemory], a [WithPart] part, or [WithGuards] beside
-// instructions to guard. A kit with none of them, under
+// with [WithMemory], a [WithPart] part, [WithSkillFilter], or
+// [WithGuards] beside instructions to guard. A kit with none of them, under
 // [WithoutMCPInstructions], sends them from the next run of an agent
 // given the new [Kit.Config], with SetConfig between runs, since a
 // config is a value and the loop sends its instructions as they are.

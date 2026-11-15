@@ -206,10 +206,7 @@ func skillPart(s *settings, withTool bool) (*agentskill.Catalog, Part, []Omissio
 		return nil, Part{}, nil, fmt.Errorf("agentkit: discovering skills: %w", err)
 	}
 
-	text := cat.Prompt()
-	if withTool && text != "" {
-		text += Separator + cat.Usage()
-	}
+	text := catalogueText(cat, withTool)
 
 	listed := map[*agentskill.Skill]bool{}
 	for _, sk := range cat.Listed() {
@@ -239,6 +236,31 @@ func skillPart(s *settings, withTool bool) (*agentskill.Catalog, Part, []Omissio
 		})
 	}
 	return cat, Part{ID: PartSkills, Text: text, Source: SourceSkills}, omitted, nil
+}
+
+// catalogueText is the skills part's text for cat: the catalogue, and
+// the usage paragraph when the catalogue's tool is offered, since it
+// tells the model to reach the skills through that tool.
+func catalogueText(cat *agentskill.Catalog, withTool bool) string {
+	text := cat.Prompt()
+	if withTool && text != "" {
+		text += Separator + cat.Usage()
+	}
+	return text
+}
+
+// filterCatalogue is cat with the skills keep refuses on ctx left out,
+// [WithSkillFilter]: its prompt does not list them and its tool does not
+// serve them, and the skill tool's refusal of an unknown name names only
+// the skills left. Shadowed and Problems are cat's.
+func filterCatalogue(ctx context.Context, cat *agentskill.Catalog, keep func(context.Context, agentskill.Skill) bool) *agentskill.Catalog {
+	out := &agentskill.Catalog{Shadowed: cat.Shadowed, Problems: cat.Problems}
+	for _, sk := range cat.Skills {
+		if keep(ctx, *sk) {
+			out.Skills = append(out.Skills, sk)
+		}
+	}
+	return out
 }
 
 // skillKey names a skill by its location, which is the stable key: a

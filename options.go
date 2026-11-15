@@ -78,6 +78,7 @@ type settings struct {
 	skillGrantScope  bool
 	skillSource      func(*agentskill.Skill) agentpolicy.Source
 	skillGrant       func(SkillGrant)
+	skillFilter      func(context.Context, agentskill.Skill) bool
 
 	memStore   agentmemory.Store
 	memScopes  []agentmemory.Scope
@@ -400,6 +401,28 @@ func WithSkillTool(opts ...agentskill.ToolOption) Option {
 // A product that serves skill bodies its own way wants this.
 func WithoutSkillTool() Option {
 	return func(s *settings) { s.skillToolWithout = true }
+}
+
+// WithSkillFilter leaves out of a request's skill catalogue, and out of
+// what the skill tool serves in that run, each skill keep returns false
+// for on the run's context: one conversation's catalogue can leave out
+// skills another's lists, such as a person's own learned skills from a
+// caller the product trusts less than its person. keep sees each skill
+// the catalogue holds, a copy, and decides on the context of the
+// request or the call, so the product decides who is a caller.
+//
+// The catalogue part is rendered again from the kit's catalogue for
+// every request, a child's included, [agentskill.Catalog.Prompt] of the
+// skills keep leaves, and the usage paragraph when the tool is offered;
+// the skill tool runs each call on that catalogue's tool, so a name it
+// left out is refused as unknown, and the refusal lists only the names
+// left. The memory block's share under [WithInstructionBudget] is what
+// the filtered catalogue leaves. [Kit.Config]'s instructions, which no
+// run's context has made, and [Kit.Catalog] hold the whole catalogue,
+// and [Kit.Omitted] does not list a skill keep left out. It has no
+// effect without skills. The last call holds.
+func WithSkillFilter(keep func(ctx context.Context, s agentskill.Skill) bool) Option {
+	return func(s *settings) { s.skillFilter = keep }
 }
 
 // WithSkillGrants grants a skill's allowed-tools to the policy engine

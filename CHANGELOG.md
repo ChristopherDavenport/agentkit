@@ -12,6 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   kept ahead of the marker, agentsmd's `Omitted.Kept`, so `Kit.Omitted`
   reports them and a product need not parse the marker; `Kept` plus
   `Size` is the file's size (#140).
+- `WithSkillFilter(keep)`: a per-request filter on the skill catalogue.
+  Each request's catalogue part is rendered again from the kit's
+  catalogue with the skills `keep(ctx, skill)` refuses left out, a
+  child's request included, and the skill tool runs each call on that
+  catalogue's tool, so a name left out is refused as unknown and the
+  refusal names only the skills left. One conversation's catalogue can
+  leave out skills another's lists, such as a person's learned skills
+  from an A2A caller; the product decides who is a caller from the
+  context. `Kit.Config()`'s instructions and `Kit.Catalog()` hold the
+  whole catalogue (#129).
 
 ### Changed
 
