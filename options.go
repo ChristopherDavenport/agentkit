@@ -413,8 +413,9 @@ func WithoutSkillTool() Option {
 //
 // The catalogue part is rendered again from the kit's catalogue for
 // every request, a child's included, [agentskill.Catalog.Prompt] of the
-// skills keep leaves, and the usage paragraph when the tool is offered;
-// the skill tool runs each call, and answers its facts claim, on that
+// skills keep leaves, and the usage paragraph when the tool is offered,
+// or nothing at all when keep leaves no skill; the skill tool runs each
+// call, and answers its facts claim, on that
 // catalogue's tool, so a name it left out is refused as unknown, the
 // refusal listing only the names left, and claims the call alone, never
 // the left-out skill's file. The memory block's share under

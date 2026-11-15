@@ -796,13 +796,18 @@ instructions := func(ctx context.Context, req *openresponses.Request) error {
 				filtered.Skills = append(filtered.Skills, sk)
 			}
 		}
-		layers = withGroup(layers, "skills", []agentsession.InstructionPart{{ID: "skills", Text: filtered.Prompt() + "\n\n" + filtered.Usage()}})
+		var g []agentsession.InstructionPart // none for a catalogue left empty
+		if len(filtered.Listed()) > 0 {
+			g = []agentsession.InstructionPart{{ID: "skills", Text: filtered.Prompt() + "\n\n" + filtered.Usage()}}
+		}
+		layers = withGroup(layers, "skills", g)
 		defer func() { layers = withGroup(layers, "skills", wholeSkills) }()
 	}
 	// A request whose instructions the product rewrote, with no memory
 	// block to render, is sent as the product wrote it, each
 	// <available_skills>…</available_skills> in it replaced by
-	// filtered.Prompt().
+	// filtered.Prompt(), or taken out with its usage paragraph when the
+	// filtered catalogue lists nothing.
 	// Each WithPart part rendered again, in its place, {id, text, source,
 	// trust}; an empty text leaves it out of this request. The memory
 	// share is the budget less every part but memory's.

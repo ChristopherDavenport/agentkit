@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `Size` is the file's size (#140).
 - `WithSkillFilter(keep)`: a per-request filter on the skill catalogue.
   Each request's catalogue part is rendered again from the kit's
-  catalogue with the skills `keep(ctx, skill)` refuses left out, a
+  catalogue with the skills `keep(ctx, skill)` refuses left out, and
+  left out whole, usage paragraph and all, when none is left, a
   child's request included, and the skill tool runs each call, and
   answers its facts claim (`agentskill.WithFileClaim`), on that
   catalogue's tool, so a name left out is refused as unknown, the refusal

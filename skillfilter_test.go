@@ -241,3 +241,47 @@ func TestASkillFilterReachesARewrittenInstructions(t *testing.T) {
 		}
 	}
 }
+
+// A filter that leaves a conversation no skill sends no catalogue and no
+// usage paragraph, in the kit's own instructions and in a product's
+// rewrite of them: an empty block would cost every request tokens and
+// point the model at a tool with nothing to serve. (#129)
+func TestASkillFilterThatLeavesNothingSendsNoCatalogue(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "skills")
+	skillDir(t, root, "secret-recipe", "PERSONS-OWN-NOTES", "the person's own")
+	model := &byPrompt{}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(model, "m"),
+		agentkit.WithInstructions("Be brief."),
+		agentkit.WithSkills(root),
+		agentkit.WithSkillFilter(func(ctx context.Context, s agentskill.Skill) bool {
+			return ctx.Value(callerKey{}) == nil
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	ctx := context.WithValue(t.Context(), callerKey{}, true)
+	rewritten := kit.Config()
+	rewritten.Instructions += agentkit.Separator + "You answer a caller."
+	for _, c := range []struct {
+		prompt string
+		cfg    agentturn.Config
+		want   string
+	}{
+		{"from a caller", kit.Config(), "Be brief."},
+		{"from the person", rewritten, "Be brief." + agentkit.Separator + "You answer a caller."},
+	} {
+		if _, err := agentturn.New(c.cfg).Prompt(ctx, openresponses.UserText(c.prompt)); err != nil {
+			t.Fatal(err)
+		}
+		reqs := model.requestsFor(c.prompt)
+		if len(reqs) == 0 {
+			t.Fatal("no request")
+		}
+		if got := reqs[0].Instructions; got != c.want {
+			t.Errorf("%s: instructions = %q, want %q", c.prompt, got, c.want)
+		}
+	}
+}

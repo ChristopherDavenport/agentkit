@@ -1685,8 +1685,14 @@ func (k *Kit) onFold(s *settings) func(context.Context, compact.Fold) error {
 
 // catalogueBlock is a catalogue as [agentskill.Catalog.Prompt] renders
 // it. The names and descriptions inside are HTML-escaped, so the closing
-// tag is the block's own.
-var catalogueBlock = regexp.MustCompile(`(?s)<available_skills>\n.*?</available_skills>`)
+// tag is the block's own. catalogueWhole is the block as a part, with
+// the separator before it and the usage paragraph after it when they
+// are there, which an empty catalogue takes out with it.
+var (
+	catalogueBlock = regexp.MustCompile(`(?s)<available_skills>\n.*?</available_skills>`)
+	catalogueWhole = regexp.MustCompile(`(?s)(?:` + regexp.QuoteMeta(Separator) + `)?<available_skills>\n.*?</available_skills>(?:` +
+		regexp.QuoteMeta(Separator+(&agentskill.Catalog{}).Usage()) + `)?`)
+)
 
 // filterRewritten is text, instructions a product rewrote, with each
 // skill catalogue in it replaced by the kit's catalogue as
@@ -1701,7 +1707,11 @@ func (k *Kit) filterRewritten(ctx context.Context, s *settings, text string) str
 	if cat == nil {
 		return text
 	}
-	return catalogueBlock.ReplaceAllLiteralString(text, filterCatalogue(ctx, cat, s.skillFilter).Prompt())
+	filtered := filterCatalogue(ctx, cat, s.skillFilter)
+	if len(filtered.Listed()) == 0 {
+		return catalogueWhole.ReplaceAllLiteralString(text, "")
+	}
+	return catalogueBlock.ReplaceAllLiteralString(text, filtered.Prompt())
 }
 
 // chain1 returns nil for no hooks, the one hook for one, and the
@@ -1825,8 +1835,14 @@ func (k *Kit) render(ctx context.Context, s *settings, guards guard.Chain, base,
 		k.mu.Unlock()
 		if cat != nil {
 			whole = selectGroups(base, map[string]bool{PartSkills: true})
-			text := catalogueText(filterCatalogue(ctx, cat, s.skillFilter), offersSkillTool(s))
-			base = withGroup(base, PartSkills, single(Part{ID: PartSkills, Text: text, Source: SourceSkills}), k.order)
+			// A catalogue the filter left empty is no part: no empty
+			// block, and no usage paragraph for a tool with nothing to
+			// serve.
+			var g []Part
+			if filtered := filterCatalogue(ctx, cat, s.skillFilter); len(filtered.Listed()) > 0 {
+				g = single(Part{ID: PartSkills, Text: catalogueText(filtered, offersSkillTool(s)), Source: SourceSkills})
+			}
+			base = withGroup(base, PartSkills, g, k.order)
 		}
 	}
 	// The product's parts first, so the memory block is bounded by
