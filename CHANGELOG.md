@@ -3,7 +3,28 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## v0.0.18 - 2026-11-08
+## Unreleased
+
+### Dependencies
+
+- **Breaking**: requires agentturn and agentturn/session v0.0.40, up
+  from v0.0.38, agentsession v0.0.39, up from v0.0.38, agentmemory
+  v0.0.13, up from v0.0.12, agentsmd v0.0.6, up from v0.0.5, and
+  openresponses v0.0.20, up from v0.0.19, in the root and in
+  `examples/a2a` (front/a2a and tools/a2a v0.0.40 there). agenttool,
+  agenttool/mcpclient, agentpolicy and agentskill are at their latest
+  releases already. A response its provider ended `incomplete` now
+  ends the run `ReasonStopped` with agentturn's `StopContentFilter` or
+  `StopMaxOutputTokens`, its details on `RunEnd.Incomplete` and the
+  refusal on `RunEnd.Refusal`, and the recorder writes such a run as
+  `aborted`; `Control` returns that end as the agent gave it, and a
+  `WithChildAgent` child the content filter stopped fails its call with
+  the refusal, where v0.0.38 called it a stop without an answer. A
+  delivery an abort stopped before a run took its items returns
+  agentturn's `ErrAborted` from `Control.Deliver` and `Control.Accept`.
+  agentmemory's `Store.Forget` takes `PutOption`s: a product's own
+  `Store` must add the parameter.
+
 
 ### Added
 

@@ -365,13 +365,13 @@ a2a.
 
 | library | version |
 |---|---|
-| `openresponses` | v0.0.19 |
+| `openresponses` | v0.0.20 |
 | `agenttool`, `agenttool/mcpclient` | v0.0.30 |
-| `agentturn`, `agentturn/session` | v0.0.38 |
-| `agentsession` | v0.0.38 |
-| `agentsmd` | v0.0.5 |
+| `agentturn`, `agentturn/session` | v0.0.40 |
+| `agentsession` | v0.0.39 |
+| `agentsmd` | v0.0.6 |
 | `agentskill` | v0.0.12 |
-| `agentmemory` | v0.0.12 |
+| `agentmemory` | v0.0.13 |
 | `agentpolicy` | v0.0.20 |
 
 Every sibling is required at a released version with no `replace`, and
