@@ -662,8 +662,7 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 // session's path where the model made it. A save or a forget in a run
 // for which the kit has none of these is refused, and the model told to
 // read the entry again, rather than based on another run's render; a
-// patch or an insert, which do not rest on the render, runs on the last
-// one. Because the tool set is one, agentmemory's record of a session's
+// patch or an insert, which do not rest on the render, runs on none. Because the tool set is one, agentmemory's record of a session's
 // own writes ([agentmemory.SessionFrom], which [Control.RunContext] and
 // a child's run context set) holds across a run's calls, so a save then
 // a forget of one entry in a batch is not refused as another's change.

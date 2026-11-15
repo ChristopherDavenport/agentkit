@@ -347,3 +347,33 @@ func TestAMemoryWriteDoesNotWaitOutAnothersStoreWrite(t *testing.T) {
 		<-fastDone
 	}
 }
+
+// A patch in a run whose render the kit no longer has runs on no render,
+// held to the stored text it anchors on, and not on whichever
+// conversation rendered last: a drop in that conversation's block does
+// not refuse it. (agentmemory RFC 0001 §6.8)
+func TestAPatchWithNoKnownRenderIsNotHeldToAnothersDrop(t *testing.T) {
+	const prompt = "be brief"
+	store := memStore(t, agentmemory.Entry{Scope: "user", Name: "a", Content: "old text " + strings.Repeat("x", 400)})
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(stubModel{}, "m"),
+		agentkit.WithInstructions(prompt),
+		agentkit.WithMemory(store, "user"),
+		agentkit.WithInstructionBudget(int64(len(prompt)+len(agentkit.Separator)+40)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	if !kit.MemoryManifest().Dropped() {
+		t.Fatal("the last render did not drop the block")
+	}
+	patch, _ := kit.LookupTool(agentmemory.PatchTool)
+	ctx := agentturn.ContextWithRunID(t.Context(), "a-run-that-never-rendered")
+	if _, err := patch.Execute(ctx, agenttool.Call{ID: "p", Args: json.RawMessage(`{"scope":"user","name":"a","old_text":"old text","new_text":"new text"}`)}); err != nil {
+		t.Fatalf("the patch = %v, want it run on no render", err)
+	}
+	if e, _ := store.Get(t.Context(), "user", "a"); !strings.HasPrefix(e.Content, "new text") {
+		t.Fatalf("a = %q, want it patched", e.Content)
+	}
+}

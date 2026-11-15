@@ -279,8 +279,8 @@ tools = append(tools, skillTool)
 // keepSaveBase when the call was decided, then rendered[run], which the
 // BeforeModelCall hook keeps, then the manifest in force on the run's
 // session's path at the call. A save or a forget in a run that finds
-// none of them is refused; a patch or an insert, and a call outside any
-// run, take the last. WithRendered takes no context, so the writes take
+// none of them is refused; a patch or an insert runs on no render, the
+// empty manifest, and a call outside any run takes the last. WithRendered takes no context, so the writes take
 // turns, a channel holding one token, from before each call until
 // agentmemory reads the call's render from writing, the first thing a
 // write does; the store write runs beside the others.
@@ -340,7 +340,7 @@ for i, t := range memTools {
 		case !ok && t.Name() == agentmemory.ForgetTool:
 			return agenttool.Result{}, errForgetBase(reader) // "... read the entry with <reader>, and forget it again ..."
 		case !ok:
-			r.man = last
+			r.man = agentmemory.Manifest{} // a patch or an insert: no render, not another conversation's
 		}
 		select { // wait for the turn, or for the call's end
 		case turn <- struct{}{}:

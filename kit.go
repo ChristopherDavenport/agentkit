@@ -1290,8 +1290,8 @@ func (k *Kit) endWriteLocked(w *pendingWrite) {
 // this. A save or a forget in a run that finds no base is refused, with
 // a result telling the model to read the entry again, rather than based
 // on whichever run rendered last; a patch, anchored in the stored text,
-// and an insert, which writes a name nobody holds, run on the last
-// render.
+// and an insert, which writes a name nobody holds, run on no render, the
+// empty manifest, rather than on another conversation's.
 //
 // agentmemory reads the manifest through [Kit.writeManifest], which
 // takes no context, so the writes take turns from before each call until
@@ -1329,7 +1329,9 @@ func (k *Kit) writeAsRendered(t agenttool.Tool) agenttool.Tool {
 		case !ok && name == agentmemory.ForgetTool:
 			return agenttool.Result{}, errForgetBase(k.memReader)
 		case !ok:
-			r.man = k.MemoryManifest()
+			// No render: not another conversation's, whose drop would
+			// refuse this write and whose hashes are not this model's.
+			r.man = agentmemory.Manifest{}
 		}
 		select {
 		case k.writeTurn <- struct{}{}:
@@ -3736,8 +3738,7 @@ func (k *Kit) Attach(a *agentturn.Agent) func() {
 // whichever run rendered last, and the hash a product compares to record
 // the render only when it moved. The kit records it itself when a
 // session is configured. A memory write is based on its own run's
-// render, and on this only for a call made outside any run, or a patch
-// or an insert whose run's render the kit no longer has.
+// render, and on this only for a call made outside any run.
 func (k *Kit) MemoryManifest() agentmemory.Manifest {
 	k.mu.Lock()
 	defer k.mu.Unlock()
