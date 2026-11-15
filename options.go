@@ -633,8 +633,8 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 // refused when it runs, which may be in a Resume: the render kept for
 // the call says the block was dropped, and after a restart the manifest
 // recorded at the call does ([agentmemory.Manifest.Dropped]). memory_search
-// and memory_read stay offered, and [Kit.Omitted] lists every entry the
-// drop left out. The
+// stays offered, and memory_read is, to read an entry by name, and
+// [Kit.Omitted] lists every entry the drop left out. The
 // block, and the writes, come back on the first render that fits.
 //
 // The block is recorded as one part per piece
@@ -755,15 +755,15 @@ func (s *settings) readScopes() []agentmemory.Scope {
 
 // memToolOptions is the options the memory tools are built with and
 // [agentmemory.Usage] is given, after the kit's [agentmemory.WithRendered]:
-// the read scopes, [agentmemory.WithRead], the scopes the render shows
-// as an index ([agentmemory.WithIndexScopesOf] of [WithMemoryRender]'s
-// options), and then the product's [WithMemoryTools].
+// the read scopes, the scopes the render shows as an index
+// ([agentmemory.WithIndexScopesOf] of [WithMemoryRender]'s options),
+// and then the product's [WithMemoryTools].
 func (s *settings) memToolOptions() []agentmemory.ToolOption {
 	var opts []agentmemory.ToolOption
 	if read := s.readScopes(); len(read) > 0 {
 		opts = append(opts, agentmemory.WithReadScopes(read...))
 	}
-	opts = append(opts, agentmemory.WithRead(), agentmemory.WithIndexScopesOf(s.memRender...))
+	opts = append(opts, agentmemory.WithIndexScopesOf(s.memRender...))
 	return append(opts, s.memTools...)
 }
 
@@ -782,10 +782,12 @@ func WithMemoryRender(opts ...agentmemory.RenderOption) Option {
 
 // WithMemoryTools passes options to [agentmemory.Tools], and to
 // [agentmemory.Usage], after the kit's own: [agentmemory.WithRendered],
-// under [WithMemoryReadScopes] [agentmemory.WithReadScopes],
-// [agentmemory.WithRead], so memory_read is offered beside memory_search
-// whether the block is sent or dropped, and
-// [agentmemory.WithIndexScopesOf] of [WithMemoryRender]'s options. A
+// under [WithMemoryReadScopes] [agentmemory.WithReadScopes], and
+// [agentmemory.WithIndexScopesOf] of [WithMemoryRender]'s options, so
+// memory_read is offered in every request when a scope renders as an
+// index. Without one it is offered only in a request whose block the
+// budget dropped, beside memory_search; [agentmemory.WithRead] given
+// here offers it in every request, and the usage paragraph names it. A
 // read scope given here that [WithMemory] also names is an error from
 // [New]; name it in [WithMemoryReadScopes] instead.
 func WithMemoryTools(opts ...agentmemory.ToolOption) Option {

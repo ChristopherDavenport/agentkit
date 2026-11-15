@@ -721,7 +721,7 @@ func TestTheConfigurationsMemoryShareIsTheFirstRequests(t *testing.T) {
 		}
 	}
 	whole.Close()
-	usage := int64(len(agentmemory.Usage(agentmemory.WithRead())))
+	usage := int64(len(agentmemory.Usage()))
 
 	for _, c := range []struct {
 		name    string

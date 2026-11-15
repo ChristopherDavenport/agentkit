@@ -64,7 +64,7 @@ func TestAnIndexEntryIsAPartAndNotAnOmission(t *testing.T) {
 func TestAnIndexEntryOverTheBudgetIsSizedAsItsIndexPart(t *testing.T) {
 	const prompt = "Be brief."
 	store := memStore(t, longFacts(20)...)
-	usage := agentmemory.Usage(agentmemory.WithRead())
+	usage := agentmemory.Usage(agentmemory.WithIndexScopes("user"))
 	kit, err := agentkit.New(t.Context(),
 		agentkit.WithModel(stubModel{}, "m"),
 		agentkit.WithInstructions(prompt),
@@ -100,9 +100,9 @@ func TestAnIndexEntryOverTheBudgetIsSizedAsItsIndexPart(t *testing.T) {
 	}
 }
 
-// memory_read is offered beside memory_search, whether the block is
-// sent or dropped, and the usage paragraph names it; under an index
-// scope it reads an entry the block lists by its heading alone.
+// Under an index scope memory_read is offered beside memory_search and
+// the usage paragraph names it; it reads an entry the block lists by its
+// heading alone. (agentmemory RFC 0001 §6.11)
 func TestMemoryReadIsOfferedAndNamed(t *testing.T) {
 	store := memStore(t, longFacts(2)...)
 	kit, err := agentkit.New(t.Context(),
@@ -118,7 +118,7 @@ func TestMemoryReadIsOfferedAndNamed(t *testing.T) {
 	if !ok {
 		t.Fatalf("%s is not offered", agentmemory.ReadTool)
 	}
-	usage := agentmemory.Usage(agentmemory.WithRead(), agentmemory.WithIndexScopes("user"))
+	usage := agentmemory.Usage(agentmemory.WithIndexScopes("user"))
 	parts := kit.Parts()
 	if last := parts[len(parts)-1]; last.ID != agentkit.PartMemoryUsage || last.Text != usage {
 		t.Errorf("usage part = %q, want agentmemory.Usage with the tools' options", last.Text)
@@ -126,6 +126,13 @@ func TestMemoryReadIsOfferedAndNamed(t *testing.T) {
 	res, err := read.Execute(t.Context(), agenttool.Call{ID: "r", Args: json.RawMessage(`{"name":"fact-01"}`)})
 	if err != nil || !strings.Contains(res.Output.Text, "detail detail") {
 		t.Fatalf("memory_read = %q, %v; want the entry whole", res.Output.Text, err)
+	}
+	// A save whose render the kit no longer has is told to read the
+	// entry with memory_read, which this kit offers in every request.
+	save, _ := kit.LookupTool(agentmemory.SaveTool)
+	ctx := agentturn.ContextWithRunID(t.Context(), "a-run-that-never-rendered")
+	if _, err := save.Execute(ctx, agenttool.Call{ID: "s", Args: json.RawMessage(`{"scope":"user","name":"fact-01","content":"x"}`)}); err == nil || !strings.Contains(err.Error(), agentmemory.ReadTool) {
+		t.Errorf("the save = %v, want a refusal naming %s", err, agentmemory.ReadTool)
 	}
 }
 
@@ -223,5 +230,52 @@ func TestAForgetIsHeldToItsOwnRunsRender(t *testing.T) {
 	}
 	if e, err := store.Get(t.Context(), "user", "a"); err != nil || e.Content != "two" {
 		t.Fatalf("a = %+v, %v; want it kept", e, err)
+	}
+}
+
+// Without an index scope memory_read is offered only in a request whose
+// memory block the budget dropped, as memory_search is the reader by
+// words: a request that sends the block sends neither memory_read nor a
+// word on it, so it costs no more than before. (agentmemory RFC 0001
+// §6.11)
+func TestMemoryReadIsOfferedOnlyWhenTheBlockIsDropped(t *testing.T) {
+	const prompt = "be brief"
+	for _, c := range []struct {
+		name    string
+		budget  int64
+		dropped bool
+	}{
+		{"sent", 0, false},
+		{"dropped", int64(len(prompt) + len(agentkit.Separator) + 40), true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			model := &scriptModel{}
+			kit, err := agentkit.New(t.Context(),
+				agentkit.WithModel(model, "m"),
+				agentkit.WithInstructions(prompt),
+				agentkit.WithMemory(memStore(t, agentmemory.Entry{Scope: "user", Name: "a", Content: "remember " + strings.Repeat("x", 400)}), "user"),
+				agentkit.WithInstructionBudget(c.budget),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer kit.Close()
+			if _, err := agentturn.New(kit.Config()).Prompt(t.Context(), openresponses.UserText("hi")); err != nil {
+				t.Fatal(err)
+			}
+			req := model.requests()[0]
+			offered := false
+			for _, tool := range req.Tools {
+				if f, ok := tool.(*openresponses.FunctionTool); ok && f.Name == agentmemory.ReadTool {
+					offered = true
+				}
+			}
+			if offered != c.dropped {
+				t.Errorf("%s offered: %v, want %v", agentmemory.ReadTool, offered, c.dropped)
+			}
+			if !c.dropped && strings.Contains(req.Instructions, agentmemory.ReadTool) {
+				t.Errorf("the request names %s without offering it", agentmemory.ReadTool)
+			}
+		})
 	}
 }

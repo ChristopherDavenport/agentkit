@@ -244,6 +244,12 @@ type Kit struct {
 	// at a time; see writeAsRendered.
 	writing *agentmemory.Manifest
 	writeMu sync.Mutex
+	// memReader is the tool the refusals of a write with no known render
+	// name for reading an entry again, and readOnDrop is set when
+	// memory_read is offered only in a request whose block was dropped;
+	// see memoryTools.
+	memReader  string
+	readOnDrop bool
 	// rendered is each run's last render, keyed by the run's ID, which is
 	// what a memory write is based on for a call in that run: the block its
 	// model composed from, not whichever run rendered last. saveBase is
@@ -1148,6 +1154,13 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 // tool set, with [agentmemory.WithRendered] returning the render the
 // calling write's run was shown, [Kit.writeAsRendered], and the kit's
 // other options, [settings.memToolOptions], ahead of the product's.
+// That set offers memory_read when a scope renders as an index, or the
+// product asked for it, and then in every request, as agentmemory RFC
+// 0001 §6.11 requires. Otherwise memory_read comes from a second set
+// built with [agentmemory.WithRead], and is offered only in a request
+// whose block the budget dropped, [withoutMemoryRead], beside
+// memory_search: that request has no usage paragraph and no writer, so
+// nothing in it names a tool it does not offer.
 // agentmemory.Tools panics on scopes it cannot build over, and New is
 // the call documented to fail, so the panic is returned as an error.
 func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
@@ -1170,6 +1183,17 @@ func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
 	}()
 	tools = agentmemory.Tools(s.memStore, writable,
 		append([]agentmemory.ToolOption{agentmemory.WithRendered(k.writeManifest)}, s.memToolOptions()...)...)
+	k.memReader = agentmemory.SearchTool
+	if slices.ContainsFunc(tools, func(t agenttool.Tool) bool { return t.Name() == agentmemory.ReadTool }) {
+		k.memReader = agentmemory.ReadTool
+	} else {
+		for _, t := range agentmemory.Tools(s.memStore, writable, append(s.memToolOptions(), agentmemory.WithRead())...) {
+			if t.Name() == agentmemory.ReadTool {
+				tools = append(tools, t)
+				k.readOnDrop = true
+			}
+		}
+	}
 	for i, t := range tools {
 		if memoryWrites[t.Name()] {
 			tools[i] = k.writeAsRendered(t)
@@ -1245,9 +1269,9 @@ func (k *Kit) writeAsRendered(t agenttool.Tool) agenttool.Tool {
 		case ok && r.dropped:
 			return agenttool.Result{}, errMemoryDropped
 		case !ok && name == agentmemory.SaveTool:
-			return agenttool.Result{}, errSaveBase
+			return agenttool.Result{}, errSaveBase(k.memReader)
 		case !ok && name == agentmemory.ForgetTool:
-			return agenttool.Result{}, errForgetBase
+			return agenttool.Result{}, errForgetBase(k.memReader)
 		case !ok:
 			r.man = k.MemoryManifest()
 		}
@@ -1282,12 +1306,16 @@ func droppedRender(m agentmemory.Manifest) bool {
 // memory_forget gets when the kit no longer knows the block its call was
 // composed from. Saving over another render could discard a write the
 // model never saw with nothing reported, and forgetting under one could
-// remove it, so the model is told to read the entry again with
-// memory_read, which the kit always offers.
-var (
-	errSaveBase   = errors.New("the memory block this save was composed from is no longer known, so the save could overwrite a change you have not seen; read the entry with " + agentmemory.ReadTool + " and save again")
-	errForgetBase = errors.New("the memory block this forget was composed from is no longer known, so the forget could remove a change you have not seen; read the entry with " + agentmemory.ReadTool + ", and forget it again if it should still go")
-)
+// remove it, so the model is told to read the entry again with reader:
+// memory_read when the request offers it, under an index scope, and
+// memory_search otherwise, as agentmemory's own messages name them.
+func errSaveBase(reader string) error {
+	return errors.New("the memory block this save was composed from is no longer known, so the save could overwrite a change you have not seen; read the entry with " + reader + " and save again")
+}
+
+func errForgetBase(reader string) error {
+	return errors.New("the memory block this forget was composed from is no longer known, so the forget could remove a change you have not seen; read the entry with " + reader + ", and forget it again if it should still go")
+}
 
 // manifestAtCall is the manifest the model was shown when it made the
 // memory_save call callID, folded from the manifest records on the path
@@ -1663,6 +1691,8 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 			// No block and no word on the tools, so no tool that writes
 			// over what the block would have shown.
 			req.Tools = withoutMemoryWrites(req.Tools)
+		} else if k.readOnDrop {
+			req.Tools = withoutMemoryRead(req.Tools)
 		}
 		return nil
 	}

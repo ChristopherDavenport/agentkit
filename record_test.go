@@ -1365,8 +1365,8 @@ func TestAWriteWhoseBaseIsGoneIsRefused(t *testing.T) {
 	}
 	ctx := agentturn.ContextWithRunID(t.Context(), "a-run-that-never-rendered")
 	_, err = save.Execute(ctx, agenttool.Call{ID: "call-1", Args: json.RawMessage(`{"scope":"user","name":"profile","content":"Chris. Lives in Bristol."}`)})
-	if err == nil || !strings.Contains(err.Error(), agentmemory.ReadTool) {
-		t.Fatalf("the save = %v, want a refusal naming %s", err, agentmemory.ReadTool)
+	if err == nil || !strings.Contains(err.Error(), agentmemory.SearchTool) {
+		t.Fatalf("the save = %v, want a refusal naming %s, the reader the request offers", err, agentmemory.SearchTool)
 	}
 	if e, err := store.Get(t.Context(), "user", "profile"); err != nil || e.Content != "Chris." {
 		t.Fatalf("profile = %+v, %v; want it untouched", e, err)
@@ -1377,8 +1377,8 @@ func TestAWriteWhoseBaseIsGoneIsRefused(t *testing.T) {
 	if !ok {
 		t.Fatal("no memory_forget")
 	}
-	if _, err := forget.Execute(ctx, agenttool.Call{ID: "call-3", Args: json.RawMessage(`{"scope":"user","name":"profile"}`)}); err == nil || !strings.Contains(err.Error(), agentmemory.ReadTool) {
-		t.Fatalf("the forget = %v, want a refusal naming %s", err, agentmemory.ReadTool)
+	if _, err := forget.Execute(ctx, agenttool.Call{ID: "call-3", Args: json.RawMessage(`{"scope":"user","name":"profile"}`)}); err == nil || !strings.Contains(err.Error(), agentmemory.SearchTool) {
+		t.Fatalf("the forget = %v, want a refusal naming %s", err, agentmemory.SearchTool)
 	}
 	if _, err := store.Get(t.Context(), "user", "profile"); err != nil {
 		t.Fatalf("profile: %v; want it kept", err)

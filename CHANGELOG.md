@@ -25,13 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **Breaking**: `WithMemory` offers `memory_read` beside `memory_search`
-  (agentmemory's `WithRead`), in every request, the one whose block the
-  budget dropped included, and the usage paragraph is
-  `agentmemory.Usage` with the tools' options, which names it. A scope
+- `WithMemory` offers `memory_read`, agentmemory's read by name, beside
+  `memory_search` in a request whose block the budget dropped. A scope
   `WithMemoryRender(agentmemory.WithScopeIndex(scope))` renders as an
-  index is passed to the tools and the paragraph too
-  (`agentmemory.WithIndexScopesOf`); its entries are parts of the block,
+  index is passed to the tools and the usage paragraph
+  (`agentmemory.WithIndexScopesOf`), which then offer and name
+  `memory_read` in every request; its entries are parts of the block,
   so `Kit.Omitted` no longer lists them as omitted with reason `index`,
   and an entry left out over the budget is sized by the part it would
   have added under the render's options (`agentmemory.EntryPartFor`), an
@@ -45,7 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   write, so a save then a forget of one entry in a batch is no longer
   refused as another session's change. The writes run one at a time
   across the kit. The refusals for a save or a forget with no known
-  render tell the model to read the entry with `memory_read`.
+  render tell the model to read the entry with `memory_read` under an
+  index scope, and `memory_search` otherwise.
 
 ### Fixed
 

@@ -87,7 +87,14 @@ func TestTheManualPathIsTheSamePath(t *testing.T) {
 	}
 	tools := append([]agenttool.Tool(nil), product...)
 	tools = append(tools, cat.Tool())
-	tools = append(tools, agentmemory.Tools(store, []agentmemory.Scope{"user"}, agentmemory.WithRead())...)
+	tools = append(tools, agentmemory.Tools(store, []agentmemory.Scope{"user"})...)
+	// memory_read from a set built WithRead, offered only in a request
+	// whose block was dropped, since no scope renders as an index.
+	for _, t := range agentmemory.Tools(store, []agentmemory.Scope{"user"}, agentmemory.WithRead()) {
+		if t.Name() == agentmemory.ReadTool {
+			tools = append(tools, t)
+		}
+	}
 
 	want := agentturn.Config{
 		Model:     stubModel{},
@@ -95,7 +102,7 @@ func TestTheManualPathIsTheSamePath(t *testing.T) {
 		Instructions: strings.Join([]string{
 			"Be brief.",
 			cat.Prompt() + agentkit.Separator + cat.Usage(),
-			block + agentkit.Separator + agentmemory.Usage(agentmemory.WithRead()),
+			block + agentkit.Separator + agentmemory.Usage(),
 			agentsmd.Render(chain.Files),
 		}, agentkit.Separator),
 		ToolProvider: engine.ToolProvider(func(context.Context) []agenttool.Tool { return tools }),
@@ -323,7 +330,7 @@ func TestTheManualPathKeepsARedactedSecretOutOfTheRecord(t *testing.T) {
 		for _, p := range pieces {
 			parts = append(parts, agentsession.InstructionPart{ID: p.ID, Text: p.Text, Source: agentkit.SourceMemory})
 		}
-		return append(parts, agentsession.InstructionPart{ID: agentkit.PartMemoryUsage, Text: agentmemory.Usage(agentmemory.WithRead()), Source: agentkit.SourceMemory}), nil
+		return append(parts, agentsession.InstructionPart{ID: agentkit.PartMemoryUsage, Text: agentmemory.Usage(), Source: agentkit.SourceMemory}), nil
 	}
 	rendered, err := layers(t.Context())
 	if err != nil {

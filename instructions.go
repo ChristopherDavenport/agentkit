@@ -312,8 +312,8 @@ func unlistedReason(sk *agentskill.Skill, problems []agentskill.Problem) string 
 // catalogue's usage goes with the catalogue, and dropped is true: the
 // tools that write memory are then withheld from the request and
 // refused, [memoryWrites], since a model shown no block and no word on
-// them would save over entries it was never shown. memory_search and
-// memory_read stay.
+// them would save over entries it was never shown. memory_search stays,
+// and memory_read is offered.
 // The dropped render's manifest shows no entry and lists every entry
 // the block held among the omitted with [agentmemory.OmitBlock], which
 // is the mark [droppedRender] reads in a session's record after a
@@ -602,6 +602,21 @@ func withoutMemoryWrites(tools openresponses.Tools) openresponses.Tools {
 		return tools
 	}
 	return slices.DeleteFunc(slices.Clone(tools), isMemoryWrite)
+}
+
+// withoutMemoryRead returns tools without memory_read, tools itself when
+// it holds none: the request of a kit with no index scope whose block
+// was sent, which names memory_search alone ([Kit.memoryTools]).
+func withoutMemoryRead(tools openresponses.Tools) openresponses.Tools {
+	if !slices.ContainsFunc(tools, isMemoryRead) {
+		return tools
+	}
+	return slices.DeleteFunc(slices.Clone(tools), isMemoryRead)
+}
+
+func isMemoryRead(t openresponses.Tool) bool {
+	f, ok := t.(*openresponses.FunctionTool)
+	return ok && f.Name == agentmemory.ReadTool
 }
 
 func isMemoryWrite(t openresponses.Tool) bool {

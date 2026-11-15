@@ -1436,7 +1436,7 @@ func TestTheMemoryPartCarriesTheUsageParagraph(t *testing.T) {
 	defer kit.Close()
 
 	parts := kit.Parts()
-	if last := parts[len(parts)-1]; last.ID != agentkit.PartMemoryUsage || last.Text != agentmemory.Usage(agentmemory.WithRead()) {
+	if last := parts[len(parts)-1]; last.ID != agentkit.PartMemoryUsage || last.Text != agentmemory.Usage() {
 		t.Fatalf("the memory group does not end with the usage paragraph: last part %q:\n%s", last.ID, last.Text)
 	}
 
@@ -1445,7 +1445,7 @@ func TestTheMemoryPartCarriesTheUsageParagraph(t *testing.T) {
 	if err := kit.Config().BeforeModelCall(t.Context(), req); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(req.Instructions, agentmemory.Usage(agentmemory.WithRead())) {
+	if !strings.Contains(req.Instructions, agentmemory.Usage()) {
 		t.Fatal("the re-rendered instructions dropped the usage paragraph")
 	}
 }
@@ -1471,7 +1471,7 @@ func TestTheMemoryUsageParagraphIsInsideTheBudget(t *testing.T) {
 	if got := len(kit.Config().Instructions); got > budget {
 		t.Fatalf("instructions = %d bytes, over the %d budget", got, budget)
 	}
-	if !strings.Contains(kit.Config().Instructions, agentmemory.Usage(agentmemory.WithRead())) {
+	if !strings.Contains(kit.Config().Instructions, agentmemory.Usage()) {
 		t.Fatal("the usage paragraph was dropped though the block was sent")
 	}
 }
@@ -1795,7 +1795,7 @@ func TestAGuardsRefusalAtNewNamesThePart(t *testing.T) {
 // v0.0.8 refuses such a bound with ErrBudget, which New must not return.
 func TestAMemoryShareUnderTheBlocksFloorDropsTheBlock(t *testing.T) {
 	const prompt = "Be brief."
-	budget := int64(len(prompt)+2*len(agentkit.Separator)+len(agentmemory.Usage(agentmemory.WithRead()))) + 20
+	budget := int64(len(prompt)+2*len(agentkit.Separator)+len(agentmemory.Usage())) + 20
 	kit, err := agentkit.New(t.Context(),
 		agentkit.WithModel(stubModel{}, "m"),
 		agentkit.WithInstructions(prompt),

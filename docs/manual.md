@@ -271,9 +271,8 @@ tools = append(tools, skillTool)
 // run, take the last. WithRendered takes no context, so the writes run
 // one at a time with the call's render in writing.
 memToolOpts := []agentmemory.ToolOption{
-	agentmemory.WithReadScopes(read...),                 // WithMemoryReadScopes
-	agentmemory.WithRead(),                              // memory_read, offered whether the block is sent or dropped
-	agentmemory.WithIndexScopesOf(renderOpts...),        // WithMemoryRender's index scopes
+	agentmemory.WithReadScopes(read...),          // WithMemoryReadScopes
+	agentmemory.WithIndexScopesOf(renderOpts...), // WithMemoryRender's index scopes: memory_read in every request
 	// then WithMemoryTools' options
 }
 memTools := agentmemory.Tools(store, writable, append([]agentmemory.ToolOption{
@@ -284,6 +283,17 @@ memTools := agentmemory.Tools(store, writable, append([]agentmemory.ToolOption{
 		return last
 	}),
 }, memToolOpts...)...)
+// With no index scope, memory_read comes from a set built WithRead and is
+// withheld from every request whose block was sent (BeforeModelCall).
+reader := agentmemory.ReadTool
+if !slices.ContainsFunc(memTools, func(t agenttool.Tool) bool { return t.Name() == agentmemory.ReadTool }) {
+	reader = agentmemory.SearchTool
+	for _, t := range agentmemory.Tools(store, writable, append(memToolOpts, agentmemory.WithRead())...) {
+		if t.Name() == agentmemory.ReadTool {
+			memTools = append(memTools, t)
+		}
+	}
+}
 for i, t := range memTools {
 	if !slices.Contains(agentmemory.WriteTools(), t.Name()) {
 		continue
@@ -310,9 +320,9 @@ for i, t := range memTools {
 			// shown no block to write over.
 			return agenttool.Result{}, errMemoryDropped // agentmemory.ErrBlockDropped
 		case !ok && t.Name() == agentmemory.SaveTool:
-			return agenttool.Result{}, errSaveBase // "... read the entry with memory_read and save again"
+			return agenttool.Result{}, errSaveBase(reader) // "... read the entry with <reader> and save again"
 		case !ok && t.Name() == agentmemory.ForgetTool:
-			return agenttool.Result{}, errForgetBase // "... read the entry with memory_read, and forget it again ..."
+			return agenttool.Result{}, errForgetBase(reader) // "... read the entry with <reader>, and forget it again ..."
 		case !ok:
 			r.man = last
 		}
@@ -806,6 +816,11 @@ instructions := func(ctx context.Context, req *openresponses.Request) error {
 		req.Tools = slices.DeleteFunc(slices.Clone(req.Tools), func(t openresponses.Tool) bool {
 			f, ok := t.(*openresponses.FunctionTool)
 			return ok && slices.Contains(agentmemory.WriteTools(), f.Name)
+		})
+	} else if reader == agentmemory.SearchTool { // memory_read for a dropped block alone
+		req.Tools = slices.DeleteFunc(slices.Clone(req.Tools), func(t openresponses.Tool) bool {
+			f, ok := t.(*openresponses.FunctionTool)
+			return ok && f.Name == agentmemory.ReadTool
 		})
 	}
 	return nil
