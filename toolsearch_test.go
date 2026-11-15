@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ChristopherDavenport/agentkit"
+	"github.com/ChristopherDavenport/agentmemory"
 	"github.com/ChristopherDavenport/agentpolicy"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agenttool"
@@ -687,5 +688,78 @@ func TestTheConfigurationsListingIsTheFirstRequests(t *testing.T) {
 	}
 	if got := model.requests()[0].Instructions; got != kit.Config().Instructions {
 		t.Errorf("the first request's instructions differ from the configuration's:\n%s\n---\n%s", got, kit.Config().Instructions)
+	}
+}
+
+// Under an instruction budget the memory block's share is what the other
+// parts leave, so when the listing grows once the tool set exists, a
+// provider's held tool joining it, the block in the configuration is
+// rendered again under the smaller share: Config's instructions are the
+// first request's, the block bounded tighter, or dropped as the request
+// drops it, with the writes withheld from that request. (#138)
+func TestTheConfigurationsMemoryShareIsTheFirstRequests(t *testing.T) {
+	late := agenttool.New("late_tool", "Looks up "+strings.Repeat("a very particular thing ", 12)+"for the person.",
+		func(context.Context, noArgs) (string, error) { return "", nil })
+	opts := func(budget int64, model agentturn.Model) []agentkit.Option {
+		return searchKit(t, model, nil,
+			agentkit.WithInstructions("Be brief."),
+			agentkit.WithMemory(memStore(t, manyFacts("mine")...), "user"),
+			agentkit.WithToolProvider(func(context.Context) []agenttool.Tool { return []agenttool.Tool{late} }),
+			agentkit.WithToolSearch(func(source string, _ []agenttool.Tool) bool { return source != "WithTools" }),
+			agentkit.WithInstructionBudget(budget),
+		)
+	}
+	whole, err := agentkit.New(t.Context(), opts(0, stubModel{})...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := int64(len(whole.Config().Instructions))
+	var block int64
+	for _, p := range whole.Parts() {
+		if strings.HasPrefix(p.ID, "memory") {
+			block += int64(len(p.Text) + len(agentkit.Separator))
+		}
+	}
+	whole.Close()
+	usage := int64(len(agentmemory.Usage(agentmemory.WithRead())))
+
+	for _, c := range []struct {
+		name    string
+		budget  int64
+		dropped bool
+	}{
+		{"bounded", full - 60, false},
+		{"dropped", full - block + usage + 2*int64(len(agentkit.Separator)) + 40, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			model := &scriptModel{}
+			kit, err := agentkit.New(t.Context(), opts(c.budget, model)...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer kit.Close()
+			if got := kit.MemoryManifest().Dropped(); got != c.dropped {
+				t.Errorf("the configuration's manifest is dropped: %v, want %v", got, c.dropped)
+			}
+			agent := agentturn.New(kit.Config())
+			if _, err := agent.Prompt(t.Context(), openresponses.UserText("hi")); err != nil {
+				t.Fatal(err)
+			}
+			req := model.requests()[0]
+			if got := req.Instructions; got != kit.Config().Instructions {
+				t.Errorf("the first request's instructions differ from the configuration's:\n%s\n---\n%s", got, kit.Config().Instructions)
+			}
+			if got := strings.Contains(req.Instructions, "# Memory"); got == c.dropped {
+				t.Errorf("the first request sends the block: %v, want %v", got, !c.dropped)
+			}
+			if !c.dropped {
+				return
+			}
+			for _, tool := range req.Tools {
+				if f, ok := tool.(*openresponses.FunctionTool); ok && f.Name == agentmemory.SaveTool {
+					t.Errorf("%s was offered with the block dropped", f.Name)
+				}
+			}
+		})
 	}
 }

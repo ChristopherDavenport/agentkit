@@ -415,7 +415,10 @@ inner := func(ctx context.Context) []agenttool.Tool {
 // The listing, rendered for every request as a part of the product's:
 // listing := search.Part(ctx) -> agentkit.ToolSearchListing(held(ctx))
 // rendered once more after the tool set and the session exist, so the
-// configuration's instructions are the first request's.
+// configuration's instructions are the first request's. Under a budget
+// the memory block is rendered once more after it, under
+// memoryShare(budget, parts), the share each request gives it, since a
+// listing that grew leaves the block less.
 ```
 
 A held server's instructions part is rendered by the same rule as any

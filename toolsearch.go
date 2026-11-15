@@ -12,6 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/ChristopherDavenport/agentmemory"
 	"github.com/ChristopherDavenport/agentpolicy"
 	"github.com/ChristopherDavenport/agentpolicy/guard"
 	"github.com/ChristopherDavenport/agentsession"
@@ -732,8 +733,13 @@ func (k *Kit) withoutUnloaded(ctx context.Context, tools []agenttool.Tool, origi
 // and the servers' alone, before a provider's, a WithDeferredTools
 // source's or a library's held tools were built; and the servers'
 // instructions, which wait for one of a held server's tools to be
-// loaded, as a resumed conversation may have. Each group is guarded as
-// New guarded the first render.
+// loaded, as a resumed conversation may have. Under
+// [WithInstructionBudget] the memory block is rendered again after
+// them, since its share is what the other parts leave
+// ([memoryShare], as each request sizes it), so a listing that grew
+// bounds the block, or drops it, as the first request does, with its
+// manifest, omissions and drop. Each group is guarded as New guarded
+// the first render.
 func (k *Kit) settleHeld(ctx context.Context, s *settings) error {
 	if k.search == nil {
 		return nil
@@ -767,11 +773,31 @@ func (k *Kit) settleHeld(ctx context.Context, s *settings) error {
 			return err
 		}
 	}
+	var (
+		man     agentmemory.Manifest
+		memOm   []Omission
+		dropped bool
+	)
+	memory := s.memStore != nil && s.budget > 0
+	if memory {
+		var g []Part
+		var err error
+		if g, man, memOm, dropped, err = memoryPart(ctx, s, memoryShare(s.budget, base)); err != nil {
+			return err
+		}
+		if err := set(PartMemory, g); err != nil {
+			return err
+		}
+	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.base, k.parts, k.first = base, sent, sent
 	if k.mcpParts {
 		k.mcpOmitted, k.firstMCPOmitted = om, om
+	}
+	if memory {
+		k.manifest, k.memDropped = man, dropped
+		k.memOmitted, k.firstOmitted = memOm, memOm
 	}
 	k.cfg.Instructions = agentsession.JoinInstructions(sent)
 	return nil

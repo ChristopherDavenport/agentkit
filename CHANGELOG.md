@@ -37,6 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   across the kit. The refusals for a save or a forget with no known
   render tell the model to read the entry with `memory_read`.
 
+### Fixed
+
+- Under `WithToolSearch` and `WithInstructionBudget`, `Kit.Config()`'s
+  memory block is the first request's: once the tool set exists, the
+  block is rendered again under the share the other parts leave, as each
+  request renders it, so a listing that grew with a provider's held tool
+  bounds the block, or drops it, in the configuration too, with
+  `Kit.MemoryManifest` and `Kit.Omitted` following (#138).
+
 ### Dependencies
 
 - **Breaking**: requires agentturn and agentturn/session v0.0.40, up
