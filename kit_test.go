@@ -1436,7 +1436,7 @@ func TestTheMemoryPartCarriesTheUsageParagraph(t *testing.T) {
 	defer kit.Close()
 
 	parts := kit.Parts()
-	if last := parts[len(parts)-1]; last.ID != agentkit.PartMemoryUsage || last.Text != agentmemory.Usage() {
+	if last := parts[len(parts)-1]; last.ID != agentkit.PartMemoryUsage || last.Text != agentmemory.Usage(agentmemory.WithRead()) {
 		t.Fatalf("the memory group does not end with the usage paragraph: last part %q:\n%s", last.ID, last.Text)
 	}
 
@@ -1445,7 +1445,7 @@ func TestTheMemoryPartCarriesTheUsageParagraph(t *testing.T) {
 	if err := kit.Config().BeforeModelCall(t.Context(), req); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(req.Instructions, agentmemory.Usage()) {
+	if !strings.Contains(req.Instructions, agentmemory.Usage(agentmemory.WithRead())) {
 		t.Fatal("the re-rendered instructions dropped the usage paragraph")
 	}
 }
@@ -1471,7 +1471,7 @@ func TestTheMemoryUsageParagraphIsInsideTheBudget(t *testing.T) {
 	if got := len(kit.Config().Instructions); got > budget {
 		t.Fatalf("instructions = %d bytes, over the %d budget", got, budget)
 	}
-	if !strings.Contains(kit.Config().Instructions, agentmemory.Usage()) {
+	if !strings.Contains(kit.Config().Instructions, agentmemory.Usage(agentmemory.WithRead())) {
 		t.Fatal("the usage paragraph was dropped though the block was sent")
 	}
 }
@@ -1795,7 +1795,7 @@ func TestAGuardsRefusalAtNewNamesThePart(t *testing.T) {
 // v0.0.8 refuses such a bound with ErrBudget, which New must not return.
 func TestAMemoryShareUnderTheBlocksFloorDropsTheBlock(t *testing.T) {
 	const prompt = "Be brief."
-	budget := int64(len(prompt)+2*len(agentkit.Separator)+len(agentmemory.Usage())) + 20
+	budget := int64(len(prompt)+2*len(agentkit.Separator)+len(agentmemory.Usage(agentmemory.WithRead()))) + 20
 	kit, err := agentkit.New(t.Context(),
 		agentkit.WithModel(stubModel{}, "m"),
 		agentkit.WithInstructions(prompt),
@@ -1964,6 +1964,7 @@ func TestAResumedKitBacksOffFromAFoldThatFailed(t *testing.T) {
 // of the request, and a write the model makes anyway is refused: shown
 // no block and no word on the tools, it saved over entries it was never
 // shown. (#53) memory_insert is a writer too, agentmemory.WriteTools.
+// memory_search and memory_read, which read by words and by name, stay.
 func TestADroppedMemoryBlockWithholdsTheWrites(t *testing.T) {
 	const prompt = "be brief"
 	store := memStore(t, agentmemory.Entry{Scope: "user", Name: "go-version", Content: "This project pins Go 1.25. " + strings.Repeat("c", 4000)})
@@ -2002,8 +2003,10 @@ func TestADroppedMemoryBlockWithholdsTheWrites(t *testing.T) {
 			t.Errorf("%s was offered with the block dropped: %v", name, offered)
 		}
 	}
-	if !slices.Contains(offered, agentmemory.SearchTool) {
-		t.Errorf("%s was withheld too: %v", agentmemory.SearchTool, offered)
+	for _, name := range []string{agentmemory.SearchTool, agentmemory.ReadTool} {
+		if !slices.Contains(offered, name) {
+			t.Errorf("%s was withheld too: %v", name, offered)
+		}
 	}
 	got, err := store.Get(t.Context(), "user", "go-version")
 	if err != nil {

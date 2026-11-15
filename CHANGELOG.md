@@ -5,6 +5,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Changed
+
+- **Breaking**: `WithMemory` offers `memory_read` beside `memory_search`
+  (agentmemory's `WithRead`), in every request, the one whose block the
+  budget dropped included, and the usage paragraph is
+  `agentmemory.Usage` with the tools' options, which names it. A scope
+  `WithMemoryRender(agentmemory.WithScopeIndex(scope))` renders as an
+  index is passed to the tools and the paragraph too
+  (`agentmemory.WithIndexScopesOf`); its entries are parts of the block,
+  so `Kit.Omitted` no longer lists them as omitted with reason `index`,
+  and an entry left out over the budget is sized by the part it would
+  have added under the render's options (`agentmemory.EntryPartFor`), an
+  index entry part in an index scope.
+- The memory tools are one tool set, and every write, not only
+  `memory_save`, runs against the render its own run was shown:
+  `memory_forget` is held to the hash that render showed, where it was
+  held to whichever run rendered last, and a forget in a run whose render
+  the kit no longer has is refused, as such a save is. Because the tool
+  set is one, agentmemory's record of a session's own writes sees every
+  write, so a save then a forget of one entry in a batch is no longer
+  refused as another session's change. The writes run one at a time
+  across the kit. The refusals for a save or a forget with no known
+  render tell the model to read the entry with `memory_read`.
+
 ### Dependencies
 
 - **Breaking**: requires agentturn and agentturn/session v0.0.40, up

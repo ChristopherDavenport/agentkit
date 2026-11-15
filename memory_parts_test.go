@@ -50,7 +50,7 @@ func TestTheUsagePartIsOutsideAgentmemorysIDs(t *testing.T) {
 func TestAnOmittedMemoryEntrysSizeIsThePartsBytes(t *testing.T) {
 	const prompt = "Be brief."
 	store := memStore(t, manyFacts("mine")...)
-	budget := int64(len(prompt)+2*len(agentkit.Separator)+len(agentmemory.Usage())) + 20
+	budget := int64(len(prompt)+2*len(agentkit.Separator)+len(agentmemory.Usage(agentmemory.WithRead()))) + 20
 	kit, err := agentkit.New(t.Context(),
 		agentkit.WithModel(stubModel{}, "m"),
 		agentkit.WithInstructions(prompt),

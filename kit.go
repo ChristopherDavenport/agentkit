@@ -43,7 +43,7 @@ import (
 // other: they share the kit's memory state, because they share the hook
 // that renders it. Two runs off one kit each render memory for
 // themselves and each build their own instructions, so neither sees a
-// prompt the other assembled, and each run's memory_save is based on
+// prompt the other assembled, and each run's memory writes are based on
 // that run's own render. What they share is [Kit.Parts] and
 // [Kit.MemoryManifest], which describe the render that happened last,
 // and the record of the manifest, which is written once per distinct
@@ -239,8 +239,13 @@ type Kit struct {
 	// memDropped is true when the last render's block was dropped by the
 	// budget, which withholds the memory writes; see memoryPart.
 	memDropped bool
+	// writing is the render of the memory write writeAsRendered is
+	// running, which writeManifest returns, and writeMu runs one write
+	// at a time; see writeAsRendered.
+	writing *agentmemory.Manifest
+	writeMu sync.Mutex
 	// rendered is each run's last render, keyed by the run's ID, which is
-	// what memory_save is based on for a call in that run: the block its
+	// what a memory write is based on for a call in that run: the block its
 	// model composed from, not whichever run rendered last. saveBase is
 	// the render a memory write was composed from, keyed by the call's
 	// ID, kept by the kit's BeforeToolCall hook when the call is decided,
@@ -1121,9 +1126,10 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 	return nil
 }
 
-// memoryTools builds agentmemory's tools over the writable scopes, with
-// memory_save based on the render its run's model was shown and the
-// read scopes named read-only, ahead of the product's own options.
+// memoryTools builds agentmemory's tools over the writable scopes, one
+// tool set, with [agentmemory.WithRendered] returning the render the
+// calling write's run was shown, [Kit.writeAsRendered], and the kit's
+// other options, [settings.memToolOptions], ahead of the product's.
 // agentmemory.Tools panics on scopes it cannot build over, and New is
 // the call documented to fail, so the panic is returned as an error.
 func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
@@ -1136,11 +1142,6 @@ func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
 	if len(writable) == 0 {
 		return nil, errors.New("agentkit: WithMemory has no writable scope; agentmemory's tools need one, so leave at least one scope out of WithMemoryReadScopes")
 	}
-	var rest []agentmemory.ToolOption
-	if read := s.readScopes(); len(read) > 0 {
-		rest = append(rest, agentmemory.WithReadScopes(read...))
-	}
-	rest = append(rest, s.memTools...)
 	defer func() {
 		if r := recover(); r != nil {
 			tools, err = nil, fmt.Errorf("agentkit: building the memory tools: %v", r)
@@ -1149,65 +1150,99 @@ func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
 			}
 		}
 	}()
-	based := func(rendered func() agentmemory.Manifest) []agenttool.Tool {
-		return agentmemory.Tools(s.memStore, writable,
-			append([]agentmemory.ToolOption{agentmemory.WithRendered(rendered)}, rest...)...)
-	}
-	tools = based(k.MemoryManifest)
+	tools = agentmemory.Tools(s.memStore, writable,
+		append([]agentmemory.ToolOption{agentmemory.WithRendered(k.writeManifest)}, s.memToolOptions()...)...)
 	for i, t := range tools {
-		if t.Name() == agentmemory.SaveTool {
-			tools[i] = k.saveAsRendered(t, based)
-		}
 		if memoryWrites[t.Name()] {
-			tools[i] = k.refuseWhenDropped(tools[i])
+			tools[i] = k.writeAsRendered(t)
 		}
 	}
 	return tools, nil
 }
 
-// refuseWhenDropped refuses a memory write composed from a render the
-// budget dropped, or, outside any run, when the last render was dropped.
-// The request did not offer the tool, so only a model that calls it
-// anyway reaches this. The render read is, in the order [saveAsRendered]
-// takes its base: the one kept for the call when it was decided,
-// [Kit.keepSaveBase], which is how a write held for approval and run by
-// a Resume, a run with no render of its own, is refused as it would have
-// been outright; the render of the call's run; and, after a restart or
-// once the bounded maps have dropped the run, the manifest in force at
-// the call on the run's session's path, [Kit.manifestAtCall], refused
-// when it is a dropped render's, [droppedRender]. A manifest the
-// path cannot attribute to the call's run, or whose shape does not say,
-// is let through to the base saveAsRendered finds, or refuses for.
+// writeManifest is the [agentmemory.WithRendered] function of the kit's
+// memory tools: the render of the write [Kit.writeAsRendered] is
+// running, and outside one, the last render. agentmemory reads it once
+// at the start of each write and takes no context, so the kit runs one
+// write at a time and puts its render here for the call.
+func (k *Kit) writeManifest() agentmemory.Manifest {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.writing != nil {
+		return *k.writing
+	}
+	return k.manifest
+}
+
+// writeAsRendered runs a memory write against the render its call was
+// composed from, on the kit's one tool set, so two runs off one kit each
+// write over the block their model read, and agentmemory's record of a
+// session's own writes, which lives in the tool set, sees every write of
+// the session's. The render another run made in between may already
+// hold a write a third session made after this run's render: a save
+// based on it discards that write with nothing reported, and a forget
+// held to it removes the change. The base is, in order: the render kept
+// for the call when it was decided, [Kit.keepSaveBase], which is how a
+// write held for approval and run by a Resume, a run that has not
+// rendered, keeps its base; the render of the call's run,
+// [agentturn.RunIDFromContext]; and the manifest in force on the path of
+// the run's session where the model made the call, folded from its
+// [agentmemory.ManifestNS] records, which is what is left after a
+// restart or once the bounded maps have dropped the run. A call outside
+// any run is based on [Kit.MemoryManifest].
 //
-// The kept render is consumed here for memory_patch, memory_forget and
-// memory_insert, and for a memory_save refused here, since none of them reaches
-// saveAsRendered, which consumes the one it bases a save on.
-func (k *Kit) refuseWhenDropped(t agenttool.Tool) agenttool.Tool {
-	save := t.Name() == agentmemory.SaveTool
+// A write whose base is a render the budget dropped is refused,
+// [errMemoryDropped]: the request did not offer the tool, so only a
+// model that calls it anyway, or a call decided before the drop, reaches
+// this. A save or a forget in a run that finds no base is refused, with
+// a result telling the model to read the entry again, rather than based
+// on whichever run rendered last; a patch, anchored in the stored text,
+// and an insert, which writes a name nobody holds, run on the last
+// render.
+//
+// The writes run one at a time across the kit, under writeMu, because
+// agentmemory reads the manifest through [Kit.writeManifest], which
+// takes no context.
+func (k *Kit) writeAsRendered(t agenttool.Tool) agenttool.Tool {
+	name := t.Name()
 	return agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
 		run := agentturn.RunIDFromContext(ctx)
 		key := saveKey(ctx, call.ID)
 		k.mu.Lock()
-		r, kept := k.saveBase.get(key)
-		known := kept
-		if !known && run != "" {
-			r, known = k.rendered.get(run)
-		}
-		dropped := known && r.dropped
-		if run == "" {
-			dropped, known = k.memDropped, true
-		}
-		if kept && (!save || dropped) {
+		r, ok := k.saveBase.get(key)
+		if ok {
 			k.saveBase.delete(key)
+		} else if run != "" {
+			r, ok = k.rendered.get(run)
+		} else {
+			r, ok = memoryRender{man: k.manifest, dropped: k.memDropped}, true
 		}
 		k.mu.Unlock()
-		if !known {
-			man, ok := k.manifestAtCall(ctx, call.ID)
-			dropped = ok && droppedRender(man)
+		if !ok {
+			if man, found := k.manifestAtCall(ctx, call.ID); found {
+				r, ok = memoryRender{man: man, dropped: droppedRender(man)}, true
+			}
 		}
-		if dropped {
+		switch {
+		case ok && r.dropped:
 			return agenttool.Result{}, errMemoryDropped
+		case !ok && name == agentmemory.SaveTool:
+			return agenttool.Result{}, errSaveBase
+		case !ok && name == agentmemory.ForgetTool:
+			return agenttool.Result{}, errForgetBase
+		case !ok:
+			r.man = k.MemoryManifest()
 		}
+		k.writeMu.Lock()
+		defer k.writeMu.Unlock()
+		k.mu.Lock()
+		k.writing = &r.man
+		k.mu.Unlock()
+		defer func() {
+			k.mu.Lock()
+			k.writing = nil
+			k.mu.Unlock()
+		}()
 		return t.Execute(ctx, call)
 	})
 }
@@ -1225,60 +1260,16 @@ func droppedRender(m agentmemory.Manifest) bool {
 	return m.Dropped()
 }
 
-// saveAsRendered runs a memory_save call against a memory_save based on
-// the render the call was composed from, so two runs off one kit each
-// save over the block their model read. The render another run made in
-// between may already hold a write a third session made after this
-// run's render, and a save based on it discards that write with nothing
-// reported. The base is, in order: the render kept for the call when it
-// was decided, [Kit.keepSaveBase], which is how a save held for approval
-// and run by a Resume, a run that has not rendered, keeps its base; the
-// render of the call's run, [agentturn.RunIDFromContext]; and the
-// manifest in force on the path of the run's session where the model
-// made the call, folded from its [agentmemory.ManifestNS] records, which
-// is what is left after a restart or once the bounded maps have dropped
-// the run. A call in a run that finds none of them is refused, with a
-// result telling the model to look again, rather than based on whichever
-// run rendered last; a call outside any run is based on [Kit.MemoryManifest].
-// agentmemory.WithRendered takes no context, so the tool is built per
-// call over the render; building one is a few allocations and touches
-// no store.
-func (k *Kit) saveAsRendered(t agenttool.Tool, based func(func() agentmemory.Manifest) []agenttool.Tool) agenttool.Tool {
-	return agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
-		run := agentturn.RunIDFromContext(ctx)
-		k.mu.Lock()
-		key := saveKey(ctx, call.ID)
-		r, ok := k.saveBase.get(key)
-		if ok {
-			k.saveBase.delete(key)
-		} else {
-			r, ok = k.rendered.get(run)
-		}
-		man := r.man
-		k.mu.Unlock()
-		if !ok {
-			man, ok = k.manifestAtCall(ctx, call.ID)
-		}
-		if !ok {
-			if run != "" {
-				return agenttool.Result{}, errSaveBase
-			}
-			return t.Execute(ctx, call)
-		}
-		for _, own := range based(func() agentmemory.Manifest { return man }) {
-			if own.Name() == agentmemory.SaveTool {
-				return own.Execute(ctx, call)
-			}
-		}
-		return t.Execute(ctx, call)
-	})
-}
-
-// errSaveBase is what a memory_save gets when the kit no longer knows
-// the block its call was composed from. Saving over another render could
-// discard a write the model never saw with nothing reported, so the
-// model is told to look at the entry again.
-var errSaveBase = errors.New("the memory block this save was composed from is no longer known, so the save could overwrite a change you have not seen; search for the entry with " + agentmemory.SearchTool + " and save again")
+// errSaveBase and errForgetBase are what a memory_save or a
+// memory_forget gets when the kit no longer knows the block its call was
+// composed from. Saving over another render could discard a write the
+// model never saw with nothing reported, and forgetting under one could
+// remove it, so the model is told to read the entry again with
+// memory_read, which the kit always offers.
+var (
+	errSaveBase   = errors.New("the memory block this save was composed from is no longer known, so the save could overwrite a change you have not seen; read the entry with " + agentmemory.ReadTool + " and save again")
+	errForgetBase = errors.New("the memory block this forget was composed from is no longer known, so the forget could remove a change you have not seen; read the entry with " + agentmemory.ReadTool + ", and forget it again if it should still go")
+)
 
 // manifestAtCall is the manifest the model was shown when it made the
 // memory_save call callID, folded from the manifest records on the path
@@ -2462,7 +2453,7 @@ func (k *Kit) lostBetweenRuns(ctx context.Context) error {
 // person asked about it would be asked a question with no answer
 // (agentmemory RFC 0001 §6.8). Otherwise it decides nothing. A call
 // decided before the block was dropped is refused when it runs,
-// [Kit.refuseWhenDropped].
+// [Kit.writeAsRendered].
 func (k *Kit) keepSaveBase(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
 	if info.Call == nil || !memoryWrites[info.Call.Name] || info.Call.CallID == "" {
 		return nil, nil
@@ -3597,8 +3588,9 @@ func (k *Kit) Attach(a *agentturn.Agent) func() {
 // MemoryManifest is what the last render put in the memory block, of
 // whichever run rendered last, and the hash a product compares to record
 // the render only when it moved. The kit records it itself when a
-// session is configured. memory_save is based on its own run's render,
-// and on this only for a call made outside any run.
+// session is configured. A memory write is based on its own run's
+// render, and on this only for a call made outside any run, or a patch
+// or an insert whose run's render the kit no longer has.
 func (k *Kit) MemoryManifest() agentmemory.Manifest {
 	k.mu.Lock()
 	defer k.mu.Unlock()

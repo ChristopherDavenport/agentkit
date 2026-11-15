@@ -285,13 +285,14 @@ func unlistedReason(sk *agentskill.Skill, problems []agentskill.Problem) string 
 // catalogue's usage goes with the catalogue, and dropped is true: the
 // tools that write memory are then withheld from the request and
 // refused, [memoryWrites], since a model shown no block and no word on
-// them would save over entries it was never shown. memory_search stays.
+// them would save over entries it was never shown. memory_search and
+// memory_read stay.
 // The dropped render's manifest shows no entry and lists every entry
 // the block held among the omitted with [agentmemory.OmitBlock], which
 // is the mark [droppedRender] reads in a session's record after a
 // restart.
 func memoryPart(ctx context.Context, s *settings, limit int64) (group []Part, man agentmemory.Manifest, omitted []Omission, dropped bool, err error) {
-	usage := agentmemory.Usage()
+	usage := agentmemory.Usage(s.memToolOptions()...)
 	if archive := s.archiveScopes(); len(archive) > 0 {
 		usage += " " + archiveNote(archive)
 	}
@@ -346,9 +347,14 @@ func memoryPart(ctx context.Context, s *settings, limit int64) (group []Part, ma
 		group = append(group, Part{ID: PartMemoryUsage, Text: usage, Source: SourceMemory, Trust: &agentsession.Trust{}})
 	}
 
-	sizes := omittedSizes(ctx, s.memStore, man.Omitted)
+	sizes := omittedSizes(ctx, s.memStore, man.Omitted, s.memRender)
 	omitted = make([]Omission, 0, len(man.Omitted))
 	for _, e := range man.Omitted {
+		if e.Reason == agentmemory.OmitIndex {
+			// An index entry is in the block, as its index entry part,
+			// and recorded as that part (agentmemory RFC 0001 §8.1).
+			continue
+		}
 		reason := e.Reason
 		if reason == "" {
 			reason = agentmemory.OmitBudget
@@ -370,19 +376,24 @@ func memoryPart(ctx context.Context, s *settings, limit int64) (group []Part, ma
 
 // omittedSizes is the size of each omitted entry's part by its part ID,
 // as agentsession means an omitted part's size: the bytes the part would
-// have added, its text as [agentmemory.EntryPart] renders it and its
-// separator, which is more than the manifest's Bytes, the content's
-// size (agentmemory RFC 0001 §8.1). Each scope that left an entry out
+// have added, its text as [agentmemory.EntryPartFor] renders it under
+// the render's options, an index scope's entry as its index entry part,
+// and its separator, which is not the manifest's Bytes, the content's
+// size (agentmemory RFC 0001 §8.1). An index entry the block holds,
+// [agentmemory.OmitIndex], is a part and not sized here. Each scope that left an entry out
 // is listed once. An entry the listing does not hold as the manifest
 // hashed it, changed or forgotten since the render, or a scope that
 // cannot be listed, is missing from the map, and the caller falls back
 // on the content's size.
-func omittedSizes(ctx context.Context, store agentmemory.Store, omitted []agentmemory.ManifestEntry) map[string]int64 {
+func omittedSizes(ctx context.Context, store agentmemory.Store, omitted []agentmemory.ManifestEntry, render []agentmemory.RenderOption) map[string]int64 {
 	if len(omitted) == 0 {
 		return nil
 	}
 	want := map[agentmemory.Scope]map[string]string{}
 	for _, e := range omitted {
+		if e.Reason == agentmemory.OmitIndex {
+			continue
+		}
 		if want[e.Scope] == nil {
 			want[e.Scope] = map[string]string{}
 		}
@@ -397,7 +408,7 @@ func omittedSizes(ctx context.Context, store agentmemory.Store, omitted []agentm
 		}
 		for _, e := range entries {
 			if h, ok := names[e.Name]; ok && h == e.Hash {
-				sizes[agentmemory.PartID(scope, e.Name)] = int64(len(agentmemory.EntryPart(e, bound).Text) + len(Separator))
+				sizes[agentmemory.PartID(scope, e.Name)] = int64(len(agentmemory.EntryPartFor(e, bound, render...).Text) + len(Separator))
 			}
 		}
 	}

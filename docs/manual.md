@@ -89,7 +89,7 @@ block, manifest, _ := agentmemory.Render(ctx, store, scopes)
 cfg.Instructions = strings.Join([]string{
 	prompt,
 	cat.Prompt() + "\n\n" + cat.Usage(),
-	block + "\n\n" + agentmemory.Usage(),
+	block + "\n\n" + agentmemory.Usage(memToolOpts...), // the tools' options, below
 	agentsmd.Render(chain.Files),
 }, "\n\n")
 ```
@@ -128,7 +128,7 @@ the request carried and what its hash covers.
 The kit holds the memory block as parts, `agentmemory.RenderParts`, one
 part per piece, each with the piece's trust as
 `&agentsession.Trust{Reads: labels}` (the labels as strings), and
-`agentmemory.Usage()`, with an empty trust, as `memory-usage`
+`agentmemory.Usage(memToolOpts...)`, with an empty trust, as `memory-usage`
 (`agentkit.PartMemoryUsage`) after them, an ID outside the `memory`,
 `memory/…` and `memory:…` space agentmemory reserves to its renderer.
 `agentmemory.Render` is `RenderParts` joined with the same separator, so
@@ -139,7 +139,14 @@ and the summary. The scopes rendered are `WithMemory`'s and then any
 scopes are never rendered: they join the writable scopes
 `agentmemory.Tools` is built over, so `memory_search` finds them and
 the writers reach them, and the usage paragraph ends with a sentence
-naming them as an archive the block never shows.
+naming them as an archive the block never shows. A scope
+`WithMemoryRender(agentmemory.WithScopeIndex(scope))` renders as an
+index holds its entries as index entry parts: the manifest lists them
+under `Omitted` with `agentmemory.OmitIndex`, and they are parts, so
+`Kit.Omitted` leaves them out. Every other omitted entry is sized by
+`len(agentmemory.EntryPartFor(e, bound, renderOpts...).Text) +
+len(agentkit.Separator)`, the part it would have added, an index entry
+part in an index scope.
 
 `cwd` and `opts` are `WithAgentsMD`'s, and `opts` is passed to
 `agentsmd.Chain` verbatim. A product whose project is not on the host's
@@ -162,7 +169,7 @@ is.
 
 `cat.Usage()` is appended only when `cat.Tool()` is offered, since it
 tells the model to reach the listed skills through that tool.
-`WithoutSkillTool` drops both. `agentmemory.Usage()` is always appended
+`WithoutSkillTool` drops both. `agentmemory.Usage(memToolOpts...)` is always appended
 to a memory block that is sent, since `WithMemory` offers
 `agentmemory.Tools`; a block the budget drops takes it along, and the
 writes with it: the request that block was dropped from is not offered
@@ -242,57 +249,67 @@ tools = append(tools, agenttool.Follow(func() agenttool.Tool {
 	return currentTool() // currentCat().Tool(skillToolOpts...), kept beside the catalogue, under a lock
 }))
 
-// memory_save is based on the render its call was composed from:
-// saveBase[call], kept by keepSaveBase when the call was decided, then
-// rendered[run], which the BeforeModelCall hook keeps, then the manifest
-// in force on the run's session's path at the call. A call in a run
-// that finds none of them is refused; one outside any run takes the last.
-based := func(m func() agentmemory.Manifest) []agenttool.Tool {
-	return agentmemory.Tools(store, writable,
-		agentmemory.WithRendered(m),         // the block the model read
-		agentmemory.WithReadScopes(read...), // WithMemoryReadScopes
-	)
+// The memory tools are one tool set, so agentmemory's record of a
+// session's own writes sees all of them. Each write is run against the
+// render its call was composed from: saveBase[call], kept by
+// keepSaveBase when the call was decided, then rendered[run], which the
+// BeforeModelCall hook keeps, then the manifest in force on the run's
+// session's path at the call. A save or a forget in a run that finds
+// none of them is refused; a patch or an insert, and a call outside any
+// run, take the last. WithRendered takes no context, so the writes run
+// one at a time with the call's render in writing.
+memToolOpts := []agentmemory.ToolOption{
+	agentmemory.WithReadScopes(read...),                 // WithMemoryReadScopes
+	agentmemory.WithRead(),                              // memory_read, offered whether the block is sent or dropped
+	agentmemory.WithIndexScopesOf(renderOpts...),        // WithMemoryRender's index scopes
+	// then WithMemoryTools' options
 }
-memTools := based(func() agentmemory.Manifest { return last })
+memTools := agentmemory.Tools(store, writable, append([]agentmemory.ToolOption{
+	agentmemory.WithRendered(func() agentmemory.Manifest { // the block the model read
+		if writing != nil {
+			return *writing
+		}
+		return last
+	}),
+}, memToolOpts...)...)
 for i, t := range memTools {
-	if t.Name() == agentmemory.SaveTool {
-		memTools[i] = agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
-			key := sessionID(ctx) + "\x00" + call.ID // a call ID names a call in one conversation
-			run := agentturn.RunIDFromContext(ctx)
-			m, ok := saveBase[key]
-			if ok {
-				delete(saveBase, key)
-			} else if r, found := rendered[run]; found {
-				m, ok = r.man, true
-			}
-			if !ok {
-				m, ok = manifestAtCall(ctx, call.ID) // below
-			}
-			if !ok && run != "" {
-				return agenttool.Result{}, errSaveBase // "... search for the entry with memory_search and save again"
-			}
-			if !ok {
-				return t.Execute(ctx, call) // based on last
-			}
-			for _, own := range based(func() agentmemory.Manifest { return m }) {
-				if own.Name() == agentmemory.SaveTool {
-					return own.Execute(ctx, call)
-				}
-			}
-			return t.Execute(ctx, call)
-		})
+	if !slices.Contains(agentmemory.WriteTools(), t.Name()) {
+		continue
 	}
-	// The writes are refused in a run whose last render the budget
-	// dropped: the request did not offer them, and the model was shown no
-	// block to write over.
-	if t := memTools[i]; t.Name() == agentmemory.SaveTool || t.Name() == agentmemory.PatchTool || t.Name() == agentmemory.ForgetTool {
-		memTools[i] = agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
-			if r, ok := rendered[agentturn.RunIDFromContext(ctx)]; ok && r.dropped {
-				return agenttool.Result{}, errMemoryDropped // "... memory_search still reads it"
+	memTools[i] = agenttool.Wrap(t, func(ctx context.Context, call agenttool.Call) (agenttool.Result, error) {
+		key := sessionID(ctx) + "\x00" + call.ID // a call ID names a call in one conversation
+		run := agentturn.RunIDFromContext(ctx)
+		r, ok := saveBase[key]
+		if ok {
+			delete(saveBase, key)
+		} else if run != "" {
+			r, ok = rendered[run]
+		} else {
+			r, ok = render{man: last, dropped: lastDropped}, true
+		}
+		if !ok {
+			if m, found := manifestAtCall(ctx, call.ID); found { // below
+				r, ok = render{man: m, dropped: m.Dropped()}, true
 			}
-			return t.Execute(ctx, call)
-		})
-	}
+		}
+		switch {
+		case ok && r.dropped:
+			// The request did not offer the write, and the model was
+			// shown no block to write over.
+			return agenttool.Result{}, errMemoryDropped // agentmemory.ErrBlockDropped
+		case !ok && t.Name() == agentmemory.SaveTool:
+			return agenttool.Result{}, errSaveBase // "... read the entry with memory_read and save again"
+		case !ok && t.Name() == agentmemory.ForgetTool:
+			return agenttool.Result{}, errForgetBase // "... read the entry with memory_read, and forget it again ..."
+		case !ok:
+			r.man = last
+		}
+		writeMu.Lock() // one write at a time, under a lock of its own
+		defer writeMu.Unlock()
+		writing = &r.man
+		defer func() { writing = nil }()
+		return t.Execute(ctx, call)
+	})
 }
 tools = append(tools, memTools...)
 // WithSessionSearch: conversation_search over the run's recorder's
