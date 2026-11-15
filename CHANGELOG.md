@@ -76,6 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   agentmemory's `Store.Forget` takes `PutOption`s: a product's own
   `Store` must add the parameter.
 
+## v0.0.18 - 2026-11-08
 
 ### Added
 
