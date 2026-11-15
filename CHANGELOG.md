@@ -5,6 +5,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- `Omission.Kept`: for an AGENTS.md file cut short under
+  `agentsmd.Options.Truncate`, reason `truncated`, the bytes of the file
+  kept ahead of the marker, agentsmd's `Omitted.Kept`, so `Kit.Omitted`
+  reports them and a product need not parse the marker; `Kept` plus
+  `Size` is the file's size (#140).
+
 ### Changed
 
 - **Breaking**: `WithMemory` offers `memory_read` beside `memory_search`

@@ -96,7 +96,8 @@ func TestABindingShareKeepsTheLongestPrefixThatRendersWithinIt(t *testing.T) {
 // Under Truncate, a share that binds cuts the first file over it at a
 // line, against the rendered size, and the part is what agentsmd.Chain
 // gives by hand with the share as RenderedBudget: the manual path. The
-// cut file is reported once, truncated, with the bytes cut off.
+// cut file is reported once, truncated, with the bytes cut off and the
+// bytes kept.
 func TestABindingShareCutsAFileUnderTruncate(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "AGENTS.md"), lines("root", 4))
@@ -146,6 +147,15 @@ func TestABindingShareCutsAFileUnderTruncate(t *testing.T) {
 	}
 	if after.What != near || after.Reason != "over budget" || after.Size != 5 {
 		t.Errorf("after = %+v, want %s over budget, 5 bytes", after, near)
+	}
+	// The bytes the cut file kept, agentsmd's Omitted.Kept, so a product
+	// learns them without parsing the marker: Kept plus Size is the
+	// file's size. A file left out whole kept nothing. (#140)
+	if cut.Kept != int64(kept) || cut.Kept+cut.Size != int64(len(lines("sub", 200))) {
+		t.Errorf("cut kept %d bytes, want %d", cut.Kept, kept)
+	}
+	if after.Kept != 0 {
+		t.Errorf("after kept %d bytes, want 0", after.Kept)
 	}
 }
 

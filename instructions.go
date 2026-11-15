@@ -97,6 +97,11 @@ type Omission struct {
 	// layer does not say. For an AGENTS.md file cut short, reason
 	// "truncated", it is the bytes cut off it.
 	Size int64
+	// Kept is, for an AGENTS.md file cut short, reason "truncated", the
+	// bytes of the file kept ahead of the marker, agentsmd's
+	// [agentsmd.Omitted.Kept]: Kept plus Size is the file's size. It is
+	// zero for every other omission.
+	Kept int64
 	// By names what took its place, for an omission that is a
 	// shadowing rather than a bound.
 	By string
@@ -661,6 +666,7 @@ func agentsMDOmissions(om []agentsmd.Omitted) []Omission {
 			What:   o.Path,
 			Reason: o.Reason.String(),
 			Size:   o.Size,
+			Kept:   o.Kept,
 			By:     o.By,
 		})
 	}
