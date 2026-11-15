@@ -10,6 +10,7 @@ import (
 
 	"github.com/ChristopherDavenport/agentkit"
 	"github.com/ChristopherDavenport/agentmemory"
+	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentskill"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
@@ -193,5 +194,50 @@ func TestASkillFilterHidesTheSkillsFileFromTheClaim(t *testing.T) {
 	}
 	if got := claim(t.Context()); !strings.Contains(got, "secret-recipe/") {
 		t.Errorf("the person's claim does not name the skill's file: %s", got)
+	}
+}
+
+// A product that rewrites the instructions it starts a conversation's
+// runs with, as a server does for a caller from Kit.Parts less the
+// memory block, keeps its rewrite, and the catalogue in it is still the
+// filtered one: a kit with no memory block to render does not send the
+// rewrite past the filter. (#129)
+func TestASkillFilterReachesARewrittenInstructions(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "skills")
+	skillDir(t, root, "digging", "how to dig", "dig with care")
+	skillDir(t, root, "secret-recipe", "PERSONS-OWN-NOTES", "the person's own")
+	model := &byPrompt{}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(model, "m"),
+		agentkit.WithInstructions("Be brief."),
+		agentkit.WithSkills(root),
+		agentkit.WithSkillFilter(func(ctx context.Context, s agentskill.Skill) bool {
+			return ctx.Value(callerKey{}) == nil || s.Name != "secret-recipe"
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	cfg := kit.Config()
+	cfg.Instructions = agentsession.JoinInstructions(kit.Parts()) + agentkit.Separator + "You answer a caller."
+	ctx := context.WithValue(t.Context(), callerKey{}, true)
+	if _, err := agentturn.New(cfg).Prompt(ctx, openresponses.UserText("from a caller")); err != nil {
+		t.Fatal(err)
+	}
+	reqs := model.requestsFor("from a caller")
+	if len(reqs) == 0 {
+		t.Fatal("no request")
+	}
+	got := reqs[0].Instructions
+	for _, hidden := range []string{"secret-recipe", "PERSONS-OWN-NOTES"} {
+		if strings.Contains(got, hidden) {
+			t.Errorf("the rewritten request carries %q:\n%s", hidden, got)
+		}
+	}
+	for _, kept := range []string{"You answer a caller.", "Be brief.", "<name>\ndigging\n</name>"} {
+		if !strings.Contains(got, kept) {
+			t.Errorf("the rewritten request lost %q:\n%s", kept, got)
+		}
 	}
 }

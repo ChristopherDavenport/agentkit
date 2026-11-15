@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/url"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -1642,6 +1643,27 @@ func (k *Kit) onFold(s *settings) func(context.Context, compact.Fold) error {
 	}
 }
 
+// catalogueBlock is a catalogue as [agentskill.Catalog.Prompt] renders
+// it. The names and descriptions inside are HTML-escaped, so the closing
+// tag is the block's own.
+var catalogueBlock = regexp.MustCompile(`(?s)<available_skills>\n.*?</available_skills>`)
+
+// filterRewritten is text, instructions a product rewrote, with each
+// skill catalogue in it replaced by the kit's catalogue as
+// [WithSkillFilter] leaves it on ctx: a product that built a
+// conversation's instructions from [Kit.Parts], which hold whichever
+// catalogue the last request carried, sends the one this conversation
+// may see.
+func (k *Kit) filterRewritten(ctx context.Context, s *settings, text string) string {
+	k.mu.Lock()
+	cat := k.catalog
+	k.mu.Unlock()
+	if cat == nil {
+		return text
+	}
+	return catalogueBlock.ReplaceAllLiteralString(text, filterCatalogue(ctx, cat, s.skillFilter).Prompt())
+}
+
 // chain1 returns nil for no hooks, the one hook for one, and the
 // package's own chain for more, so a config field a product did not
 // contest stays nil and the loop's own default applies.
@@ -1677,8 +1699,12 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 		// request whose instructions are neither a configuration's the kit
 		// returned nor the layers' join is one a product rewrote, through
 		// Agent.SetConfig or a hook of its own, and the guards see it
-		// whole, after this, as they would without the kit.
+		// whole, after this, as they would without the kit. Under
+		// WithSkillFilter the catalogue in it is still filtered.
 		if s.memStore == nil && !ours && req.Instructions != agentsession.JoinInstructions(base) {
+			if s.skillFilter != nil {
+				req.Instructions = k.filterRewritten(ctx, s, req.Instructions)
+			}
 			return nil
 		}
 

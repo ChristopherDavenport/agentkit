@@ -19,8 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   answers its facts claim (`agentskill.WithFileClaim`), on that
   catalogue's tool, so a name left out is refused as unknown, the refusal
   naming only the skills left, and claims the call alone, never the
-  hidden skill's file. One conversation's catalogue can
-  leave out skills another's lists, such as a person's learned skills
+  hidden skill's file. Instructions a product rewrote keep the rewrite,
+  with each catalogue in them replaced by the filtered one. One
+  conversation's catalogue can leave out skills another's lists, such as a person's learned skills
   from an A2A caller; the product decides who is a caller from the
   context. `Kit.Config()`'s instructions and `Kit.Catalog()` hold the
   whole catalogue (#129).

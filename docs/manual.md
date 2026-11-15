@@ -791,6 +791,10 @@ instructions := func(ctx context.Context, req *openresponses.Request) error {
 		layers = withGroup(layers, "skills", []agentsession.InstructionPart{{ID: "skills", Text: filtered.Prompt() + "\n\n" + filtered.Usage()}})
 		defer func() { layers = withGroup(layers, "skills", wholeSkills) }()
 	}
+	// A request whose instructions the product rewrote, with no memory
+	// block to render, is sent as the product wrote it, each
+	// <available_skills>…</available_skills> in it replaced by
+	// filtered.Prompt().
 	// Each WithPart part rendered again, in its place, {id, text, source,
 	// trust}; an empty text leaves it out of this request. The memory
 	// share is the budget less every part but memory's.
