@@ -88,12 +88,20 @@ func TestTheManualPathIsTheSamePath(t *testing.T) {
 	tools := append([]agenttool.Tool(nil), product...)
 	tools = append(tools, cat.Tool())
 	tools = append(tools, agentmemory.Tools(store, []agentmemory.Scope{"user"})...)
-	// memory_read from a set built WithRead, offered only in a request
-	// whose block was dropped, since no scope renders as an index.
+	// memory_read from a set built WithRead, offered only while the last
+	// render dropped the block, since no scope renders as an index; this
+	// one sent it.
 	for _, t := range agentmemory.Tools(store, []agentmemory.Scope{"user"}, agentmemory.WithRead()) {
 		if t.Name() == agentmemory.ReadTool {
 			tools = append(tools, t)
 		}
+	}
+	lastDropped := false
+	offer := func(context.Context) []agenttool.Tool {
+		if lastDropped {
+			return tools
+		}
+		return slices.DeleteFunc(slices.Clone(tools), func(t agenttool.Tool) bool { return t.Name() == agentmemory.ReadTool })
 	}
 
 	want := agentturn.Config{
@@ -105,7 +113,7 @@ func TestTheManualPathIsTheSamePath(t *testing.T) {
 			block + agentkit.Separator + agentmemory.Usage(),
 			agentsmd.Render(chain.Files),
 		}, agentkit.Separator),
-		ToolProvider: engine.ToolProvider(func(context.Context) []agenttool.Tool { return tools }),
+		ToolProvider: engine.ToolProvider(offer),
 	}
 
 	got := kit.Config()

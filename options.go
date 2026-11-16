@@ -137,7 +137,7 @@ type settings struct {
 	beforeTurn      []func(context.Context, agentturn.TurnStartInfo) (openresponses.Items, error)
 	beforeModelCall []func(context.Context, *openresponses.Request) error
 	beforeToolCall  []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
-	afterToolCall   func(context.Context, agentturn.ToolResultInfo) (*agentturn.ToolOverride, error)
+	afterToolCall   []func(context.Context, agentturn.ToolResultInfo) (*agentturn.ToolOverride, error)
 	elicitor        agenttool.Elicitor
 	elicitBy        string
 	questionEvents  bool
@@ -145,16 +145,6 @@ type settings struct {
 	shouldStop      []func(context.Context, agentturn.TurnInfo) (bool, error)
 	transform       func(context.Context, agentturn.Transcript) (agentturn.Transcript, error)
 	filter          func(agentturn.Transcript) agentturn.Transcript
-}
-
-// summaryReasoning is the reasoning the agent's requests carry, which a
-// fold's summary request is given too: [WithReasoning]'s, else the one
-// [WithRequest]'s base request names, as the loop resolves it.
-func (s *settings) summaryReasoning() openresponses.ReasoningConfig {
-	if !s.reasoning.IsZero() {
-		return s.reasoning
-	}
-	return s.request.Reasoning
 }
 
 // deferred is one tool source that cannot be built until the kit has
@@ -421,8 +411,14 @@ func WithoutSkillTool() Option {
 // the left-out skill's file. The memory block's share under
 // [WithInstructionBudget] is what the filtered catalogue leaves.
 // Instructions a product rewrote, such as a conversation's built from
-// [Kit.Parts], keep the rewrite, with each catalogue in them replaced by
-// the filtered one. [Kit.Config]'s instructions, which no run's context
+// [Kit.Parts], a [Kit.ChildConfig] child's included, keep the rewrite,
+// with each catalogue of the kit's in them replaced, whole, by the
+// filtered one: a catalogue listing any skill the kit has listed since
+// New, known by its location, so a rewrite made before a
+// [Kit.ReloadSkills] edited, removed or renamed a skill, or one a
+// product mixed its own entry into, is still filtered. A catalogue that
+// lists none of the kit's skills, another kit's or one the product
+// wrote, is left as written. [Kit.Config]'s instructions, which no run's context
 // has made, and [Kit.Catalog] hold the whole catalogue, and
 // [Kit.Omitted] does not list a skill keep left out. It has no effect
 // without skills. The last call holds.
@@ -638,9 +634,21 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 // refused when it runs, which may be in a Resume: the render kept for
 // the call says the block was dropped, and after a restart the manifest
 // recorded at the call does ([agentmemory.Manifest.Dropped]). memory_search
-// stays offered, and memory_read is, to read an entry by name, and
-// [Kit.Omitted] lists every entry the drop left out. The
-// block, and the writes, come back on the first render that fits.
+// stays offered, and [Kit.Omitted] lists every entry the drop left out.
+// memory_read, to read an entry by name, is offered from the next
+// request on, while the last render dropped the block: the tools are
+// asked for before the request is rendered, and the configuration the
+// recorder writes at a run's start must be the first request's, so the
+// request that first drops the block offers memory_search alone. The
+// block, and the writes, come back on the first render that fits, and
+// memory_read leaves that request. Each conversation's last render
+// decides its own offer, by [Kit.GrantScope]: an A2A caller's render on
+// the same kit does not take memory_read from the person's requests. A
+// session [WithResumedSession] resumes whose last recorded render
+// dropped the block is offered memory_read from its first request, so
+// a memory_read held for approval before a restart runs on the Resume;
+// a conversation a front resumes under [ContextWithRecorder] takes
+// New's render's until its own first render.
 //
 // The block is recorded as one part per piece
 // [agentmemory.RenderParts] returns, the title, each scope's heading,
@@ -790,8 +798,9 @@ func WithMemoryRender(opts ...agentmemory.RenderOption) Option {
 // under [WithMemoryReadScopes] [agentmemory.WithReadScopes], and
 // [agentmemory.WithIndexScopesOf] of [WithMemoryRender]'s options, so
 // memory_read is offered in every request when a scope renders as an
-// index. Without one it is offered only in a request whose block the
-// budget dropped, beside memory_search; [agentmemory.WithRead] given
+// index. Without one it is offered only while the conversation's last
+// render dropped the block, beside memory_search, from the request after the
+// drop (see [WithMemory]); [agentmemory.WithRead] given
 // here offers it in every request, and the usage paragraph names it. A
 // read scope given here that [WithMemory] also names is an error from
 // [New]; name it in [WithMemoryReadScopes] instead.
@@ -1397,9 +1406,18 @@ func WithRecorder(rec *session.Recorder) Option {
 }
 
 // WithCompaction folds the transcript with the model the kit was given
-// when it grows past budget tokens. When a session is recorded, the
-// fold is recorded with it. Summary requests name the agent's model,
-// [compact.WithModel] ahead of opts.
+// when it grows past budget tokens. A budget of 0 or less is no budget:
+// nothing folds for the transcript's size, and only a fold asked for,
+// by [Control.Compact] or by the loop's retry after a context-length
+// refusal, is made (agentturn v0.0.41). [Kit.SetCompactionBudget]
+// changes the budget while the conversation goes on. When a session is
+// recorded, the fold is recorded with it, the budget it was made under
+// and the model it asked among its members. Each summary request names
+// the model the request being folded for names, and is asked under that
+// request's reasoning, [compact.WithModelOfRequest] ahead of opts, so a
+// model the host switches mid-session, by [agentturn.Agent.SetConfig],
+// writes the next summary; the summary is still sent to the model the
+// kit was given, which names models as the agent's requests do.
 //
 // The kit records the fold through a compact.WithOnFold of its own,
 // ahead of opts, whether or not there is a session, since the recorder
@@ -1408,16 +1426,15 @@ func WithRecorder(rec *session.Recorder) Option {
 // after the fold is recorded. [WithFoldObserver] is the kit's own way
 // to hear of a fold, with or without a session.
 //
-// The summary request is sent under the agent's reasoning, the
-// [WithReasoning] or [WithRequest] one, through a [compact.WithRequest]
-// of the kit's ahead of opts: a thinking model left at its server's
-// default reasons through the summary's cap and answers no text, which
-// fails every fold. So for an agent at effort low or above the summary
-// is asked at that effort, and a thinking model spends part of the
-// summary's cap, half the budget, reasoning before it writes: the fold
-// succeeds, later and thinner, and nothing reports it. A product whose
-// agent thinks passes its own, which replaces the kit's since
-// compact.WithRequest is one function:
+// The summary request is sent under the reasoning of the request being
+// folded for: a thinking model left at its server's default reasons
+// through the summary's cap and answers no text, which fails every
+// fold. So for an agent at effort low or above the summary is asked at
+// that effort, and a thinking model spends part of the summary's cap,
+// half the budget, reasoning before it writes: the fold succeeds, later
+// and thinner, and nothing reports it. A product whose agent thinks
+// passes a [compact.WithRequest], which edits the summary request after
+// the reasoning is taken:
 //
 //	agentkit.WithCompaction(budget, compact.WithRequest(func(r *openresponses.Request) {
 //		r.Reasoning = openresponses.ReasoningConfig{Effort: openresponses.ReasoningEffortNone}
@@ -1426,11 +1443,14 @@ func WithRecorder(rec *session.Recorder) Option {
 // or the lowest effort its provider accepts. The kit does not pick a
 // lower effort itself because it does not know that floor: several
 // reasoning models refuse none, and a fold that succeeds thinner today
-// would then fail every time. Under [WithCompactionModel] the kit
-// passes no reasoning at all, since the product chose that model
+// would then fail every time. A [compact.WithModel] in opts pins the
+// summary's model and takes no reasoning from the request; a
+// compact.WithRequest in opts sets it there. Under [WithCompactionModel]
+// the kit names the agent's model as it was at New, [compact.WithModel],
+// and passes no reasoning at all, since the product chose that model
 // knowing it and a configuration meant for the agent's model may be
-// refused by, or wasted on, another; a compact.WithRequest in opts sets
-// it there too.
+// refused by, or wasted on, another; a compact.WithModel and a
+// compact.WithRequest in opts set them there.
 //
 // With a session [New] resumed, the last fold that failed on its path,
 // [session.CompactOptions], is passed after opts, so a restart does not
@@ -1459,9 +1479,12 @@ func WithFoldObserver(fn func(context.Context, compact.Fold)) Option {
 }
 
 // WithCompactionModel folds with a model other than the agent's, which
-// is how a cheap model summarises for an expensive one. The summary
-// request carries no reasoning unless a compact.WithRequest in
-// [WithCompaction]'s options sets one; see there.
+// is how a cheap model summarises for an expensive one. It stays the
+// summary's writer whatever model the agent is switched to. The summary
+// request names the agent's model as it was at [New] unless a
+// compact.WithModel in [WithCompaction]'s options names another, and
+// carries no reasoning unless a compact.WithRequest there sets one;
+// see there.
 func WithCompactionModel(m openresponses.Streamer) Option {
 	return func(s *settings) { s.compactSet, s.compactModel = true, m }
 }
@@ -1469,9 +1492,11 @@ func WithCompactionModel(m openresponses.Streamer) Option {
 // WithCompactor folds through a compactor the product built, a
 // provider's compaction endpoint, when the transcript grows past budget
 // tokens. It is [WithCompaction] with the fold made elsewhere, and
-// takes the same budget and the same default: every request is sent
-// under the agent's model name, [compact.WithModel] ahead of opts, so a
-// compact.WithModel in opts still wins. The fold is recorded, and
+// takes the same budget, where 0 is again no budget,
+// [Kit.SetCompactionBudget] included, and the same default: every
+// request names the model of the request being folded for,
+// [compact.WithModelOfRequest] ahead of opts, so a compact.WithModel in
+// opts still wins. The fold is recorded, and
 // [WithFoldObserver] told, as under WithCompaction, and a
 // compact.WithOnFold in opts is called after the recording as there.
 //
@@ -1518,11 +1543,14 @@ func WithBeforeToolCall(fn func(context.Context, agentturn.ToolCallInfo) (*agent
 	return func(s *settings) { s.beforeToolCall = append(s.beforeToolCall, fn) }
 }
 
-// WithAfterToolCall sets the hook that may replace a tool's result. The
-// kit contests nothing here, so it is the product's field alone and
-// setting it twice keeps the second.
+// WithAfterToolCall adds a hook that may replace a tool's result.
+// Several are joined with [agentturn.ChainAfterToolCall], in the order
+// given: each sees the result as the hooks before it left it, a hook
+// returning no override passes the result on unchanged, and the first
+// error stops the chain. A nil fn is passed over, so it does not clear
+// an earlier hook. The kit adds no hook of its own here.
 func WithAfterToolCall(fn func(context.Context, agentturn.ToolResultInfo) (*agentturn.ToolOverride, error)) Option {
-	return func(s *settings) { s.afterToolCall = fn }
+	return func(s *settings) { s.afterToolCall = append(s.afterToolCall, fn) }
 }
 
 // WithToolElicitor sets the elicitor a tool's question to the user

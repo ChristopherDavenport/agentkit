@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -18,14 +19,22 @@ import (
 // next request, whatever its budget, with instructions for that fold
 // alone: a product's /compact. The fold is reported and recorded as an
 // automatic one is. Without WithCompaction there is no transform to
-// ask. (agentturn RFC 0001 The request, step 2; #110)
+// ask. A budget of 0 is no budget, since agentturn v0.0.41: nothing
+// folds for the transcript's size and the fold asked for is made all
+// the same. (agentturn RFC 0001 The request, step 2; #110)
 func TestControlCompactFoldsTheNextRequest(t *testing.T) {
+	for _, budget := range []int{1_000_000, 0} {
+		t.Run(fmt.Sprint(budget), func(t *testing.T) { controlCompactFolds(t, budget) })
+	}
+}
+
+func controlCompactFolds(t *testing.T, budget int) {
 	const keep = "keep the failing test names"
 	model := &scriptModel{}
 	var folds []compact.Fold
 	kit, err := agentkit.New(t.Context(),
 		agentkit.WithModel(model, "m"),
-		agentkit.WithCompaction(1_000_000, compact.WithKeepLast(1), compact.WithMinFold(0)),
+		agentkit.WithCompaction(budget, compact.WithKeepLast(1), compact.WithMinFold(0)),
 		agentkit.WithFoldObserver(func(_ context.Context, f compact.Fold) { folds = append(folds, f) }),
 		agentkit.WithSession(agentsession.NewMemoryStore(), agentsession.Header{}),
 	)

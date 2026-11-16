@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"os/exec"
 	"regexp"
@@ -183,8 +184,14 @@ type Kit struct {
 	// the configuration's own instructions, as the guards left New's
 	// render, which never changes. They are the same slice until a
 	// guard runs or memory re-renders.
-	mu        sync.Mutex
-	catalog   *agentskill.Catalog
+	mu      sync.Mutex
+	catalog *agentskill.Catalog
+	// listed is every skill the kit's catalogue has listed since New, by
+	// [listedKey], which is how [Kit.filterRewritten] tells the kit's
+	// catalogue in a product's rewrite from another: a skill edited,
+	// removed or renamed by a reload since the rewrite was made is
+	// still the kit's. It grows only with the kit's own skills.
+	listed    map[string]bool
 	skillTool agenttool.Tool
 	base      []Part
 	parts     []Part
@@ -239,7 +246,14 @@ type Kit struct {
 	memOmitted   []Omission
 	// memDropped is true when the last render's block was dropped by the
 	// budget, which withholds the memory writes; see memoryPart.
-	memDropped bool
+	// firstDropped is New's render's, the configuration's own.
+	// convDropped is each conversation's last render's, keyed by
+	// [Kit.GrantScope], the last renderedRuns conversations to render,
+	// which is what [Kit.offerMemoryRead] reads: one conversation's
+	// render does not decide another's tools.
+	memDropped   bool
+	firstDropped bool
+	convDropped  bounded[bool]
 	// writing is the memory write whose render writeManifest hands to
 	// agentmemory next, and writeTurn, holding one token, is the turn to
 	// set it: a write takes the token and the read of its render gives
@@ -285,6 +299,10 @@ type Kit struct {
 	// guards, which a child's BeforeModelCall renders its parts with;
 	// set by buildHooks, before any run.
 	rerender func(ctx context.Context, base, own []Part, want map[string]bool) (rendered, error)
+	// refilter is Kit.filterRewritten over New's settings under
+	// WithSkillFilter, nil without one, which a child's BeforeModelCall
+	// runs over instructions a product rewrote; set by buildHooks.
+	refilter func(ctx context.Context, text string) string
 
 	// compact is the compaction transform the kit built, nil without
 	// one; Control.Compact asks it to fold.
@@ -607,7 +625,7 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 			return err
 		}
 		if cat != nil {
-			k.catalog = cat
+			k.setCatalog(cat)
 			parts[PartSkills] = single(part)
 			k.omitted = append(k.omitted, om...)
 			if s.skillGrants {
@@ -729,7 +747,7 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 			return err
 		}
 		parts[PartMemory] = group
-		k.manifest, k.memDropped = man, dropped
+		k.manifest, k.memDropped, k.firstDropped = man, dropped, dropped
 		k.memOmitted, k.firstOmitted = om, om
 	}
 
@@ -976,7 +994,26 @@ func (k *Kit) openSession(ctx context.Context, s *settings) error {
 			return fmt.Errorf("agentkit: reading the session's last failed fold: %w", err)
 		}
 	}
+	if s.memStore != nil && s.sessionResume && lastRenderDropped(sess.Path(sess.Leaf())) {
+		// The conversation's last render before the restart dropped the
+		// block, so its next request is offered memory_read as it would
+		// have been without the restart, and a memory_read call held for
+		// approval then still runs on the Resume ([Kit.offerMemoryRead]).
+		k.convDropped.put(rec.SessionID(), true)
+	}
 	return nil
+}
+
+// lastRenderDropped reports whether the manifest in force at path's end,
+// folded from its records, is a render the budget dropped.
+func lastRenderDropped(path []agentsession.Entry) bool {
+	var f manifestFold
+	for _, e := range path {
+		if c, ok := e.(*agentsession.CustomEntry); ok && c.NS == agentmemory.ManifestNS {
+			f.apply(c)
+		}
+	}
+	return f.at != "" && f.valid && droppedRender(f.fold.Manifest())
 }
 
 // build fills the rest of the config: the tool set, then the hooks.
@@ -994,7 +1031,7 @@ func (k *Kit) build(ctx context.Context, s *settings) error {
 	k.cfg.Retry = s.retry
 	k.cfg.ToolExecution, k.cfg.MaxParallelTools = s.toolExec, s.maxParallel
 	k.cfg.Filter = s.filter
-	k.cfg.AfterToolCall = s.afterToolCall
+	k.cfg.AfterToolCall = chain1(s.afterToolCall, agentturn.ChainAfterToolCall)
 
 	// ToolRecorder: the session's, when there is one, so a record a
 	// tool writes with agenttool.WriteRecord while it runs lands in the
@@ -1152,7 +1189,7 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 	provider := func(ctx context.Context) []agenttool.Tool {
 		tools := union(ctx)
 		k.remember(ctx, tools)
-		return tools
+		return k.offerMemoryRead(ctx, tools)
 	}
 	if k.engine != nil {
 		// The engine's filter reads the grant scope of the context it is
@@ -1169,6 +1206,42 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 	return nil
 }
 
+// offerMemoryRead returns tools, the provider's offer to the
+// conversation on ctx, without the memory_read of [Kit.memoryTools]'s
+// second set unless that conversation's last render dropped the block:
+// the configuration the recorder writes at a run's start, which runs no
+// BeforeModelCall, is then the first request's whenever that request's
+// render agrees with the conversation's last one. A request whose own
+// render first drops the block offers memory_search alone, and the next
+// one memory_read; [Kit.instructions] still takes it out of a request
+// whose render shows the block again. A conversation the kit has no
+// render for, a new one or one past the last renderedRuns to render,
+// takes New's render's, which its first configuration entry is written
+// from. The kit's union keeps the tool, so [Kit.LookupTool] finds it
+// either way.
+func (k *Kit) offerMemoryRead(ctx context.Context, tools []agenttool.Tool) []agenttool.Tool {
+	if !k.readOnDrop {
+		return tools
+	}
+	conv := k.GrantScope(ctx)
+	k.mu.Lock()
+	dropped, ok := k.convDropped.get(conv)
+	if !ok {
+		dropped = k.firstDropped
+	}
+	k.mu.Unlock()
+	return offerReadIf(tools, dropped)
+}
+
+// offerReadIf returns tools without memory_read unless dropped.
+func offerReadIf(tools []agenttool.Tool, dropped bool) []agenttool.Tool {
+	isRead := func(t agenttool.Tool) bool { return t.Name() == agentmemory.ReadTool }
+	if dropped || !slices.ContainsFunc(tools, isRead) {
+		return tools
+	}
+	return slices.DeleteFunc(slices.Clone(tools), isRead)
+}
+
 // memoryTools builds agentmemory's tools over the writable scopes, one
 // tool set, with [agentmemory.WithRendered] returning the render the
 // calling write's run was shown, [Kit.writeAsRendered], and the kit's
@@ -1176,10 +1249,11 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 // That set offers memory_read when a scope renders as an index, or the
 // product asked for it, and then in every request, as agentmemory RFC
 // 0001 §6.11 requires. Otherwise memory_read comes from a second set
-// built with [agentmemory.WithRead], and is offered only in a request
-// whose block the budget dropped, [withoutMemoryRead], beside
-// memory_search: that request has no usage paragraph and no writer, so
-// nothing in it names a tool it does not offer.
+// built with [agentmemory.WithRead], and is offered only while the
+// conversation's last render dropped the block, [Kit.offerMemoryRead], and taken
+// out of a request whose own render shows it, [withoutMemoryRead],
+// beside memory_search: that request has no usage paragraph and no
+// writer, so nothing in it names a tool it does not offer.
 // agentmemory.Tools panics on scopes it cannot build over, and New is
 // the call documented to fail, so the panic is returned as an error.
 func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
@@ -1233,6 +1307,8 @@ type pendingWrite struct {
 // memory tools: the render of the write [Kit.writeAsRendered] is
 // running, and outside one, the last render. agentmemory reads it once
 // at the start of each write, before the write touches the store, and
+// once per call whether the write succeeds or is refused, the rule
+// agentmemory v0.0.14 states for WithRendered (agentmemory#58), and
 // takes no context, so a write holds the turn to put its render here
 // from before its call until this read, which gives the turn back
 // ([Kit.endWrite]). The store write after it runs beside other writes.
@@ -1520,6 +1596,9 @@ func (k *Kit) buildHooks(s *settings) {
 	k.rerender = func(ctx context.Context, base, own []Part, want map[string]bool) (rendered, error) {
 		return k.render(ctx, s, guards, base, own, want)
 	}
+	if s.skillFilter != nil {
+		k.refilter = func(ctx context.Context, text string) string { return k.filterRewritten(ctx, s, text) }
+	}
 
 	// BeforeModelCall: the instructions, memory re-rendered and each
 	// part guarded, then the guards over the whole request, then the
@@ -1611,25 +1690,27 @@ func (k *Kit) buildHooks(s *settings) {
 		transforms = append(transforms, s.transform)
 	}
 	if s.compactSet {
-		// The agent's model name is the default and the caller's options
-		// come after it, so a compact.WithModel the product passed still
-		// wins. A compactor needs it as much as a local summary: its
-		// request names the model, and one that names none is refused by
-		// a provider that requires it. compact.WithOnFold adds a callback,
-		// so the kit's goes first and a fold is recorded before a
-		// compact.WithOnFold of the product's hears of it.
-		opts := []compact.Option{compact.WithModel(s.modelName), compact.WithOnFold(k.onFold(s))}
-		// A summary the agent's model writes is asked under the agent's
-		// reasoning, as every other request to it is: a thinking model
-		// left at its server's default reasons through the summary's
-		// token cap and answers no text. Not under WithCompactionModel:
-		// the product chose that model knowing it, and a reasoning
-		// config meant for the agent's may be refused by, or wasted on,
-		// another. Nor under WithCompactor, whose compact.New ignores
-		// compact.WithRequest. compact.WithRequest is one field, so the
-		// product's replaces it.
-		if r := s.summaryReasoning(); !r.IsZero() && s.compactor == nil && s.compactModel == nil {
-			opts = append(opts, compact.WithRequest(func(req *openresponses.Request) { req.Reasoning = r }))
+		// The summary, or a compactor's request, names the model of the
+		// request being folded for, and a local summary is asked under
+		// that request's reasoning, compact.WithModelOfRequest: a model
+		// the host switched mid-session writes the next summary, under
+		// the reasoning the agent's requests now carry, since a thinking
+		// model left at its server's default reasons through the
+		// summary's token cap and answers no text. A compactor needs a
+		// model as much as a local summary: a request that names none is
+		// refused by a provider that requires it. A compact.WithModel of
+		// the product's wins over it, in either order, and pins the
+		// model, the reasoning not taken either. Under
+		// WithCompactionModel the agent's model name as the kit was
+		// built is named, as before, and no reasoning: the product chose
+		// that model knowing it, and a configuration meant for the
+		// agent's may be refused by, or wasted on, another.
+		// compact.WithOnFold adds a callback, so the kit's goes first and
+		// a fold is recorded before a compact.WithOnFold of the
+		// product's hears of it.
+		opts := []compact.Option{compact.WithModelOfRequest(), compact.WithOnFold(k.onFold(s))}
+		if s.compactModel != nil {
+			opts[0] = compact.WithModel(s.modelName)
 		}
 		// A resumed session's last failed fold, after the product's
 		// options, so a restart does not ask again for the summary that
@@ -1658,6 +1739,29 @@ func (k *Kit) compactNext(instructions string) error {
 		return ErrNoCompaction
 	}
 	k.compact.FoldNext(instructions)
+	return nil
+}
+
+// SetCompactionBudget changes the budget of the kit's compaction, the
+// tokens [WithCompaction] or [WithCompactor] was given, while the
+// conversation goes on: [compact.Transform.SetBudget] on the kit's
+// transform, from its next call. A fold in flight keeps the budget it
+// began with, and the transform keeps the fold it made and the failed
+// fold it backs off from. 0 or less is no budget: only a fold asked
+// for, [Control.Compact] or the loop's retry after a context-length
+// refusal, is made. A host that sizes the budget from the model's
+// context window calls it when it switches the agent's model; the kit
+// does not know a model's window. The kit writes no entry for the
+// change, which is the host's setting to record; each fold's record
+// carries the budget it was made under. The kit has one transform, so
+// the budget is every conversation's the kit serves, an A2A caller's
+// beside the person's. Without compaction it returns
+// [ErrNoCompaction].
+func (k *Kit) SetCompactionBudget(tokens int) error {
+	if k.compact == nil {
+		return ErrNoCompaction
+	}
+	k.compact.SetBudget(tokens)
 	return nil
 }
 
@@ -1695,23 +1799,86 @@ var (
 )
 
 // filterRewritten is text, instructions a product rewrote, with each
-// skill catalogue in it replaced by the kit's catalogue as
+// skill catalogue of the kit's in it replaced by the kit's catalogue as
 // [WithSkillFilter] leaves it on ctx: a product that built a
 // conversation's instructions from [Kit.Parts], which hold whichever
 // catalogue the last request carried, sends the one this conversation
-// may see.
+// may see. A catalogue is the kit's when any skill it lists is one the
+// kit has listed since New, by location, [Kit.kitsCatalogue], however
+// a reload has changed the catalogue since the rewrite was made; such a
+// block is replaced whole, a foreign entry mixed into it included, so
+// the swap fails closed. A block that lists none of the kit's skills,
+// another kit's or one the product wrote, is left as written.
 func (k *Kit) filterRewritten(ctx context.Context, s *settings, text string) string {
 	k.mu.Lock()
 	cat := k.catalog
+	ours := k.kitsCatalogue()
 	k.mu.Unlock()
 	if cat == nil {
 		return text
 	}
 	filtered := filterCatalogue(ctx, cat, s.skillFilter)
 	if len(filtered.Listed()) == 0 {
-		return catalogueWhole.ReplaceAllLiteralString(text, "")
+		return catalogueWhole.ReplaceAllStringFunc(text, func(m string) string {
+			if ours(catalogueBlock.FindString(m)) {
+				return ""
+			}
+			return m
+		})
 	}
-	return catalogueBlock.ReplaceAllLiteralString(text, filtered.Prompt())
+	prompt := filtered.Prompt()
+	return catalogueBlock.ReplaceAllStringFunc(text, func(m string) string {
+		if ours(m) {
+			return prompt
+		}
+		return m
+	})
+}
+
+// setCatalog puts cat in force and adds its skills to those the kit
+// has listed. The caller holds mu, or is New before any run.
+func (k *Kit) setCatalog(cat *agentskill.Catalog) {
+	k.catalog = cat
+	if k.listed == nil {
+		k.listed = map[string]bool{}
+	}
+	for _, sk := range cat.Listed() {
+		k.listed[listedKey(sk.Location, skillEscape(sk.ListedName()))] = true
+	}
+}
+
+// listedKey is how a catalogue entry is known as the kit's: its
+// location, which a reload leaves as it was for a skill it edits or
+// whose listed name it qualifies, or, for a skill with none, the name
+// it is listed under, escaped as the prompt writes it.
+func listedKey(location, escapedName string) string {
+	if location != "" {
+		return "location\x00" + location
+	}
+	return "name\x00" + escapedName
+}
+
+// skillEscape is agentskill's escape of a name in the prompt: Python's
+// html.escape, the apostrophe as &#x27;.
+var skillEscape = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#x27;").Replace
+
+// catalogueEntry is one skill of a catalogue as [agentskill.Catalog.Prompt]
+// renders it: its listed name, escaped, and its location, unescaped.
+var catalogueEntry = regexp.MustCompile(`(?s)<skill>\n<name>\n(.*?)\n</name>\n.*?<location>\n(.*?)\n</location>\n</skill>`)
+
+// kitsCatalogue reports of a block catalogueBlock matched whether any
+// skill it lists is one the kit has listed, [Kit.setCatalog]. The
+// caller holds mu; the function it returns reads a copy.
+func (k *Kit) kitsCatalogue() func(block string) bool {
+	listed := maps.Clone(k.listed)
+	return func(block string) bool {
+		for _, m := range catalogueEntry.FindAllStringSubmatch(block, -1) {
+			if listed[listedKey(m[2], m[1])] {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 // chain1 returns nil for no hooks, the one hook for one, and the
@@ -1762,6 +1929,10 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 		if err != nil {
 			return err
 		}
+		var conv string
+		if r.memory && k.readOnDrop {
+			conv = k.GrantScope(ctx)
+		}
 
 		k.mu.Lock()
 		k.base, k.parts = r.base, r.sent
@@ -1773,6 +1944,9 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 		}
 		if r.memory {
 			k.manifest, k.memOmitted, k.memDropped = r.man, r.memOm, r.dropped
+			if conv != "" {
+				k.convDropped.put(conv, r.dropped)
+			}
 			if id := agentturn.RunIDFromContext(ctx); id != "" {
 				k.rendered.put(id, memoryRender{man: r.man, dropped: r.dropped})
 			}
@@ -3280,6 +3454,8 @@ func (k *Kit) markHeld(out []ToolOrigin) []ToolOrigin {
 // Deferred set, since the model may load it, and tool_search, from the
 // source "WithToolSearch", after the rest while any is held. A provider's list is fetched each turn too and is listed as it
 // was at New, so a tool a [WithToolProvider] adds later is not here.
+// memory_read is listed whenever [WithMemory] builds it, though with no
+// index scope a request is offered it only while the block is dropped.
 // The filter, the product's wrapper and the kit's own run on every
 // listing, under context.Background, so a wrapper with side effects has
 // them here too. A tool the engine takes off the offer, by a bare deny
@@ -3596,7 +3772,8 @@ func (k *Kit) ReloadSkills(ctx context.Context) error {
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	k.catalog, k.skillTool = cat, tool
+	k.setCatalog(cat)
+	k.skillTool = tool
 	k.base = withGroup(k.base, PartSkills, single(part), k.order)
 	k.parts = withGroup(k.parts, PartSkills, sentPart, k.order)
 	first := withGroup(k.first, PartSkills, sentPart, k.order)

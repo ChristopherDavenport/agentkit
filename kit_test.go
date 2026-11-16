@@ -560,7 +560,10 @@ func (c *captureCompactor) Compact(_ context.Context, req openresponses.CompactR
 // WithCompactor folds under the budget it is given and sends the
 // agent's model name, as WithCompaction does: a product moving from a
 // local summary to a provider's endpoint kept its budget in its head and
-// lost it in the code, and every request named no model.
+// lost it in the code, and every request named no model. The name is the
+// one the request being folded for carries, which the loop puts on the
+// transform's context, so a switched agent's compaction names the new
+// model (#143).
 func TestACompactorFoldsUnderItsBudgetAndTheAgentsModel(t *testing.T) {
 	c := &captureCompactor{}
 	kit, err := agentkit.New(t.Context(),
@@ -573,7 +576,8 @@ func TestACompactorFoldsUnderItsBudgetAndTheAgentsModel(t *testing.T) {
 	defer kit.Close()
 
 	tr := agentturn.Transcript{openresponses.UserText("one"), openresponses.UserText("two"), openresponses.UserText("three")}
-	if _, err := kit.Config().Transform(t.Context(), tr); err != nil {
+	ctx := agentturn.ContextWithRequest(t.Context(), openresponses.Request{Model: "the-agents-model"})
+	if _, err := kit.Config().Transform(ctx, tr); err != nil {
 		t.Fatal(err)
 	}
 	c.mu.Lock()
@@ -1357,8 +1361,14 @@ func TestToolsNamesEachToolWithItsSource(t *testing.T) {
 	if _, ok := from["memory_forget"]; ok {
 		t.Error("a tool the filter dropped is listed")
 	}
-	if got, want := len(kit.Tools()), len(kit.Config().ResolveTools(t.Context())); got != want {
-		t.Errorf("Tools lists %d, the config offers %d", got, want)
+	// memory_read is listed, for a policy to name, though with no index
+	// scope the config offers it only once a render has dropped the
+	// block, which this one did not. (#144)
+	if from[agentmemory.ReadTool] != "WithMemory" {
+		t.Errorf("%s comes from %q, want WithMemory", agentmemory.ReadTool, from[agentmemory.ReadTool])
+	}
+	if got, want := len(kit.Tools()), len(kit.Config().ResolveTools(t.Context()))+1; got != want {
+		t.Errorf("Tools lists %d, want the config's offer and %s, %d", got, agentmemory.ReadTool, want)
 	}
 }
 

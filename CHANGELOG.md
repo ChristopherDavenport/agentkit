@@ -3,6 +3,100 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- `Kit.SetCompactionBudget(tokens)` changes the budget of the kit's
+  compaction while the conversation goes on, agentturn's
+  `compact.Transform.SetBudget`: from the next call, a fold in flight
+  keeping the budget it began with and the transform its fold memory, 0
+  no budget, `ErrNoCompaction` without compaction. A host that sizes the
+  budget from the model's context window calls it when it switches the
+  model. The kit writes no entry for the change, which is the host's
+  setting to record; each fold's recorded `fold` member carries the
+  budget and the model it was made under (agentturn v0.0.41). Part of
+  #143.
+
+### Changed
+
+- **Breaking**: a summary, or a `WithCompactor` compaction request, now
+  names the model of the request being folded for, and a local summary
+  is asked under that request's reasoning, `compact.WithModelOfRequest`
+  in place of `compact.WithModel` of the agent's model name at `New`
+  and the kit's `compact.WithRequest` of the agent's reasoning: an agent
+  switched to another model with `Agent.SetConfig` has the next summary
+  asked of the new one, where v0.0.19 kept asking the first. A
+  `compact.WithModel` in the product's options still wins, and now
+  takes no reasoning from the request, so a product that pins a
+  thinking model passes its reasoning with `compact.WithRequest`, as it
+  did under `WithCompactionModel`. Under `WithCompactionModel` the
+  summary names the agent's model as at `New`, as before. Closes #143.
+
+- **Breaking**: `WithAfterToolCall` adds a hook rather than replacing
+  the one before it: several are joined with agentturn's
+  `ChainAfterToolCall`, in the order given, each seeing the result as
+  the hooks before it left it, as `WithBeforeToolCall` appends. A
+  product that set it twice to replace the first now runs both, and
+  `WithAfterToolCall(nil)` no longer clears an earlier hook: a nil hook
+  is passed over. Closes #139.
+
+### Fixed
+
+- A session with `WithMemory` and no index scope no longer records
+  `tools_removed: ["memory_read"]` on its first request: the kit's
+  `ToolProvider` offers memory_read only while the conversation's last
+  render dropped the block (per `Kit.GrantScope`, the last 1024
+  conversations to render; one the kit has none for takes `New`'s
+  render's, and a session `WithResumedSession` resumes takes its last
+  recorded render's, so a memory_read held for approval before a
+  restart still runs), so the configuration the recorder writes at a
+  run's start is the first request's again (#138's invariant). A
+  request whose own render first drops the block offers memory_search
+  alone, and the next one memory_read; a render that shows the block
+  again still takes it out. `Kit.ChildConfig` applies the same rule to
+  a child whose tools hold memory_read, through a `ToolProvider` over
+  the child's tools. `Kit.Tools` still lists memory_read. The manual's
+  paragraph on a write's base described the save tool v0.0.19 replaced
+  and is rewritten. Closes #144.
+- Under `WithSkillFilter`, a `Kit.ChildConfig` child whose instructions
+  a product rewrote is sent the filtered catalogue: the composition
+  holds whichever catalogue the parent's last request carried, the
+  whole one before any, and v0.0.19 sent a rewrite it did not know
+  unfiltered. A rewrite's catalogue is swapped, whole, when any skill it
+  lists is one the kit has listed since `New`, known by its location,
+  so a rewrite made before a `ReloadSkills` edited, removed or renamed
+  a skill, or one a product mixed its own entry into, is still
+  filtered; a catalogue listing none of the kit's skills, another
+  kit's or one the product wrote, is left as written, where v0.0.19
+  replaced every `<available_skills>` block. `writeManifest`'s read-once rule is
+  agentmemory's, agentmemory#58. Closes #142.
+
+### Dependencies
+
+- **Breaking**: requires agentturn and agentturn/session v0.0.41, up
+  from v0.0.40, agentsession v0.0.40, up from v0.0.39, and
+  openresponses v0.0.21, up from v0.0.20, in the root and in
+  `examples/a2a` (front/a2a and tools/a2a v0.0.41 there). A budget of
+  0 given to `WithCompaction` or `WithCompactor` is now no budget:
+  nothing folds for the transcript's size, and only a fold asked for,
+  by `Control.Compact` or by the loop's retry after a context-length
+  refusal, is made, where v0.0.19 folded on every request; a negative
+  budget is 0. A final answer its provider ended `incomplete` with an
+  empty reason now ends the run `ReasonStopped` with
+  `StopMaxOutputTokens`, as one with no details does, and a
+  `WithChildAgent` child stopped so is reported to its parent as cut
+  short at its output limit.
+- Requires agentmemory v0.0.14, up from v0.0.13, in the root and in
+  `examples/a2a`. agentmemory now states the rule the kit's write turn
+  relies on: `WithRendered`'s function is called once per write, before
+  any store call, on success and refusal alike, which is where the kit
+  gives the turn back. Its record of each session's own writes holds
+  the 1024 sessions that wrote most recently, so a kit serving a session
+  per caller no longer keeps one per caller for the life of the
+  process; a session dropped from it is checked as a call without a
+  session.
+
 ## v0.0.19 - 2026-11-15
 
 ### Added

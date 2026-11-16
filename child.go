@@ -6,8 +6,10 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ChristopherDavenport/agentmemory"
 	"github.com/ChristopherDavenport/agentpolicy/guard"
 	"github.com/ChristopherDavenport/agentsession"
+	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
 	childagent "github.com/ChristopherDavenport/agentturn/tools/agent"
 	"github.com/ChristopherDavenport/openresponses"
@@ -83,6 +85,10 @@ type childComposition struct {
 	firstOmits  [][]Omission
 	last        []Part
 	lastOmitted []Omission
+	// dropped is true when the composition's last render dropped the
+	// memory block, which is when the child is offered memory_read
+	// under the kit's rule; see [Kit.offerMemoryRead].
+	dropped bool
 }
 
 // childCompositions bounds the runtime compositions the kit
@@ -133,7 +139,11 @@ func (k *Kit) touchChild(key string) {
 // run writes, its own under [WithChildAgent]. It runs ahead of cfg's own
 // BeforeModelCall, and only over instructions the composition made: a
 // request whose instructions a per-call config or a hook rewrote is
-// left as it is. [Kit.PartsFor] gives the parts of the returned text,
+// left as it is. With [WithMemory] and no index scope, a child whose
+// tools hold memory_read, cfg's ToolProvider or a Tools list naming
+// it, is offered it under the parent's rule: only while the
+// composition's last render dropped the block, so the returned config
+// sets ToolProvider over cfg's tools. [Kit.PartsFor] gives the parts of the returned text,
 // which the recorder settles at the run's start, and of each request's
 // render, so a recorder whose parts function is the kit's records the
 // child's config entries as parts; under a recorder several kits share
@@ -220,6 +230,25 @@ func (k *Kit) ChildConfig(cfg agentturn.Config, ids ...string) (agentturn.Config
 		hook = agentturn.ChainBeforeModelCall(hook, cfg.BeforeModelCall)
 	}
 	cfg.BeforeModelCall = hook
+	if k.memory && (cfg.ToolProvider != nil || slices.ContainsFunc(cfg.Tools, func(t agenttool.Tool) bool { return t.Name() == agentmemory.ReadTool })) {
+		// The kit's rule for memory_read, [Kit.offerMemoryRead], on the
+		// child's tools: offered only while the composition's last
+		// render dropped the block, so the configuration the recorder
+		// writes at the child's run start is its first request's.
+		// readOnDrop is read at the call, since a WithChildAgent child
+		// is composed during New before the memory tools are built.
+		resolve := cfg.ResolveTools
+		cfg.ToolProvider = func(ctx context.Context) []agenttool.Tool {
+			tools := resolve(ctx)
+			if !k.readOnDrop {
+				return tools
+			}
+			k.mu.Lock()
+			dropped := c.dropped
+			k.mu.Unlock()
+			return offerReadIf(tools, dropped)
+		}
+	}
 	return cfg, nil
 }
 
@@ -233,6 +262,13 @@ func (k *Kit) childInstructions(c *childComposition) func(context.Context, *open
 		base := k.base
 		k.mu.Unlock()
 		if !ours || k.rerender == nil {
+			// Instructions a product rewrote keep the rewrite, with each
+			// catalogue of the kit's in it filtered as the parent's are:
+			// the composition holds whichever catalogue the parent's last
+			// request carried.
+			if !ours && k.refilter != nil {
+				req.Instructions = k.refilter(ctx, req.Instructions)
+			}
 			return nil
 		}
 		r, err := k.rerender(ctx, base, c.own, c.want)
@@ -244,6 +280,7 @@ func (k *Kit) childInstructions(c *childComposition) func(context.Context, *open
 		k.mu.Lock()
 		c.last = parts
 		c.lastOmitted = k.childOmitted(c.want, r.partOm, r.mcpOm, r.memOm)
+		c.dropped = r.memory && r.dropped
 		if r.memory {
 			if id := agentturn.RunIDFromContext(ctx); id != "" {
 				k.rendered.put(id, memoryRender{man: r.man, dropped: r.dropped})
