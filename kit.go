@@ -1265,8 +1265,9 @@ type pendingWrite struct {
 // writeManifest is the [agentmemory.WithRendered] function of the kit's
 // memory tools: the render of the write [Kit.writeAsRendered] is
 // running, and outside one, the last render. agentmemory reads it once
-// at the start of each write, before the write touches the store, a
-// rule its tools document and test since agentmemory#58, and
+// at the start of each write, before the write touches the store, and
+// once per call whether the write succeeds or is refused, the rule
+// agentmemory v0.0.14 states for WithRendered (agentmemory#58), and
 // takes no context, so a write holds the turn to put its render here
 // from before its call until this read, which gives the turn back
 // ([Kit.endWrite]). The store write after it runs beside other writes.

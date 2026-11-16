@@ -3,7 +3,7 @@ module github.com/ChristopherDavenport/agentkit
 go 1.25.0
 
 require (
-	github.com/ChristopherDavenport/agentmemory v0.0.13
+	github.com/ChristopherDavenport/agentmemory v0.0.14
 	github.com/ChristopherDavenport/agentpolicy v0.0.20
 	github.com/ChristopherDavenport/agentsession v0.0.40
 	github.com/ChristopherDavenport/agentskill v0.0.12

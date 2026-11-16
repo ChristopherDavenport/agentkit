@@ -78,6 +78,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `StopMaxOutputTokens`, as one with no details does, and a
   `WithChildAgent` child stopped so is reported to its parent as cut
   short at its output limit.
+- Requires agentmemory v0.0.14, up from v0.0.13, in the root and in
+  `examples/a2a`. agentmemory now states the rule the kit's write turn
+  relies on: `WithRendered`'s function is called once per write, before
+  any store call, on success and refusal alike, which is where the kit
+  gives the turn back. Its record of each session's own writes holds
+  the 1024 sessions that wrote most recently, so a kit serving a session
+  per caller no longer keeps one per caller for the life of the
+  process; a session dropped from it is checked as a call without a
+  session.
 
 ## v0.0.19 - 2026-11-15
 

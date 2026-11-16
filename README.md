@@ -371,7 +371,7 @@ a2a.
 | `agentsession` | v0.0.40 |
 | `agentsmd` | v0.0.6 |
 | `agentskill` | v0.0.12 |
-| `agentmemory` | v0.0.13 |
+| `agentmemory` | v0.0.14 |
 | `agentpolicy` | v0.0.20 |
 
 Every sibling is required at a released version with no `replace`, and

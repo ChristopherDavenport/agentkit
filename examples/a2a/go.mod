@@ -21,7 +21,7 @@ require (
 )
 
 require (
-	github.com/ChristopherDavenport/agentmemory v0.0.13 // indirect
+	github.com/ChristopherDavenport/agentmemory v0.0.14 // indirect
 	github.com/ChristopherDavenport/agentpolicy v0.0.20 // indirect
 	github.com/ChristopherDavenport/agentskill v0.0.12 // indirect
 	github.com/ChristopherDavenport/agentsmd v0.0.6 // indirect
