@@ -560,7 +560,10 @@ func (c *captureCompactor) Compact(_ context.Context, req openresponses.CompactR
 // WithCompactor folds under the budget it is given and sends the
 // agent's model name, as WithCompaction does: a product moving from a
 // local summary to a provider's endpoint kept its budget in its head and
-// lost it in the code, and every request named no model.
+// lost it in the code, and every request named no model. The name is the
+// one the request being folded for carries, which the loop puts on the
+// transform's context, so a switched agent's compaction names the new
+// model (#143).
 func TestACompactorFoldsUnderItsBudgetAndTheAgentsModel(t *testing.T) {
 	c := &captureCompactor{}
 	kit, err := agentkit.New(t.Context(),
@@ -573,7 +576,8 @@ func TestACompactorFoldsUnderItsBudgetAndTheAgentsModel(t *testing.T) {
 	defer kit.Close()
 
 	tr := agentturn.Transcript{openresponses.UserText("one"), openresponses.UserText("two"), openresponses.UserText("three")}
-	if _, err := kit.Config().Transform(t.Context(), tr); err != nil {
+	ctx := agentturn.ContextWithRequest(t.Context(), openresponses.Request{Model: "the-agents-model"})
+	if _, err := kit.Config().Transform(ctx, tr); err != nil {
 		t.Fatal(err)
 	}
 	c.mu.Lock()

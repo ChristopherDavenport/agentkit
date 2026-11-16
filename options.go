@@ -147,16 +147,6 @@ type settings struct {
 	filter          func(agentturn.Transcript) agentturn.Transcript
 }
 
-// summaryReasoning is the reasoning the agent's requests carry, which a
-// fold's summary request is given too: [WithReasoning]'s, else the one
-// [WithRequest]'s base request names, as the loop resolves it.
-func (s *settings) summaryReasoning() openresponses.ReasoningConfig {
-	if !s.reasoning.IsZero() {
-		return s.reasoning
-	}
-	return s.request.Reasoning
-}
-
 // deferred is one tool source that cannot be built until the kit has
 // built the rest of itself. kind and name make the label a [Conflict]
 // blames: the option it came from, its position among the deferred
@@ -1409,9 +1399,15 @@ func WithRecorder(rec *session.Recorder) Option {
 // when it grows past budget tokens. A budget of 0 or less is no budget:
 // nothing folds for the transcript's size, and only a fold asked for,
 // by [Control.Compact] or by the loop's retry after a context-length
-// refusal, is made (agentturn v0.0.41). When a session is recorded, the
-// fold is recorded with it. Summary requests name the agent's model,
-// [compact.WithModel] ahead of opts.
+// refusal, is made (agentturn v0.0.41). [Kit.SetCompactionBudget]
+// changes the budget while the conversation goes on. When a session is
+// recorded, the fold is recorded with it, the budget it was made under
+// and the model it asked among its members. Each summary request names
+// the model the request being folded for names, and is asked under that
+// request's reasoning, [compact.WithModelOfRequest] ahead of opts, so a
+// model the host switches mid-session, by [agentturn.Agent.SetConfig],
+// writes the next summary; the summary is still sent to the model the
+// kit was given, which names models as the agent's requests do.
 //
 // The kit records the fold through a compact.WithOnFold of its own,
 // ahead of opts, whether or not there is a session, since the recorder
@@ -1420,16 +1416,15 @@ func WithRecorder(rec *session.Recorder) Option {
 // after the fold is recorded. [WithFoldObserver] is the kit's own way
 // to hear of a fold, with or without a session.
 //
-// The summary request is sent under the agent's reasoning, the
-// [WithReasoning] or [WithRequest] one, through a [compact.WithRequest]
-// of the kit's ahead of opts: a thinking model left at its server's
-// default reasons through the summary's cap and answers no text, which
-// fails every fold. So for an agent at effort low or above the summary
-// is asked at that effort, and a thinking model spends part of the
-// summary's cap, half the budget, reasoning before it writes: the fold
-// succeeds, later and thinner, and nothing reports it. A product whose
-// agent thinks passes its own, which replaces the kit's since
-// compact.WithRequest is one function:
+// The summary request is sent under the reasoning of the request being
+// folded for: a thinking model left at its server's default reasons
+// through the summary's cap and answers no text, which fails every
+// fold. So for an agent at effort low or above the summary is asked at
+// that effort, and a thinking model spends part of the summary's cap,
+// half the budget, reasoning before it writes: the fold succeeds, later
+// and thinner, and nothing reports it. A product whose agent thinks
+// passes a [compact.WithRequest], which edits the summary request after
+// the reasoning is taken:
 //
 //	agentkit.WithCompaction(budget, compact.WithRequest(func(r *openresponses.Request) {
 //		r.Reasoning = openresponses.ReasoningConfig{Effort: openresponses.ReasoningEffortNone}
@@ -1438,11 +1433,14 @@ func WithRecorder(rec *session.Recorder) Option {
 // or the lowest effort its provider accepts. The kit does not pick a
 // lower effort itself because it does not know that floor: several
 // reasoning models refuse none, and a fold that succeeds thinner today
-// would then fail every time. Under [WithCompactionModel] the kit
-// passes no reasoning at all, since the product chose that model
+// would then fail every time. A [compact.WithModel] in opts pins the
+// summary's model and takes no reasoning from the request; a
+// compact.WithRequest in opts sets it there. Under [WithCompactionModel]
+// the kit names the agent's model as it was at New, [compact.WithModel],
+// and passes no reasoning at all, since the product chose that model
 // knowing it and a configuration meant for the agent's model may be
-// refused by, or wasted on, another; a compact.WithRequest in opts sets
-// it there too.
+// refused by, or wasted on, another; a compact.WithModel and a
+// compact.WithRequest in opts set them there.
 //
 // With a session [New] resumed, the last fold that failed on its path,
 // [session.CompactOptions], is passed after opts, so a restart does not
@@ -1471,9 +1469,12 @@ func WithFoldObserver(fn func(context.Context, compact.Fold)) Option {
 }
 
 // WithCompactionModel folds with a model other than the agent's, which
-// is how a cheap model summarises for an expensive one. The summary
-// request carries no reasoning unless a compact.WithRequest in
-// [WithCompaction]'s options sets one; see there.
+// is how a cheap model summarises for an expensive one. It stays the
+// summary's writer whatever model the agent is switched to. The summary
+// request names the agent's model as it was at [New] unless a
+// compact.WithModel in [WithCompaction]'s options names another, and
+// carries no reasoning unless a compact.WithRequest there sets one;
+// see there.
 func WithCompactionModel(m openresponses.Streamer) Option {
 	return func(s *settings) { s.compactSet, s.compactModel = true, m }
 }
@@ -1481,10 +1482,11 @@ func WithCompactionModel(m openresponses.Streamer) Option {
 // WithCompactor folds through a compactor the product built, a
 // provider's compaction endpoint, when the transcript grows past budget
 // tokens. It is [WithCompaction] with the fold made elsewhere, and
-// takes the same budget, where 0 is again no budget, and the same
-// default: every request is sent under the agent's model name,
-// [compact.WithModel] ahead of opts, so a compact.WithModel in opts
-// still wins. The fold is recorded, and
+// takes the same budget, where 0 is again no budget,
+// [Kit.SetCompactionBudget] included, and the same default: every
+// request names the model of the request being folded for,
+// [compact.WithModelOfRequest] ahead of opts, so a compact.WithModel in
+// opts still wins. The fold is recorded, and
 // [WithFoldObserver] told, as under WithCompaction, and a
 // compact.WithOnFold in opts is called after the recording as there.
 //

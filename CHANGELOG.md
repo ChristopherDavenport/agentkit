@@ -5,7 +5,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- `Kit.SetCompactionBudget(tokens)` changes the budget of the kit's
+  compaction while the conversation goes on, agentturn's
+  `compact.Transform.SetBudget`: from the next call, a fold in flight
+  keeping the budget it began with and the transform its fold memory, 0
+  no budget, `ErrNoCompaction` without compaction. A host that sizes the
+  budget from the model's context window calls it when it switches the
+  model. The kit writes no entry for the change, which is the host's
+  setting to record; each fold's recorded `fold` member carries the
+  budget and the model it was made under (agentturn v0.0.41). Part of
+  #143.
+
 ### Changed
+
+- **Breaking**: a summary, or a `WithCompactor` compaction request, now
+  names the model of the request being folded for, and a local summary
+  is asked under that request's reasoning, `compact.WithModelOfRequest`
+  in place of `compact.WithModel` of the agent's model name at `New`
+  and the kit's `compact.WithRequest` of the agent's reasoning: an agent
+  switched to another model with `Agent.SetConfig` has the next summary
+  asked of the new one, where v0.0.19 kept asking the first. A
+  `compact.WithModel` in the product's options still wins, and now
+  takes no reasoning from the request, so a product that pins a
+  thinking model passes its reasoning with `compact.WithRequest`, as it
+  did under `WithCompactionModel`. Under `WithCompactionModel` the
+  summary names the agent's model as at `New`, as before. Closes #143.
 
 - `WithAfterToolCall` adds a hook rather than replacing the one before
   it: several are joined with agentturn's `ChainAfterToolCall`, in the

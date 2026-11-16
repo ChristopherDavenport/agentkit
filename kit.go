@@ -1648,25 +1648,27 @@ func (k *Kit) buildHooks(s *settings) {
 		transforms = append(transforms, s.transform)
 	}
 	if s.compactSet {
-		// The agent's model name is the default and the caller's options
-		// come after it, so a compact.WithModel the product passed still
-		// wins. A compactor needs it as much as a local summary: its
-		// request names the model, and one that names none is refused by
-		// a provider that requires it. compact.WithOnFold adds a callback,
-		// so the kit's goes first and a fold is recorded before a
-		// compact.WithOnFold of the product's hears of it.
-		opts := []compact.Option{compact.WithModel(s.modelName), compact.WithOnFold(k.onFold(s))}
-		// A summary the agent's model writes is asked under the agent's
-		// reasoning, as every other request to it is: a thinking model
-		// left at its server's default reasons through the summary's
-		// token cap and answers no text. Not under WithCompactionModel:
-		// the product chose that model knowing it, and a reasoning
-		// config meant for the agent's may be refused by, or wasted on,
-		// another. Nor under WithCompactor, whose compact.New ignores
-		// compact.WithRequest. compact.WithRequest is one field, so the
-		// product's replaces it.
-		if r := s.summaryReasoning(); !r.IsZero() && s.compactor == nil && s.compactModel == nil {
-			opts = append(opts, compact.WithRequest(func(req *openresponses.Request) { req.Reasoning = r }))
+		// The summary, or a compactor's request, names the model of the
+		// request being folded for, and a local summary is asked under
+		// that request's reasoning, compact.WithModelOfRequest: a model
+		// the host switched mid-session writes the next summary, under
+		// the reasoning the agent's requests now carry, since a thinking
+		// model left at its server's default reasons through the
+		// summary's token cap and answers no text. A compactor needs a
+		// model as much as a local summary: a request that names none is
+		// refused by a provider that requires it. A compact.WithModel of
+		// the product's wins over it, in either order, and pins the
+		// model, the reasoning not taken either. Under
+		// WithCompactionModel the agent's model name as the kit was
+		// built is named, as before, and no reasoning: the product chose
+		// that model knowing it, and a configuration meant for the
+		// agent's may be refused by, or wasted on, another.
+		// compact.WithOnFold adds a callback, so the kit's goes first and
+		// a fold is recorded before a compact.WithOnFold of the
+		// product's hears of it.
+		opts := []compact.Option{compact.WithModelOfRequest(), compact.WithOnFold(k.onFold(s))}
+		if s.compactModel != nil {
+			opts[0] = compact.WithModel(s.modelName)
 		}
 		// A resumed session's last failed fold, after the product's
 		// options, so a restart does not ask again for the summary that
@@ -1695,6 +1697,27 @@ func (k *Kit) compactNext(instructions string) error {
 		return ErrNoCompaction
 	}
 	k.compact.FoldNext(instructions)
+	return nil
+}
+
+// SetCompactionBudget changes the budget of the kit's compaction, the
+// tokens [WithCompaction] or [WithCompactor] was given, while the
+// conversation goes on: [compact.Transform.SetBudget] on the kit's
+// transform, from its next call. A fold in flight keeps the budget it
+// began with, and the transform keeps the fold it made and the failed
+// fold it backs off from. 0 or less is no budget: only a fold asked
+// for, [Control.Compact] or the loop's retry after a context-length
+// refusal, is made. A host that sizes the budget from the model's
+// context window calls it when it switches the agent's model; the kit
+// does not know a model's window. The kit writes no entry for the
+// change, which is the host's setting to record; each fold's record
+// carries the budget it was made under. Without compaction it returns
+// [ErrNoCompaction].
+func (k *Kit) SetCompactionBudget(tokens int) error {
+	if k.compact == nil {
+		return ErrNoCompaction
+	}
+	k.compact.SetBudget(tokens)
 	return nil
 }
 

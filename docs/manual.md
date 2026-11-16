@@ -43,7 +43,7 @@ and no fold is recorded.
 | `AfterToolCall` | `WithAfterToolCall` | `agentturn.ChainAfterToolCall(yours...)`, in the order given, or the one hook alone; the kit adds none of its own |
 | `OutputGuard` | `WithGuards`, `WithOutputGuard` | `agentturn.ChainOutputGuard(chain.OutputGuard(), yours...)` |
 | `ShouldStopAfterTurn` | `WithGuards`, `WithShouldStopAfterTurn` | `agentturn.ChainShouldStopAfterTurn(chain.ShouldStopAfterTurn(), yours...)` |
-| `Transform` | `WithCompaction`, `WithCompactionModel`, `WithCompactor`, `WithTransform`, `WithFoldObserver` | `agentturn.ChainTransform(yours, compact.NewLocal(model, compact.WithModel(name), compact.WithOnFold(fold), compact.WithBudget(n), theirs...).Transform)`, or `compact.New(compactor, ...)` with the same options for `WithCompactor`, where `fold` is `rec.Fold` and then the observer; `Control.Compact(ctx, instructions)` is `t.FoldNext(instructions)` on that transform, kept beside the config, so the next request folds whatever its budget — see below |
+| `Transform` | `WithCompaction`, `WithCompactionModel`, `WithCompactor`, `WithTransform`, `WithFoldObserver` | `agentturn.ChainTransform(yours, compact.NewLocal(model, compact.WithModelOfRequest(), compact.WithOnFold(fold), compact.WithBudget(n), theirs...).Transform)` (`compact.WithModel(name)` in its place under `WithCompactionModel`), or `compact.New(compactor, ...)` with the same options for `WithCompactor`, where `fold` is `rec.Fold` and then the observer; `Control.Compact(ctx, instructions)` is `t.FoldNext(instructions)` on that transform, kept beside the config, so the next request folds whatever its budget — see below |
 | `ToolRecorder` | `WithSession`, `WithResumedSession`, `WithRecorder` | `rec.RecordFunc()`; without a session the kit leaves it nil, and the loop honours a recorder the product installs with `agenttool.ContextWithRecorder` on the prompt's context |
 | `ToolElicitor` | `WithToolElicitor`, `WithQuestionEvents` | under `WithToolElicitor`, a function that calls `rec.Elicitor(by, fn)` for the run's recorder, `recorderFor(ctx)` below, and `fn` without one; under `WithQuestionEvents`, a function that asks the elicitor the run's context names, `ask, ok := agentkit.QuestionsFromContext(ctx)` then `ask(ctx, q)`, else the Control on it, `c, ok := agentkit.ControlFromContext(ctx)` then `c.Elicitor()(ctx, q)` (both `kit.QuestionsFor(agent)`: a function over `agent.QuestionElicitor()` by `agentsession.ByHuman`, whose answer sets `Answer.By` to `agenttool.ByHuman` when the reply names no decider, so questions are events the front answers with `agent.Reply`), and with neither answers `agenttool.ActionCancel` through `rec.Elicitor(agentsession.ByPolicy, …)`; it also dials the MCP servers as `WithToolElicitor` does, with `mcpclient.WithElicitation()`. Without either the kit leaves it nil: an elicitor on the prompt's context applies, and with none a tool's question goes unasked. The loop asks the same elicitor about a nested call a tool makes with `agenttool.Invoke` that the policy defers (agentturn v0.0.35, RFC 0001 Nested calls), and never one the invoking tool put on its own context, so a nested call's approval reaches the product only through this field or an elicitor on the prompt's context. `Kit.Control(agent)` gives an agent whose config has none the kit's |
 
@@ -1240,9 +1240,11 @@ fold := func(ctx context.Context, f compact.Fold) error {
 	observer(ctx, f) // WithFoldObserver
 	return nil
 }
-opts := []compact.Option{compact.WithModel(name), compact.WithOnFold(fold)}
-if !reasoning.IsZero() && summariser == model { // WithReasoning's, else WithRequest's; only when the agent's model summarises
-	opts = append(opts, compact.WithRequest(func(r *openresponses.Request) { r.Reasoning = reasoning }))
+// The model, and for a local summary the reasoning, of the request
+// being folded for; WithCompactionModel names the agent's model as at New.
+opts := []compact.Option{compact.WithModelOfRequest(), compact.WithOnFold(fold)}
+if summariser != model { // WithCompactionModel
+	opts[0] = compact.WithModel(name)
 }
 opts = append(opts, compact.WithBudget(n))
 opts = append(opts, yours...)
@@ -1255,11 +1257,21 @@ if sess != nil { // the session WithSession or WithResumedSession opened
 }
 t := compact.NewLocal(summariser, opts...) // WithCompaction: model; WithCompactionModel: its model
 t = compact.New(compactor, opts...)        // WithCompactor
+// Kit.SetCompactionBudget(n) is t.SetBudget(n), ErrNoCompaction without t.
 ```
 
-The agent's model name comes first under either, so a
-`compact.WithModel` of the product's wins, and a compactor's request
-names a model as a summary's does. `compact.WithOnFold` adds a
+`compact.WithModelOfRequest` (agentturn v0.0.41) names on each summary,
+or compaction, request the model of the request the loop is folding
+for, `agentturn.RequestFromContext`, so a host that switches the
+agent's model with `Agent.SetConfig` has the next summary asked of the
+new one; a `compact.WithModel` of the product's wins over it in either
+order, and a compactor's request names a model as a summary's does.
+`Kit.SetCompactionBudget(n)` is `t.SetBudget(n)`: from the next call,
+a fold in flight keeping the budget it began with, the transform
+keeping its fold memory, 0 no budget. The kit writes no entry for the
+change; the host records its own setting, and each fold's `fold` member
+carries `budget` and `model` (`compact.Fold.Budget`, `Fold.Model`),
+which `rec.Fold` writes from the fold `fold` passes it unchanged. `compact.WithOnFold` adds a
 callback (agentturn v0.0.14), so the kit passes `fold` ahead of the
 product's `compact.Option`s, whether or not there is a session, since a
 run may bring a recorder on its context, and a `compact.WithOnFold`
@@ -1269,17 +1281,20 @@ a failed one too, with `Fold.Err` set and no summary: a front that says
 the model has forgotten something says it for a fold whose `Err` is
 nil.
 
-A summary the agent's model writes is asked under the agent's
-reasoning: a thinking model left at its server's default reasons
-through the summary's cap and answers no text. So for an agent at
-effort low or above the summary is asked at that effort too, and a
-thinking model spends part of the summary's cap, half the budget,
-reasoning before it writes; the fold succeeds, later and thinner. A
-product whose agent thinks passes, in `yours`,
-`compact.WithRequest(func(r *openresponses.Request) { r.Reasoning =
-openresponses.ReasoningConfig{Effort: openresponses.ReasoningEffortNone} })`,
-or the lowest effort its provider accepts; `compact.WithRequest` is one
-function, so the product's replaces the kit's. The kit does not pick a
+A summary the agent's model writes is asked under the reasoning of the
+request being folded for, `compact.WithModelOfRequest`'s: a thinking
+model left at its server's default reasons through the summary's cap
+and answers no text. So for an agent at effort low or above the summary
+is asked at that effort too, and a thinking model spends part of the
+summary's cap, half the budget, reasoning before it writes; the fold
+succeeds, later and thinner. A product whose agent thinks passes, in
+`yours`, `compact.WithRequest(func(r *openresponses.Request) {
+r.Reasoning = openresponses.ReasoningConfig{Effort:
+openresponses.ReasoningEffortNone} })`, or the lowest effort its
+provider accepts; `compact.WithRequest` edits the summary request after
+the reasoning is taken. A `compact.WithModel` in `yours` pins the
+model and takes no reasoning from the request, so a product that pins
+a thinking model passes its reasoning the same way. The kit does not pick a
 lower effort itself because it does not know the provider's floor:
 several reasoning models refuse `none`, and a fold that succeeds
 thinner today would then fail every time. Under `WithCompactionModel`
