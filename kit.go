@@ -999,7 +999,10 @@ func (k *Kit) openSession(ctx context.Context, s *settings) error {
 		// block, so its next request is offered memory_read as it would
 		// have been without the restart, and a memory_read call held for
 		// approval then still runs on the Resume ([Kit.offerMemoryRead]).
-		k.convDropped.put(rec.SessionID(), true)
+		// The key is the scope the conversation's runs decide under: the
+		// one New's ctx carries for a front that scopes its conversations
+		// itself, as the resumed grants are made under, else the session.
+		k.convDropped.put(k.resumeScope(ctx, rec, rec.SessionID()), true)
 	}
 	return nil
 }
@@ -1007,13 +1010,24 @@ func (k *Kit) openSession(ctx context.Context, s *settings) error {
 // lastRenderDropped reports whether the manifest in force at path's end,
 // folded from its records, is a render the budget dropped.
 func lastRenderDropped(path []agentsession.Entry) bool {
+	dropped, _ := lastRender(path)
+	return dropped
+}
+
+// lastRender reports whether the manifest in force at path's end, folded
+// from its records, is a render the budget dropped, and whether path
+// holds one in force at all.
+func lastRender(path []agentsession.Entry) (dropped, known bool) {
 	var f manifestFold
 	for _, e := range path {
 		if c, ok := e.(*agentsession.CustomEntry); ok && c.NS == agentmemory.ManifestNS {
 			f.apply(c)
 		}
 	}
-	return f.at != "" && f.valid && droppedRender(f.fold.Manifest())
+	if f.at == "" || !f.valid {
+		return false, false
+	}
+	return droppedRender(f.fold.Manifest()), true
 }
 
 // build fills the rest of the config: the tool set, then the hooks.
@@ -1216,9 +1230,13 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 // one memory_read; [Kit.instructions] still takes it out of a request
 // whose render shows the block again. A conversation the kit has no
 // render for, a new one or one past the last renderedRuns to render,
-// takes New's render's, which its first configuration entry is written
-// from. The kit's union keeps the tool, so [Kit.LookupTool] finds it
-// either way.
+// takes the last render its session records when it runs under
+// [ContextWithRecorder], [Kit.recordedDropped], so a front's
+// conversation resumed after a restart is offered what it was offered
+// before it, and a memory_read held for approval then runs on the
+// Resume; else, or when its session records none, New's render's, which
+// its first configuration entry is written from. The kit's union keeps
+// the tool, so [Kit.LookupTool] finds it either way.
 func (k *Kit) offerMemoryRead(ctx context.Context, tools []agenttool.Tool) []agenttool.Tool {
 	if !k.readOnDrop {
 		return tools
@@ -1226,11 +1244,36 @@ func (k *Kit) offerMemoryRead(ctx context.Context, tools []agenttool.Tool) []age
 	conv := k.GrantScope(ctx)
 	k.mu.Lock()
 	dropped, ok := k.convDropped.get(conv)
-	if !ok {
-		dropped = k.firstDropped
-	}
 	k.mu.Unlock()
+	if !ok {
+		dropped = k.recordedDropped(ctx, conv)
+	}
 	return offerReadIf(tools, dropped)
+}
+
+// recordedDropped is the last render of conv, a conversation the kit
+// holds none for, read from the session of the recorder on ctx,
+// [ContextWithRecorder], when that session records one, else New's
+// render's, and kept as conv's until its own render replaces it. The
+// session is read without mu, which a render that lands meanwhile takes:
+// that render is newer than the record, and stands.
+func (k *Kit) recordedDropped(ctx context.Context, conv string) bool {
+	var dropped, known bool
+	if rec := RecorderFromContext(ctx); rec != nil {
+		if sess := k.sessionOf(ctx, rec, runSessionID(ctx, rec)); sess != nil {
+			dropped, known = lastRender(sess.Path(sess.Leaf()))
+		}
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if now, ok := k.convDropped.get(conv); ok {
+		return now
+	}
+	if !known {
+		return k.firstDropped
+	}
+	k.convDropped.put(conv, dropped)
+	return dropped
 }
 
 // offerReadIf returns tools without memory_read unless dropped.

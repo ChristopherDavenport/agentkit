@@ -3,6 +3,22 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- A memory_read held for approval before a restart, in a conversation
+  a front records under `ContextWithRecorder`, runs on the Resume:
+  where the kit holds no render for the conversation, its first run
+  under the recorder reads the last render the conversation's session
+  records, and is offered memory_read when that render dropped the
+  block, where v0.0.20 took `New`'s and the call failed with `unknown
+  tool "memory_read"`. A session `WithResumedSession` resumes is
+  seeded under the grant scope `New`'s context carries, when the front
+  scopes its conversations itself, as its skill grants are made again
+  under, rather than under the session's ID, which those runs do not
+  decide under. Closes #147.
+
 ## v0.0.20 - 2026-11-15
 
 ### Added

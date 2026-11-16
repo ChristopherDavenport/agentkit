@@ -644,11 +644,15 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 // memory_read leaves that request. Each conversation's last render
 // decides its own offer, by [Kit.GrantScope]: an A2A caller's render on
 // the same kit does not take memory_read from the person's requests. A
-// session [WithResumedSession] resumes whose last recorded render
-// dropped the block is offered memory_read from its first request, so
-// a memory_read held for approval before a restart runs on the Resume;
-// a conversation a front resumes under [ContextWithRecorder] takes
-// New's render's until its own first render.
+// conversation whose last recorded render dropped the block is offered
+// memory_read from its first request after a restart, so a memory_read
+// held for approval before the restart runs on the Resume: a session
+// [WithResumedSession] resumes, under the grant scope New's ctx
+// carries when the front scopes its conversations itself, as the
+// resumed skill grants are, and a conversation a front resumes under
+// [ContextWithRecorder], whose session is read at its first run under
+// the recorder, under the scope that run decides under. A conversation
+// whose session records no render takes New's.
 //
 // The block is recorded as one part per piece
 // [agentmemory.RenderParts] returns, the title, each scope's heading,

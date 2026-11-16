@@ -13,6 +13,7 @@ import (
 	"github.com/ChristopherDavenport/agentpolicy"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
 
@@ -275,95 +276,228 @@ func TestMemoryReadFollowsEachConversationsOwnRender(t *testing.T) {
 // the resumed kit's own render fits the block: the conversation's last
 // render, which the call was offered under, is read back from the
 // session's record, so the resumed run is still offered memory_read.
-// (#144 review F3)
+// (#144 review F3; the front's scope, #147)
 func TestAHeldMemoryReadRunsAfterARestart(t *testing.T) {
-	store := memStore(t, agentmemory.Entry{Scope: "user", Name: "tea", Content: "tea, not coffee"})
-	var grown atomic.Bool
-	part := func(context.Context) (agentkit.PartRender, error) {
-		if grown.Load() {
-			return agentkit.PartRender{Text: strings.Repeat("r", 2000)}, nil
-		}
-		return agentkit.PartRender{Text: "rules"}, nil
-	}
-	opts := func(model agentturn.Model, budget int64, extra ...agentkit.Option) []agentkit.Option {
-		return append([]agentkit.Option{
-			agentkit.WithModel(model, "m"),
-			agentkit.WithInstructions("be brief"),
-			agentkit.WithPart("rules", "product", part),
-			agentkit.WithMemory(store, "user"),
-			agentkit.WithInstructionBudget(budget),
-		}, extra...)
-	}
-	whole, err := agentkit.New(t.Context(), opts(stubModel{}, 0)...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	budget := int64(len(whole.Config().Instructions)) + 100
-	whole.Close()
+	// A front that scopes its conversations itself passes the scope to New
+	// on the restart, as for the skill grants: the seed is keyed by it.
+	for _, scope := range []string{"", "tenant-1"} {
+		t.Run("scope "+scope, func(t *testing.T) {
+			scoped := t.Context()
+			if scope != "" {
+				scoped = agentpolicy.ContextWithGrantScope(scoped, scope)
+			}
+			store := memStore(t, agentmemory.Entry{Scope: "user", Name: "tea", Content: "tea, not coffee"})
+			var grown atomic.Bool
+			part := func(context.Context) (agentkit.PartRender, error) {
+				if grown.Load() {
+					return agentkit.PartRender{Text: strings.Repeat("r", 2000)}, nil
+				}
+				return agentkit.PartRender{Text: "rules"}, nil
+			}
+			opts := func(model agentturn.Model, budget int64, extra ...agentkit.Option) []agentkit.Option {
+				return append([]agentkit.Option{
+					agentkit.WithModel(model, "m"),
+					agentkit.WithInstructions("be brief"),
+					agentkit.WithPart("rules", "product", part),
+					agentkit.WithMemory(store, "user"),
+					agentkit.WithInstructionBudget(budget),
+				}, extra...)
+			}
+			whole, err := agentkit.New(t.Context(), opts(stubModel{}, 0)...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			budget := int64(len(whole.Config().Instructions)) + 100
+			whole.Close()
 
-	sessions := agentsession.NewMemoryStore()
-	build := func(model agentturn.Model, sess agentkit.Option) (*agentkit.Kit, *agentkit.Control) {
-		kit, err := agentkit.New(t.Context(), opts(model, budget,
-			agentkit.WithPolicy(agentpolicy.Policy{Ask: policyRules(t, agentmemory.ReadTool), Default: agentpolicy.Allow()}, nil),
-			sess)...)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = kit.Close() })
-		agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
-		t.Cleanup(kit.Attach(agent))
-		ctl, err := kit.Control(agent)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return kit, ctl
-	}
-	answer := func(e *openresponses.Emitter) error {
-		w, err := e.Message(openresponses.PhaseFinalAnswer)
-		if err != nil {
-			return err
-		}
-		if err := w.Text("noted"); err != nil {
-			return err
-		}
-		return w.Close()
-	}
-	first, ctl := build(&scriptModel{turns: []func(*openresponses.Emitter) error{
-		answer,
-		callTurn(agentmemory.ReadTool, `{"scope":"user","name":"tea"}`),
-	}}, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))
-	// The rules grow: the first request drops the block, the second is
-	// offered memory_read and the model calls it, held for approval.
-	grown.Store(true)
-	if _, err := ctl.Prompt(t.Context(), openresponses.UserText("hello")); err != nil {
-		t.Fatal(err)
-	}
-	if end, err := ctl.Prompt(t.Context(), openresponses.UserText("what do I drink")); err != nil || end.Reason != agentturn.ReasonInputRequired {
-		t.Fatalf("prompt: %v, %+v; want memory_read held", err, end)
-	}
+			sessions := agentsession.NewMemoryStore()
+			build := func(model agentturn.Model, sess agentkit.Option) (*agentkit.Kit, *agentkit.Control) {
+				kit, err := agentkit.New(scoped, opts(model, budget,
+					agentkit.WithPolicy(agentpolicy.Policy{Ask: policyRules(t, agentmemory.ReadTool), Default: agentpolicy.Allow()}, nil),
+					sess)...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = kit.Close() })
+				agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
+				t.Cleanup(kit.Attach(agent))
+				ctl, err := kit.Control(agent)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return kit, ctl
+			}
+			answer := func(e *openresponses.Emitter) error {
+				w, err := e.Message(openresponses.PhaseFinalAnswer)
+				if err != nil {
+					return err
+				}
+				if err := w.Text("noted"); err != nil {
+					return err
+				}
+				return w.Close()
+			}
+			first, ctl := build(&scriptModel{turns: []func(*openresponses.Emitter) error{
+				answer,
+				callTurn(agentmemory.ReadTool, `{"scope":"user","name":"tea"}`),
+			}}, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))
+			// The rules grow: the first request drops the block, the second is
+			// offered memory_read and the model calls it, held for approval.
+			grown.Store(true)
+			if _, err := ctl.Prompt(scoped, openresponses.UserText("hello")); err != nil {
+				t.Fatal(err)
+			}
+			if end, err := ctl.Prompt(scoped, openresponses.UserText("what do I drink")); err != nil || end.Reason != agentturn.ReasonInputRequired {
+				t.Fatalf("prompt: %v, %+v; want memory_read held", err, end)
+			}
 
-	// The rules shrink across the restart, so the resumed kit's own
-	// render fits the block.
-	grown.Store(false)
-	model := &scriptModel{}
-	resumed, ctl := build(model, agentkit.WithResumedSession(sessions, first.SessionID()))
-	if resumed.MemoryManifest().Dropped() {
-		t.Fatal("the resumed kit's render dropped the block; the test would be vacuous")
+			// The rules shrink across the restart, so the resumed kit's own
+			// render fits the block.
+			grown.Store(false)
+			model := &scriptModel{}
+			resumed, ctl := build(model, agentkit.WithResumedSession(sessions, first.SessionID()))
+			if resumed.MemoryManifest().Dropped() {
+				t.Fatal("the resumed kit's render dropped the block; the test would be vacuous")
+			}
+			end := &agentturn.RunEnd{Reason: agentturn.ReasonInputRequired, Pending: ctl.State().Pending}
+			perms := ctl.Permissions(end)
+			if len(perms) != 1 || perms[0].Call.Name != agentmemory.ReadTool {
+				t.Fatalf("permissions after the restart = %+v, want memory_read", perms)
+			}
+			if end, err := ctl.Resume(scoped, agentturn.Approve(perms[0].Call.CallID).WithBy(agentpolicy.ByHuman)); err != nil || end.Reason != agentturn.ReasonDone {
+				t.Fatalf("resume: %v, %+v; want done", err, end)
+			}
+			reqs := model.requests()
+			if len(reqs) == 0 {
+				t.Fatal("the resumed run sent no request")
+			}
+			in, _ := json.Marshal(reqs[0].Input)
+			if !strings.Contains(string(in), "tea, not coffee") {
+				t.Errorf("the held memory_read did not run after the restart:\n%s", in)
+			}
+		})
 	}
-	end := &agentturn.RunEnd{Reason: agentturn.ReasonInputRequired, Pending: ctl.State().Pending}
-	perms := ctl.Permissions(end)
-	if len(perms) != 1 || perms[0].Call.Name != agentmemory.ReadTool {
-		t.Fatalf("permissions after the restart = %+v, want memory_read", perms)
-	}
-	if end, err := ctl.Resume(t.Context(), agentturn.Approve(perms[0].Call.CallID).WithBy(agentpolicy.ByHuman)); err != nil || end.Reason != agentturn.ReasonDone {
-		t.Fatalf("resume: %v, %+v; want done", err, end)
-	}
-	reqs := model.requests()
-	if len(reqs) == 0 {
-		t.Fatal("the resumed run sent no request")
-	}
-	in, _ := json.Marshal(reqs[0].Input)
-	if !strings.Contains(string(in), "tea, not coffee") {
-		t.Errorf("the held memory_read did not run after the restart:\n%s", in)
+}
+
+// A memory_read call held for approval in a conversation a front
+// records under ContextWithRecorder still runs after a restart when the
+// resumed kit's own render fits the block: the conversation's last
+// render is read back from its session's record at the first run under
+// the recorder, keyed by the conversation's grant scope, the recorder's
+// session or the scope the front names. (#147)
+func TestAHeldMemoryReadRunsAfterARestartUnderAContextRecorder(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		scope string
+	}{{"the recorder's session", ""}, {"the front's scope", "a2a:caller-1"}} {
+		t.Run(c.name, func(t *testing.T) {
+			store := memStore(t, agentmemory.Entry{Scope: "user", Name: "tea", Content: "tea, not coffee"})
+			var grown atomic.Bool
+			part := func(context.Context) (agentkit.PartRender, error) {
+				if grown.Load() {
+					return agentkit.PartRender{Text: strings.Repeat("r", 2000)}, nil
+				}
+				return agentkit.PartRender{Text: "rules"}, nil
+			}
+			opts := func(model agentturn.Model, budget int64, extra ...agentkit.Option) []agentkit.Option {
+				return append([]agentkit.Option{
+					agentkit.WithModel(model, "m"),
+					agentkit.WithInstructions("be brief"),
+					agentkit.WithPart("rules", "product", part),
+					agentkit.WithMemory(store, "user"),
+					agentkit.WithInstructionBudget(budget),
+				}, extra...)
+			}
+			whole, err := agentkit.New(t.Context(), opts(stubModel{}, 0)...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			budget := int64(len(whole.Config().Instructions)) + 100
+			whole.Close()
+
+			build := func(model agentturn.Model) *agentkit.Kit {
+				kit, err := agentkit.New(t.Context(), opts(model, budget,
+					agentkit.WithPolicy(agentpolicy.Policy{Ask: policyRules(t, agentmemory.ReadTool), Default: agentpolicy.Allow()}, nil))...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = kit.Close() })
+				return kit
+			}
+			serve := func(kit *agentkit.Kit, rec *session.Recorder, seed ...agentturn.Option) (*agentturn.Agent, context.Context) {
+				cfg := kit.Config()
+				cfg.ToolRecorder = rec.RecordFunc()
+				agent := agentturn.New(cfg, seed...)
+				t.Cleanup(rec.Attach(agent))
+				ctx := agentkit.ContextWithRecorder(session.ContextWithSessionID(t.Context(), rec.SessionID()), rec)
+				if c.scope != "" {
+					ctx = agentpolicy.ContextWithGrantScope(ctx, c.scope)
+				}
+				return agent, ctx
+			}
+			answer := func(e *openresponses.Emitter) error {
+				w, err := e.Message(openresponses.PhaseFinalAnswer)
+				if err != nil {
+					return err
+				}
+				if err := w.Text("noted"); err != nil {
+					return err
+				}
+				return w.Close()
+			}
+			sessions := agentsession.NewMemoryStore()
+			first := build(&scriptModel{turns: []func(*openresponses.Emitter) error{
+				answer,
+				callTurn(agentmemory.ReadTool, `{"scope":"user","name":"tea"}`),
+			}})
+			conv, _, err := session.Start(t.Context(), sessions, agentsession.Header{CWD: t.TempDir()}, session.WithInstructionsParts(first.PartsFor))
+			if err != nil {
+				t.Fatal(err)
+			}
+			agent, ctx := serve(first, conv)
+			// The rules grow: the first request drops the block, the
+			// second is offered memory_read and the model calls it, held
+			// for approval.
+			grown.Store(true)
+			if _, err := agent.Prompt(ctx, openresponses.UserText("hello")); err != nil {
+				t.Fatal(err)
+			}
+			if end, err := agent.Prompt(ctx, openresponses.UserText("what do I drink")); err != nil || end.Reason != agentturn.ReasonInputRequired {
+				t.Fatalf("prompt: %v, %+v; want memory_read held", err, end)
+			}
+
+			// The rules shrink across the restart, so the resumed kit's
+			// own render fits the block.
+			grown.Store(false)
+			model := &scriptModel{}
+			kit := build(model)
+			if kit.MemoryManifest().Dropped() {
+				t.Fatal("the resumed kit's render dropped the block; the test would be vacuous")
+			}
+			conv, sess, err := session.Resume(t.Context(), sessions, conv.SessionID(), session.WithInstructionsParts(kit.PartsFor))
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed, err := session.AgentOptions(sess)
+			if err != nil {
+				t.Fatal(err)
+			}
+			agent, ctx = serve(kit, conv, seed...)
+			pending := agent.State().Pending
+			if len(pending) != 1 || pending[0].Call.Name != agentmemory.ReadTool {
+				t.Fatalf("pending after the restart = %+v, want memory_read", pending)
+			}
+			if end, err := agent.Resume(ctx, agentturn.Approve(pending[0].Call.CallID).WithBy(agentpolicy.ByHuman)); err != nil || end.Reason != agentturn.ReasonDone {
+				t.Fatalf("resume: %v, %+v; want done", err, end)
+			}
+			reqs := model.requests()
+			if len(reqs) == 0 {
+				t.Fatal("the resumed run sent no request")
+			}
+			in, _ := json.Marshal(reqs[0].Input)
+			if !strings.Contains(string(in), "tea, not coffee") {
+				t.Errorf("the held memory_read did not run after the restart:\n%s", in)
+			}
+		})
 	}
 }

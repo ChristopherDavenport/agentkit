@@ -374,7 +374,7 @@ offered := engine.ToolProvider(func(ctx context.Context) []agenttool.Tool {
 	} else {
 		own = byName(list)
 	}
-	if reader == agentmemory.SearchTool && !droppedOf(scopeOf(ctx)) { // the conversation's last render; New's for one with none
+	if reader == agentmemory.SearchTool && !droppedOf(ctx, scopeOf(ctx)) { // the conversation's last render; with none, its session's last recorded one under ContextWithRecorder, else New's
 		// memory_read only once a render has dropped the block, so the
 		// configuration the recorder writes at a run's start, which runs
 		// no BeforeModelCall, is the first request's: a request whose
