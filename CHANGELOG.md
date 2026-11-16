@@ -29,14 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A memory_read held for approval before a restart, in a conversation
   a front records under `ContextWithRecorder`, runs on the Resume:
   where the kit holds no render for the conversation, its first run
-  under the recorder reads the last render the conversation's session
-  records, and is offered memory_read when that render dropped the
-  block, where v0.0.20 took `New`'s and the call failed with `unknown
-  tool "memory_read"`. A session `WithResumedSession` resumes is
-  seeded under the grant scope `New`'s context carries, when the front
-  scopes its conversations itself, as its skill grants are made again
-  under, rather than under the session's ID, which those runs do not
-  decide under. Closes #147.
+  reads the last render the session it records into holds, the one
+  the kit writes the renders to, and is offered memory_read when that
+  render dropped the block, where v0.0.20 took `New`'s and the call
+  failed with `unknown tool "memory_read"`. What it reads is kept under
+  the grant scope the run decides under, so a front that scopes its
+  conversations itself is served too, and a session
+  `WithResumedSession` resumes is read the same way at its first run,
+  in place of v0.0.20's seed at `New` under the session's ID, which a
+  front's scoped runs, or a run by hand with no recorder on its
+  context, did not find. Closes #147.
 
 ## v0.0.20 - 2026-11-15
 

@@ -647,12 +647,13 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 // conversation whose last recorded render dropped the block is offered
 // memory_read from its first request after a restart, so a memory_read
 // held for approval before the restart runs on the Resume: a session
-// [WithResumedSession] resumes, under the grant scope New's ctx
-// carries when the front scopes its conversations itself, as the
-// resumed skill grants are, and a conversation a front resumes under
-// [ContextWithRecorder], whose session is read at its first run under
-// the recorder, under the scope that run decides under. A conversation
-// whose session records no render takes New's.
+// [WithResumedSession] resumes and a conversation a front resumes under
+// [ContextWithRecorder] alike, since the kit reads the session a
+// conversation's runs record into, where its renders are written, at
+// its first run, and keeps what it finds under the grant scope that run
+// decides under, [Kit.GrantScope], a front's own scope included. A
+// conversation whose session records no render, or a kit with no
+// session, takes New's.
 //
 // The block is recorded as one part per piece
 // [agentmemory.RenderParts] returns, the title, each scope's heading,

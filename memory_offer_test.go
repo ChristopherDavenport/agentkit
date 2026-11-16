@@ -3,6 +3,7 @@ package agentkit_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -276,12 +277,19 @@ func TestMemoryReadFollowsEachConversationsOwnRender(t *testing.T) {
 // the resumed kit's own render fits the block: the conversation's last
 // render, which the call was offered under, is read back from the
 // session's record, so the resumed run is still offered memory_read.
-// (#144 review F3; the front's scope, #147)
+// (#144 review F3; the front's scope and a run by hand, #147)
 func TestAHeldMemoryReadRunsAfterARestart(t *testing.T) {
-	// A front that scopes its conversations itself passes the scope to New
-	// on the restart, as for the skill grants: the seed is keyed by it.
-	for _, scope := range []string{"", "tenant-1"} {
-		t.Run("scope "+scope, func(t *testing.T) {
+	// A front that scopes its conversations itself scopes every run, and
+	// the conversation's render is kept under that scope. The resumed run
+	// is the Control's, under the kit's recorder (RunContext), or the
+	// agent's by hand, with no recorder on its context, which reads the
+	// kit's own session as its renders are written there.
+	for _, c := range []struct {
+		scope  string
+		byHand bool
+	}{{"", false}, {"tenant-1", false}, {"", true}, {"tenant-1", true}} {
+		scope := c.scope
+		t.Run(fmt.Sprintf("scope %q by hand %v", c.scope, c.byHand), func(t *testing.T) {
 			scoped := t.Context()
 			if scope != "" {
 				scoped = agentpolicy.ContextWithGrantScope(scoped, scope)
@@ -311,7 +319,7 @@ func TestAHeldMemoryReadRunsAfterARestart(t *testing.T) {
 			whole.Close()
 
 			sessions := agentsession.NewMemoryStore()
-			build := func(model agentturn.Model, sess agentkit.Option) (*agentkit.Kit, *agentkit.Control) {
+			build := func(model agentturn.Model, sess agentkit.Option) (*agentkit.Kit, *agentturn.Agent, *agentkit.Control) {
 				kit, err := agentkit.New(scoped, opts(model, budget,
 					agentkit.WithPolicy(agentpolicy.Policy{Ask: policyRules(t, agentmemory.ReadTool), Default: agentpolicy.Allow()}, nil),
 					sess)...)
@@ -325,7 +333,7 @@ func TestAHeldMemoryReadRunsAfterARestart(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				return kit, ctl
+				return kit, agent, ctl
 			}
 			answer := func(e *openresponses.Emitter) error {
 				w, err := e.Message(openresponses.PhaseFinalAnswer)
@@ -337,7 +345,7 @@ func TestAHeldMemoryReadRunsAfterARestart(t *testing.T) {
 				}
 				return w.Close()
 			}
-			first, ctl := build(&scriptModel{turns: []func(*openresponses.Emitter) error{
+			first, _, ctl := build(&scriptModel{turns: []func(*openresponses.Emitter) error{
 				answer,
 				callTurn(agentmemory.ReadTool, `{"scope":"user","name":"tea"}`),
 			}}, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))
@@ -355,7 +363,7 @@ func TestAHeldMemoryReadRunsAfterARestart(t *testing.T) {
 			// render fits the block.
 			grown.Store(false)
 			model := &scriptModel{}
-			resumed, ctl := build(model, agentkit.WithResumedSession(sessions, first.SessionID()))
+			resumed, agent, ctl := build(model, agentkit.WithResumedSession(sessions, first.SessionID()))
 			if resumed.MemoryManifest().Dropped() {
 				t.Fatal("the resumed kit's render dropped the block; the test would be vacuous")
 			}
@@ -364,7 +372,11 @@ func TestAHeldMemoryReadRunsAfterARestart(t *testing.T) {
 			if len(perms) != 1 || perms[0].Call.Name != agentmemory.ReadTool {
 				t.Fatalf("permissions after the restart = %+v, want memory_read", perms)
 			}
-			if end, err := ctl.Resume(scoped, agentturn.Approve(perms[0].Call.CallID).WithBy(agentpolicy.ByHuman)); err != nil || end.Reason != agentturn.ReasonDone {
+			resume := ctl.Resume
+			if c.byHand {
+				resume = agent.Resume
+			}
+			if end, err := resume(scoped, agentturn.Approve(perms[0].Call.CallID).WithBy(agentpolicy.ByHuman)); err != nil || end.Reason != agentturn.ReasonDone {
 				t.Fatalf("resume: %v, %+v; want done", err, end)
 			}
 			reqs := model.requests()
