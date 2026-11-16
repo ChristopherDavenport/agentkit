@@ -1272,6 +1272,11 @@ setFor := func(scope string, n int) {
 	o.SetBudget(n)
 	own[scope] = o
 }
+// parentOf is the product's own child→parent map, filled where it runs
+// a child under a scope of its own (the kit keeps the same links
+// unexported).
+parents := map[string]string{} // under the same lock
+parentOf := func(scope string) (string, bool) { p, ok := parents[scope]; return p, ok }
 transformOf := func(ctx context.Context) *compact.Transform {
 	// The scope, then each scope a child's is linked under (childRun's
 	// link), so a child folds through its conversation's own transform.
