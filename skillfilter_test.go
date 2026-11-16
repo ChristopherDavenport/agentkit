@@ -285,3 +285,100 @@ func TestASkillFilterThatLeavesNothingSendsNoCatalogue(t *testing.T) {
 		}
 	}
 }
+
+// A child composed with ChildConfig whose instructions a product
+// rewrote is still sent the filtered catalogue: the composition holds
+// whichever catalogue the parent's last request carried, the whole one
+// before any request, and a rewrite the composition does not know must
+// not carry it past the filter. (#142)
+func TestASkillFilterReachesAChildsRewrittenInstructions(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "skills")
+	skillDir(t, root, "digging", "how to dig", "dig with care")
+	skillDir(t, root, "secret-recipe", "PERSONS-OWN-NOTES", "the person's own")
+	child := &byPrompt{}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(&byPrompt{}, "m"),
+		agentkit.WithInstructions("Be brief."),
+		agentkit.WithSkills(root),
+		agentkit.WithSkillFilter(func(ctx context.Context, s agentskill.Skill) bool {
+			return ctx.Value(callerKey{}) == nil || s.Name != "secret-recipe"
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	cfg, err := kit.ChildConfig(agentturn.Config{Instructions: "Explore.", Model: child, ModelName: "m"}, agentkit.PartSkills)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cfg.Instructions, "secret-recipe") {
+		t.Fatalf("the composition does not hold the whole catalogue; the test would be vacuous:\n%s", cfg.Instructions)
+	}
+	cfg.Instructions += agentkit.Separator + "You answer a caller."
+	ctx := context.WithValue(t.Context(), callerKey{}, true)
+	if _, err := agentturn.New(cfg).Prompt(ctx, openresponses.UserText("from a caller")); err != nil {
+		t.Fatal(err)
+	}
+	reqs := child.requestsFor("from a caller")
+	if len(reqs) == 0 {
+		t.Fatal("no request")
+	}
+	got := reqs[0].Instructions
+	for _, hidden := range []string{"secret-recipe", "PERSONS-OWN-NOTES"} {
+		if strings.Contains(got, hidden) {
+			t.Errorf("the child's rewritten request carries %q:\n%s", hidden, got)
+		}
+	}
+	for _, kept := range []string{"Explore.", "You answer a caller.", "<name>\ndigging\n</name>"} {
+		if !strings.Contains(got, kept) {
+			t.Errorf("the child's rewritten request lost %q:\n%s", kept, got)
+		}
+	}
+}
+
+// A rewrite that holds a catalogue the kit did not render, another
+// kit's or the product's own, keeps it as written: the filter swaps
+// only a block whose every skill is in the kit's catalogue. (#142)
+func TestASkillFilterLeavesAForeignCatalogueAsWritten(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "skills")
+	skillDir(t, root, "digging", "how to dig", "dig with care")
+	skillDir(t, root, "secret-recipe", "PERSONS-OWN-NOTES", "the person's own")
+	other := filepath.Join(t.TempDir(), "other")
+	skillDir(t, other, "baking", "how to bake", "bake with care")
+	skillDir(t, other, "digging", "how to dig elsewhere", "dig elsewhere")
+	foreign, err := agentskill.DiscoverDirs(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := &byPrompt{}
+	kit, err := agentkit.New(t.Context(),
+		agentkit.WithModel(model, "m"),
+		agentkit.WithInstructions("Be brief."),
+		agentkit.WithSkills(root),
+		agentkit.WithSkillFilter(func(ctx context.Context, s agentskill.Skill) bool {
+			return ctx.Value(callerKey{}) == nil || s.Name != "secret-recipe"
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	cfg := kit.Config()
+	cfg.Instructions = agentsession.JoinInstructions(kit.Parts()) + agentkit.Separator + "Their skills:\n" + foreign.Prompt()
+	ctx := context.WithValue(t.Context(), callerKey{}, true)
+	if _, err := agentturn.New(cfg).Prompt(ctx, openresponses.UserText("from a caller")); err != nil {
+		t.Fatal(err)
+	}
+	reqs := model.requestsFor("from a caller")
+	if len(reqs) == 0 {
+		t.Fatal("no request")
+	}
+	got := reqs[0].Instructions
+	if !strings.HasSuffix(got, "Their skills:\n"+foreign.Prompt()) {
+		t.Errorf("the foreign catalogue was not kept as written:\n%s", got)
+	}
+	if strings.Contains(got, "secret-recipe") {
+		t.Errorf("the kit's catalogue was not filtered:\n%s", got)
+	}
+}

@@ -262,6 +262,13 @@ func (k *Kit) childInstructions(c *childComposition) func(context.Context, *open
 		base := k.base
 		k.mu.Unlock()
 		if !ours || k.rerender == nil {
+			// Instructions a product rewrote keep the rewrite, with each
+			// catalogue of the kit's in it filtered as the parent's are:
+			// the composition holds whichever catalogue the parent's last
+			// request carried.
+			if !ours && k.refilter != nil {
+				req.Instructions = k.refilter(ctx, req.Instructions)
+			}
 			return nil
 		}
 		r, err := k.rerender(ctx, base, c.own, c.want)

@@ -421,8 +421,11 @@ func WithoutSkillTool() Option {
 // the left-out skill's file. The memory block's share under
 // [WithInstructionBudget] is what the filtered catalogue leaves.
 // Instructions a product rewrote, such as a conversation's built from
-// [Kit.Parts], keep the rewrite, with each catalogue in them replaced by
-// the filtered one. [Kit.Config]'s instructions, which no run's context
+// [Kit.Parts], a [Kit.ChildConfig] child's included, keep the rewrite,
+// with each catalogue of the kit's in them replaced by the filtered
+// one: a catalogue every skill of which the kit's lists, whole or
+// filtered. Another kit's catalogue, or one the product wrote, is left
+// as written. [Kit.Config]'s instructions, which no run's context
 // has made, and [Kit.Catalog] hold the whole catalogue, and
 // [Kit.Omitted] does not list a skill keep left out. It has no effect
 // without skills. The last call holds.

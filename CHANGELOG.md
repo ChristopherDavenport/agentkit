@@ -19,6 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the child's tools. `Kit.Tools` still lists memory_read. The manual's
   paragraph on a write's base described the save tool v0.0.19 replaced
   and is rewritten. Closes #144.
+- Under `WithSkillFilter`, a `Kit.ChildConfig` child whose instructions
+  a product rewrote is sent the filtered catalogue: the composition
+  holds whichever catalogue the parent's last request carried, the
+  whole one before any, and v0.0.19 sent a rewrite it did not know
+  unfiltered. A rewrite's catalogue is swapped only when every skill it
+  lists is one the kit's catalogue lists; another kit's catalogue, or
+  one the product wrote, is left as written, where v0.0.19 replaced
+  every `<available_skills>` block. `writeManifest`'s read-once rule is
+  agentmemory's, agentmemory#58. Closes #142.
 
 ### Dependencies
 

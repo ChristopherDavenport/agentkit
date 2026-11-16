@@ -285,6 +285,10 @@ type Kit struct {
 	// guards, which a child's BeforeModelCall renders its parts with;
 	// set by buildHooks, before any run.
 	rerender func(ctx context.Context, base, own []Part, want map[string]bool) (rendered, error)
+	// refilter is Kit.filterRewritten over New's settings under
+	// WithSkillFilter, nil without one, which a child's BeforeModelCall
+	// runs over instructions a product rewrote; set by buildHooks.
+	refilter func(ctx context.Context, text string) string
 
 	// compact is the compaction transform the kit built, nil without
 	// one; Control.Compact asks it to fold.
@@ -1261,7 +1265,8 @@ type pendingWrite struct {
 // writeManifest is the [agentmemory.WithRendered] function of the kit's
 // memory tools: the render of the write [Kit.writeAsRendered] is
 // running, and outside one, the last render. agentmemory reads it once
-// at the start of each write, before the write touches the store, and
+// at the start of each write, before the write touches the store, a
+// rule its tools document and test since agentmemory#58, and
 // takes no context, so a write holds the turn to put its render here
 // from before its call until this read, which gives the turn back
 // ([Kit.endWrite]). The store write after it runs beside other writes.
@@ -1549,6 +1554,9 @@ func (k *Kit) buildHooks(s *settings) {
 	k.rerender = func(ctx context.Context, base, own []Part, want map[string]bool) (rendered, error) {
 		return k.render(ctx, s, guards, base, own, want)
 	}
+	if s.skillFilter != nil {
+		k.refilter = func(ctx context.Context, text string) string { return k.filterRewritten(ctx, s, text) }
+	}
 
 	// BeforeModelCall: the instructions, memory re-rendered and each
 	// part guarded, then the guards over the whole request, then the
@@ -1724,11 +1732,13 @@ var (
 )
 
 // filterRewritten is text, instructions a product rewrote, with each
-// skill catalogue in it replaced by the kit's catalogue as
+// skill catalogue of the kit's in it replaced by the kit's catalogue as
 // [WithSkillFilter] leaves it on ctx: a product that built a
 // conversation's instructions from [Kit.Parts], which hold whichever
 // catalogue the last request carried, sends the one this conversation
-// may see.
+// may see. A catalogue is the kit's when every skill it lists is one
+// the kit's catalogue lists, entry for entry, [kitsCatalogue]; another
+// kit's, or one the product wrote, is left as written.
 func (k *Kit) filterRewritten(ctx context.Context, s *settings, text string) string {
 	k.mu.Lock()
 	cat := k.catalog
@@ -1736,11 +1746,54 @@ func (k *Kit) filterRewritten(ctx context.Context, s *settings, text string) str
 	if cat == nil {
 		return text
 	}
+	ours := kitsCatalogue(cat)
 	filtered := filterCatalogue(ctx, cat, s.skillFilter)
 	if len(filtered.Listed()) == 0 {
-		return catalogueWhole.ReplaceAllLiteralString(text, "")
+		return catalogueWhole.ReplaceAllStringFunc(text, func(m string) string {
+			if ours(catalogueBlock.FindString(m)) {
+				return ""
+			}
+			return m
+		})
 	}
-	return catalogueBlock.ReplaceAllLiteralString(text, filtered.Prompt())
+	prompt := filtered.Prompt()
+	return catalogueBlock.ReplaceAllStringFunc(text, func(m string) string {
+		if ours(m) {
+			return prompt
+		}
+		return m
+	})
+}
+
+// kitsCatalogue reports of a block catalogueBlock matched whether every
+// skill it lists is one cat lists, as [agentskill.Catalog.Prompt]
+// renders that skill's entry: the whole catalogue, or a filtered one,
+// is the kit's, and a block listing a skill cat does not, or none, is
+// not.
+func kitsCatalogue(cat *agentskill.Catalog) func(block string) bool {
+	const open, shut, end = "<available_skills>\n", "</available_skills>", "</skill>\n"
+	entries := map[string]bool{}
+	for _, sk := range cat.Listed() {
+		one := (&agentskill.Catalog{Skills: []*agentskill.Skill{sk}}).Prompt()
+		entries[strings.TrimSuffix(strings.TrimPrefix(one, open), shut)] = true
+	}
+	return func(block string) bool {
+		inner, ok := strings.CutPrefix(block, open)
+		if !ok {
+			return false
+		}
+		if inner, ok = strings.CutSuffix(inner, shut); !ok || inner == "" {
+			return false
+		}
+		for inner != "" {
+			i := strings.Index(inner, end)
+			if i < 0 || !entries[inner[:i+len(end)]] {
+				return false
+			}
+			inner = inner[i+len(end):]
+		}
+		return true
+	}
 }
 
 // chain1 returns nil for no hooks, the one hook for one, and the
