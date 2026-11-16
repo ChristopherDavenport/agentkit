@@ -998,7 +998,7 @@ func (k *Kit) build(ctx context.Context, s *settings) error {
 	k.cfg.Retry = s.retry
 	k.cfg.ToolExecution, k.cfg.MaxParallelTools = s.toolExec, s.maxParallel
 	k.cfg.Filter = s.filter
-	k.cfg.AfterToolCall = s.afterToolCall
+	k.cfg.AfterToolCall = chain1(s.afterToolCall, agentturn.ChainAfterToolCall)
 
 	// ToolRecorder: the session's, when there is one, so a record a
 	// tool writes with agenttool.WriteRecord while it runs lands in the

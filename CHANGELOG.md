@@ -5,6 +5,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Changed
+
+- `WithAfterToolCall` adds a hook rather than replacing the one before
+  it: several are joined with agentturn's `ChainAfterToolCall`, in the
+  order given, each seeing the result as the hooks before it left it, as
+  `WithBeforeToolCall` appends. A product that set it twice to replace
+  the first now runs both. Closes #139.
+
 ### Fixed
 
 - A session with `WithMemory` and no index scope no longer records

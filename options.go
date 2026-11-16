@@ -137,7 +137,7 @@ type settings struct {
 	beforeTurn      []func(context.Context, agentturn.TurnStartInfo) (openresponses.Items, error)
 	beforeModelCall []func(context.Context, *openresponses.Request) error
 	beforeToolCall  []func(context.Context, agentturn.ToolCallInfo) (*agentturn.ToolDecision, error)
-	afterToolCall   func(context.Context, agentturn.ToolResultInfo) (*agentturn.ToolOverride, error)
+	afterToolCall   []func(context.Context, agentturn.ToolResultInfo) (*agentturn.ToolOverride, error)
 	elicitor        agenttool.Elicitor
 	elicitBy        string
 	questionEvents  bool
@@ -1531,11 +1531,13 @@ func WithBeforeToolCall(fn func(context.Context, agentturn.ToolCallInfo) (*agent
 	return func(s *settings) { s.beforeToolCall = append(s.beforeToolCall, fn) }
 }
 
-// WithAfterToolCall sets the hook that may replace a tool's result. The
-// kit contests nothing here, so it is the product's field alone and
-// setting it twice keeps the second.
+// WithAfterToolCall adds a hook that may replace a tool's result.
+// Several are joined with [agentturn.ChainAfterToolCall], in the order
+// given: each sees the result as the hooks before it left it, a hook
+// returning no override passes the result on unchanged, and the first
+// error stops the chain. The kit adds no hook of its own here.
 func WithAfterToolCall(fn func(context.Context, agentturn.ToolResultInfo) (*agentturn.ToolOverride, error)) Option {
-	return func(s *settings) { s.afterToolCall = fn }
+	return func(s *settings) { s.afterToolCall = append(s.afterToolCall, fn) }
 }
 
 // WithToolElicitor sets the elicitor a tool's question to the user
