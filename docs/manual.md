@@ -300,8 +300,8 @@ memTools := agentmemory.Tools(store, writable, append([]agentmemory.ToolOption{
 	}),
 }, memToolOpts...)...)
 // With no index scope, memory_read comes from a set built WithRead and is
-// offered only while the last render dropped the block (the provider,
-// below), and taken out of a request whose own render shows it
+// offered only while the conversation's last render dropped the block
+// (the provider, below), and taken out of a request whose own render shows it
 // (BeforeModelCall).
 reader := agentmemory.ReadTool
 if !slices.ContainsFunc(memTools, func(t agenttool.Tool) bool { return t.Name() == agentmemory.ReadTool }) {
@@ -374,7 +374,7 @@ offered := engine.ToolProvider(func(ctx context.Context) []agenttool.Tool {
 	} else {
 		own = byName(list)
 	}
-	if reader == agentmemory.SearchTool && !lastDropped { // under a lock
+	if reader == agentmemory.SearchTool && !droppedOf(scopeOf(ctx)) { // the conversation's last render; New's for one with none
 		// memory_read only once a render has dropped the block, so the
 		// configuration the recorder writes at a run's start, which runs
 		// no BeforeModelCall, is the first request's: a request whose
@@ -871,7 +871,7 @@ instructions := func(ctx context.Context, req *openresponses.Request) error {
 	if sent, err = guardParts(ctx, chain, layers); err != nil {
 		return err
 	}
-	last, lastDropped, rendered[agentturn.RunIDFromContext(ctx)] = m, dropped, render{m, dropped} // memory_save's base; lastDropped is the provider's
+	last, lastDropped, rendered[agentturn.RunIDFromContext(ctx)] = m, dropped, render{m, dropped} // memory_save's base; dropped is also kept under scopeOf(ctx), bounded, for the provider
 	req.Instructions = agentsession.JoinInstructions(sent)
 	if dropped {
 		req.Tools = slices.DeleteFunc(slices.Clone(req.Tools), func(t openresponses.Tool) bool {

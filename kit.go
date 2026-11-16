@@ -246,7 +246,14 @@ type Kit struct {
 	memOmitted   []Omission
 	// memDropped is true when the last render's block was dropped by the
 	// budget, which withholds the memory writes; see memoryPart.
-	memDropped bool
+	// firstDropped is New's render's, the configuration's own.
+	// convDropped is each conversation's last render's, keyed by
+	// [Kit.GrantScope], the last renderedRuns conversations to render,
+	// which is what [Kit.offerMemoryRead] reads: one conversation's
+	// render does not decide another's tools.
+	memDropped   bool
+	firstDropped bool
+	convDropped  bounded[bool]
 	// writing is the memory write whose render writeManifest hands to
 	// agentmemory next, and writeTurn, holding one token, is the turn to
 	// set it: a write takes the token and the read of its render gives
@@ -740,7 +747,7 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 			return err
 		}
 		parts[PartMemory] = group
-		k.manifest, k.memDropped = man, dropped
+		k.manifest, k.memDropped, k.firstDropped = man, dropped, dropped
 		k.memOmitted, k.firstOmitted = om, om
 	}
 
@@ -1163,7 +1170,7 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 	provider := func(ctx context.Context) []agenttool.Tool {
 		tools := union(ctx)
 		k.remember(ctx, tools)
-		return k.offerMemoryRead(tools)
+		return k.offerMemoryRead(ctx, tools)
 	}
 	if k.engine != nil {
 		// The engine's filter reads the grant scope of the context it is
@@ -1180,21 +1187,29 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 	return nil
 }
 
-// offerMemoryRead returns tools, the provider's offer, without the
-// memory_read of [Kit.memoryTools]'s second set unless the kit's last
-// render dropped the block: the configuration the recorder writes at a
-// run's start, which runs no BeforeModelCall, is then the first
-// request's whenever that request's render agrees with the last one.
-// A request whose own render first drops the block offers memory_search
-// alone, and the next one memory_read; [Kit.instructions] still takes
-// it out of a request whose render shows the block again. The kit's
-// union keeps it, so [Kit.LookupTool] finds it either way.
-func (k *Kit) offerMemoryRead(tools []agenttool.Tool) []agenttool.Tool {
+// offerMemoryRead returns tools, the provider's offer to the
+// conversation on ctx, without the memory_read of [Kit.memoryTools]'s
+// second set unless that conversation's last render dropped the block:
+// the configuration the recorder writes at a run's start, which runs no
+// BeforeModelCall, is then the first request's whenever that request's
+// render agrees with the conversation's last one. A request whose own
+// render first drops the block offers memory_search alone, and the next
+// one memory_read; [Kit.instructions] still takes it out of a request
+// whose render shows the block again. A conversation the kit has no
+// render for, a new one or one past the last renderedRuns to render,
+// takes New's render's, which its first configuration entry is written
+// from. The kit's union keeps the tool, so [Kit.LookupTool] finds it
+// either way.
+func (k *Kit) offerMemoryRead(ctx context.Context, tools []agenttool.Tool) []agenttool.Tool {
 	if !k.readOnDrop {
 		return tools
 	}
+	conv := k.GrantScope(ctx)
 	k.mu.Lock()
-	dropped := k.memDropped
+	dropped, ok := k.convDropped.get(conv)
+	if !ok {
+		dropped = k.firstDropped
+	}
 	k.mu.Unlock()
 	return offerReadIf(tools, dropped)
 }
@@ -1216,7 +1231,7 @@ func offerReadIf(tools []agenttool.Tool, dropped bool) []agenttool.Tool {
 // product asked for it, and then in every request, as agentmemory RFC
 // 0001 §6.11 requires. Otherwise memory_read comes from a second set
 // built with [agentmemory.WithRead], and is offered only while the
-// kit's last render dropped the block, [Kit.offerMemoryRead], and taken
+// conversation's last render dropped the block, [Kit.offerMemoryRead], and taken
 // out of a request whose own render shows it, [withoutMemoryRead],
 // beside memory_search: that request has no usage paragraph and no
 // writer, so nothing in it names a tool it does not offer.
@@ -1893,6 +1908,10 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 		if err != nil {
 			return err
 		}
+		var conv string
+		if r.memory && k.readOnDrop {
+			conv = k.GrantScope(ctx)
+		}
 
 		k.mu.Lock()
 		k.base, k.parts = r.base, r.sent
@@ -1904,6 +1923,9 @@ func (k *Kit) instructions(s *settings, guards guard.Chain) func(context.Context
 		}
 		if r.memory {
 			k.manifest, k.memOmitted, k.memDropped = r.man, r.memOm, r.dropped
+			if conv != "" {
+				k.convDropped.put(conv, r.dropped)
+			}
 			if id := agentturn.RunIDFromContext(ctx); id != "" {
 				k.rendered.put(id, memoryRender{man: r.man, dropped: r.dropped})
 			}

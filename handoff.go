@@ -82,7 +82,7 @@ func (k *Kit) Offer(ctx context.Context, _ string, tools []agenttool.Tool) []age
 		}
 		out = append(slices.Clone(out[transfers:]), out[:transfers]...)
 		k.remember(ctx, out)
-		return k.offerMemoryRead(out)
+		return k.offerMemoryRead(ctx, out)
 	}
 	if k.engine == nil {
 		return union(ctx)

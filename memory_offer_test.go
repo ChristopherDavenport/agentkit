@@ -9,6 +9,7 @@ import (
 
 	"github.com/ChristopherDavenport/agentkit"
 	"github.com/ChristopherDavenport/agentmemory"
+	"github.com/ChristopherDavenport/agentpolicy"
 	"github.com/ChristopherDavenport/agentsession"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
@@ -182,5 +183,89 @@ func TestAChildsFirstRequestRemovesNoMemoryTool(t *testing.T) {
 	s := openSession(t, sessions, agentsession.SubsessionID(kit.SessionID(), "call-explore"))
 	if got := toolChanges(t, s); len(got) != 0 {
 		t.Fatalf("the child's first request changed its configuration's tools: %v", got)
+	}
+}
+
+// Whether the last render dropped the block is each conversation's own:
+// an A2A caller's render on the person's kit, which fits, does not take
+// memory_read from the person's next request, whose block is still
+// dropped, and the person's record does not flip memory_read per
+// interleaved turn. (#144 review F2)
+func TestMemoryReadFollowsEachConversationsOwnRender(t *testing.T) {
+	var grown atomic.Bool
+	part := func(ctx context.Context) (agentkit.PartRender, error) {
+		if ctx.Value(callerKey{}) != nil || !grown.Load() {
+			return agentkit.PartRender{Text: "rules"}, nil
+		}
+		return agentkit.PartRender{Text: strings.Repeat("r", 2000)}, nil
+	}
+	opts := func(model agentturn.Model, budget int64) []agentkit.Option {
+		return []agentkit.Option{
+			agentkit.WithModel(model, "m"),
+			agentkit.WithInstructions("be brief"),
+			agentkit.WithPart("rules", "product", part),
+			agentkit.WithMemory(memStore(t, agentmemory.Entry{Scope: "user", Name: "tea", Content: "tea, not coffee"}), "user"),
+			agentkit.WithInstructionBudget(budget),
+			agentkit.WithSession(agentsession.NewMemoryStore(), agentsession.Header{}),
+		}
+	}
+	whole, err := agentkit.New(t.Context(), opts(stubModel{}, 0)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := int64(len(whole.Config().Instructions)) + 100
+	whole.Close()
+	model := &scriptModel{}
+	kit, err := agentkit.New(t.Context(), opts(model, budget)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kit.Close()
+	// The person's rules grow past the budget after New: the person's
+	// block is dropped from the first request on, a caller's still fits.
+	grown.Store(true)
+	person := agentturn.New(kit.Config(), kit.AgentOptions()...)
+	defer kit.Attach(person)()
+	caller := agentturn.New(kit.Config())
+	callerCtx := agentpolicy.ContextWithGrantScope(context.WithValue(t.Context(), callerKey{}, true), "a2a:caller-1")
+
+	for _, step := range []struct {
+		prompt string
+		agent  *agentturn.Agent
+		ctx    context.Context
+	}{
+		{"person one", person, t.Context()},
+		{"caller one", caller, callerCtx},
+		{"person two", person, t.Context()},
+		{"caller two", caller, callerCtx},
+		{"person three", person, t.Context()},
+	} {
+		if _, err := step.agent.Prompt(step.ctx, openresponses.UserText(step.prompt)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The request that first drops the block offers memory_search
+	// alone; every later one of the person's offers memory_read.
+	reqs := model.requests()
+	if len(reqs) != 5 {
+		t.Fatalf("requests = %d, want 5", len(reqs))
+	}
+	for _, c := range []struct {
+		prompt string
+		i      int
+		read   bool
+	}{{"person one", 0, false}, {"person two", 2, true}, {"person three", 4, true}} {
+		names := offeredNames(reqs[c.i])
+		if slices.Contains(names, agentmemory.ReadTool) != c.read || slices.Contains(names, agentmemory.SaveTool) {
+			t.Errorf("%s offers %v, want %s %v and no writes: the person's block is dropped", c.prompt, names, agentmemory.ReadTool, c.read)
+		}
+	}
+	if slices.Contains(offeredNames(reqs[3]), agentmemory.ReadTool) {
+		t.Errorf("the caller, whose block fits, was offered %s", agentmemory.ReadTool)
+	}
+	// The drop, and memory_read on the next request: nothing flips
+	// with the caller's turns.
+	if got := toolChanges(t, kit.Session()); len(got) != 2 {
+		t.Errorf("the person's record changed the tools %d times, want the drop and memory_read once: %v", len(got), got)
 	}
 }

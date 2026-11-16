@@ -43,8 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - A session with `WithMemory` and no index scope no longer records
   `tools_removed: ["memory_read"]` on its first request: the kit's
-  `ToolProvider` offers memory_read only while the kit's last render
-  dropped the block, so the configuration the recorder writes at a
+  `ToolProvider` offers memory_read only while the conversation's last
+  render dropped the block (per `Kit.GrantScope`, the last 1024
+  conversations to render; one the kit has none for takes `New`'s
+  render's), so the configuration the recorder writes at a
   run's start is the first request's again (#138's invariant). A
   request whose own render first drops the block offers memory_search
   alone, and the next one memory_read; a render that shows the block

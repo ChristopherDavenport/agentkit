@@ -641,7 +641,9 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 // recorder writes at a run's start must be the first request's, so the
 // request that first drops the block offers memory_search alone. The
 // block, and the writes, come back on the first render that fits, and
-// memory_read leaves that request.
+// memory_read leaves that request. Each conversation's last render
+// decides its own offer, by [Kit.GrantScope]: an A2A caller's render on
+// the same kit does not take memory_read from the person's requests.
 //
 // The block is recorded as one part per piece
 // [agentmemory.RenderParts] returns, the title, each scope's heading,
@@ -791,8 +793,8 @@ func WithMemoryRender(opts ...agentmemory.RenderOption) Option {
 // under [WithMemoryReadScopes] [agentmemory.WithReadScopes], and
 // [agentmemory.WithIndexScopesOf] of [WithMemoryRender]'s options, so
 // memory_read is offered in every request when a scope renders as an
-// index. Without one it is offered only while the kit's last render
-// dropped the block, beside memory_search, from the request after the
+// index. Without one it is offered only while the conversation's last
+// render dropped the block, beside memory_search, from the request after the
 // drop (see [WithMemory]); [agentmemory.WithRead] given
 // here offers it in every request, and the usage paragraph names it. A
 // read scope given here that [WithMemory] also names is an error from

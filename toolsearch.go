@@ -796,7 +796,7 @@ func (k *Kit) settleHeld(ctx context.Context, s *settings) error {
 		k.mcpOmitted, k.firstMCPOmitted = om, om
 	}
 	if memory {
-		k.manifest, k.memDropped = man, dropped
+		k.manifest, k.memDropped, k.firstDropped = man, dropped, dropped
 		k.memOmitted, k.firstOmitted = memOm, memOm
 	}
 	k.cfg.Instructions = agentsession.JoinInstructions(sent)
