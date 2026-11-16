@@ -834,11 +834,12 @@ instructions := func(ctx context.Context, req *openresponses.Request) error {
 	// A request whose instructions the product rewrote, with no memory
 	// block to render, and a child's whose rewrite its composition does
 	// not know, is sent as the product wrote it, each
-	// <available_skills>…</available_skills> in it whose every <skill>
-	// entry is one cat.Prompt() lists replaced by filtered.Prompt(), or
-	// taken out with its usage paragraph when the filtered catalogue
-	// lists nothing; another kit's catalogue, or the product's own, is
-	// left as written.
+	// <available_skills>…</available_skills> in it holding any <skill>
+	// whose <location> is one a catalogue of the kit's has listed since
+	// New (kept across ReloadSkills) replaced whole by filtered.Prompt(),
+	// or taken out with its usage paragraph when the filtered catalogue
+	// lists nothing; a block with none of the kit's skills, another
+	// kit's or the product's own, is left as written.
 	// Each WithPart part rendered again, in its place, {id, text, source,
 	// trust}; an empty text leaves it out of this request. The memory
 	// share is the budget less every part but memory's.

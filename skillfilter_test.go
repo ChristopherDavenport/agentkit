@@ -3,6 +3,7 @@ package agentkit_test
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -380,5 +381,98 @@ func TestASkillFilterLeavesAForeignCatalogueAsWritten(t *testing.T) {
 	}
 	if strings.Contains(got, "secret-recipe") {
 		t.Errorf("the kit's catalogue was not filtered:\n%s", got)
+	}
+}
+
+// dax serve -a2a's shape: a peer configuration built once from
+// Kit.Parts(), the whole catalogue in it, before the person changes the
+// learned skills and the kit reloads them. Each caller's request is
+// still sent the filtered catalogue, whatever the reload did to the
+// baked block: a learned skill edited, one deleted, an installed skill
+// added under a learned one's name, which qualifies the learned one's
+// listed name, and a block a product mixed a foreign entry into. The
+// swap fails closed: a block holding any skill the kit has listed is
+// the kit's. (#142 review F1)
+func TestASkillFilterFailsClosedOnAStalePeerCatalogue(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		change func(t *testing.T, installed, learned string)
+		mix    bool
+	}{
+		{"edited", func(t *testing.T, _, learned string) {
+			skillDir(t, learned, "secret-recipe", "PERSONS-OWN-NOTES now edited", "the person's own, edited")
+		}, false},
+		{"deleted", func(t *testing.T, _, learned string) {
+			if err := os.RemoveAll(filepath.Join(learned, "secret-recipe")); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"colliding name", func(t *testing.T, installed, _ string) {
+			skillDir(t, installed, "secret-recipe", "an installed recipe", "installed")
+		}, false},
+		{"mixed block", nil, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			installed := filepath.Join(t.TempDir(), "installed")
+			learned := filepath.Join(t.TempDir(), "learned")
+			skillDir(t, installed, "digging", "how to dig", "dig with care")
+			skillDir(t, learned, "secret-recipe", "PERSONS-OWN-NOTES", "the person's own")
+			skillDir(t, learned, "other-note", "PERSONS-OTHER-NOTES", "the person's other")
+			model := &byPrompt{}
+			kit, err := agentkit.New(t.Context(),
+				agentkit.WithModel(model, "m"),
+				agentkit.WithInstructions("Be brief."),
+				agentkit.WithSkills(installed),
+				agentkit.WithSkillSources(agentskill.Source{FS: os.DirFS(learned), Location: learned, Qualifier: "learned"}),
+				agentkit.WithSkillFilter(func(ctx context.Context, s agentskill.Skill) bool {
+					return ctx.Value(callerKey{}) == nil || !strings.HasPrefix(s.Location, learned)
+				}),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer kit.Close()
+			peer := kit.Config()
+			baked := agentsession.JoinInstructions(kit.Parts())
+			if !strings.Contains(baked, "PERSONS-OWN-NOTES") {
+				t.Fatalf("the peer text does not hold the whole catalogue; the test would be vacuous:\n%s", baked)
+			}
+			if c.mix {
+				foreign := filepath.Join(t.TempDir(), "foreign")
+				skillDir(t, foreign, "baking", "how to bake", "bake")
+				cat, err := agentskill.DiscoverDirs(foreign)
+				if err != nil {
+					t.Fatal(err)
+				}
+				entry := strings.TrimSuffix(strings.TrimPrefix(cat.Prompt(), "<available_skills>\n"), "</available_skills>")
+				baked = strings.Replace(baked, "</available_skills>", entry+"</available_skills>", 1)
+			}
+			peer.Instructions = baked + agentkit.Separator + "You answer a caller."
+			if c.change != nil {
+				c.change(t, installed, learned)
+				if err := kit.ReloadSkills(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx := context.WithValue(t.Context(), callerKey{}, true)
+			if _, err := agentturn.New(peer).Prompt(ctx, openresponses.UserText("from a caller")); err != nil {
+				t.Fatal(err)
+			}
+			reqs := model.requestsFor("from a caller")
+			if len(reqs) == 0 {
+				t.Fatal("no request")
+			}
+			got := reqs[0].Instructions
+			for _, hidden := range []string{"PERSONS-OWN-NOTES", "PERSONS-OTHER-NOTES", learned} {
+				if strings.Contains(got, hidden) {
+					t.Errorf("the caller's request carries %q:\n%s", hidden, got)
+				}
+			}
+			for _, kept := range []string{"You answer a caller.", "<name>\ndigging\n</name>"} {
+				if !strings.Contains(got, kept) {
+					t.Errorf("the caller's request lost %q:\n%s", kept, got)
+				}
+			}
+		})
 	}
 }

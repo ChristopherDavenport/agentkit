@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"os/exec"
 	"regexp"
@@ -183,8 +184,14 @@ type Kit struct {
 	// the configuration's own instructions, as the guards left New's
 	// render, which never changes. They are the same slice until a
 	// guard runs or memory re-renders.
-	mu        sync.Mutex
-	catalog   *agentskill.Catalog
+	mu      sync.Mutex
+	catalog *agentskill.Catalog
+	// listed is every skill the kit's catalogue has listed since New, by
+	// [listedKey], which is how [Kit.filterRewritten] tells the kit's
+	// catalogue in a product's rewrite from another: a skill edited,
+	// removed or renamed by a reload since the rewrite was made is
+	// still the kit's. It grows only with the kit's own skills.
+	listed    map[string]bool
 	skillTool agenttool.Tool
 	base      []Part
 	parts     []Part
@@ -611,7 +618,7 @@ func (k *Kit) assemble(ctx context.Context, s *settings) error {
 			return err
 		}
 		if cat != nil {
-			k.catalog = cat
+			k.setCatalog(cat)
 			parts[PartSkills] = single(part)
 			k.omitted = append(k.omitted, om...)
 			if s.skillGrants {
@@ -1760,17 +1767,20 @@ var (
 // [WithSkillFilter] leaves it on ctx: a product that built a
 // conversation's instructions from [Kit.Parts], which hold whichever
 // catalogue the last request carried, sends the one this conversation
-// may see. A catalogue is the kit's when every skill it lists is one
-// the kit's catalogue lists, entry for entry, [kitsCatalogue]; another
-// kit's, or one the product wrote, is left as written.
+// may see. A catalogue is the kit's when any skill it lists is one the
+// kit has listed since New, by location, [Kit.kitsCatalogue], however
+// a reload has changed the catalogue since the rewrite was made; such a
+// block is replaced whole, a foreign entry mixed into it included, so
+// the swap fails closed. A block that lists none of the kit's skills,
+// another kit's or one the product wrote, is left as written.
 func (k *Kit) filterRewritten(ctx context.Context, s *settings, text string) string {
 	k.mu.Lock()
 	cat := k.catalog
+	ours := k.kitsCatalogue()
 	k.mu.Unlock()
 	if cat == nil {
 		return text
 	}
-	ours := kitsCatalogue(cat)
 	filtered := filterCatalogue(ctx, cat, s.skillFilter)
 	if len(filtered.Listed()) == 0 {
 		return catalogueWhole.ReplaceAllStringFunc(text, func(m string) string {
@@ -1789,34 +1799,49 @@ func (k *Kit) filterRewritten(ctx context.Context, s *settings, text string) str
 	})
 }
 
-// kitsCatalogue reports of a block catalogueBlock matched whether every
-// skill it lists is one cat lists, as [agentskill.Catalog.Prompt]
-// renders that skill's entry: the whole catalogue, or a filtered one,
-// is the kit's, and a block listing a skill cat does not, or none, is
-// not.
-func kitsCatalogue(cat *agentskill.Catalog) func(block string) bool {
-	const open, shut, end = "<available_skills>\n", "</available_skills>", "</skill>\n"
-	entries := map[string]bool{}
-	for _, sk := range cat.Listed() {
-		one := (&agentskill.Catalog{Skills: []*agentskill.Skill{sk}}).Prompt()
-		entries[strings.TrimSuffix(strings.TrimPrefix(one, open), shut)] = true
+// setCatalog puts cat in force and adds its skills to those the kit
+// has listed. The caller holds mu, or is New before any run.
+func (k *Kit) setCatalog(cat *agentskill.Catalog) {
+	k.catalog = cat
+	if k.listed == nil {
+		k.listed = map[string]bool{}
 	}
+	for _, sk := range cat.Listed() {
+		k.listed[listedKey(sk.Location, skillEscape(sk.ListedName()))] = true
+	}
+}
+
+// listedKey is how a catalogue entry is known as the kit's: its
+// location, which a reload leaves as it was for a skill it edits or
+// whose listed name it qualifies, or, for a skill with none, the name
+// it is listed under, escaped as the prompt writes it.
+func listedKey(location, escapedName string) string {
+	if location != "" {
+		return "location\x00" + location
+	}
+	return "name\x00" + escapedName
+}
+
+// skillEscape is agentskill's escape of a name in the prompt: Python's
+// html.escape, the apostrophe as &#x27;.
+var skillEscape = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#x27;").Replace
+
+// catalogueEntry is one skill of a catalogue as [agentskill.Catalog.Prompt]
+// renders it: its listed name, escaped, and its location, unescaped.
+var catalogueEntry = regexp.MustCompile(`(?s)<skill>\n<name>\n(.*?)\n</name>\n.*?<location>\n(.*?)\n</location>\n</skill>`)
+
+// kitsCatalogue reports of a block catalogueBlock matched whether any
+// skill it lists is one the kit has listed, [Kit.setCatalog]. The
+// caller holds mu; the function it returns reads a copy.
+func (k *Kit) kitsCatalogue() func(block string) bool {
+	listed := maps.Clone(k.listed)
 	return func(block string) bool {
-		inner, ok := strings.CutPrefix(block, open)
-		if !ok {
-			return false
-		}
-		if inner, ok = strings.CutSuffix(inner, shut); !ok || inner == "" {
-			return false
-		}
-		for inner != "" {
-			i := strings.Index(inner, end)
-			if i < 0 || !entries[inner[:i+len(end)]] {
-				return false
+		for _, m := range catalogueEntry.FindAllStringSubmatch(block, -1) {
+			if listed[listedKey(m[2], m[1])] {
+				return true
 			}
-			inner = inner[i+len(end):]
 		}
-		return true
+		return false
 	}
 }
 
@@ -3704,7 +3729,8 @@ func (k *Kit) ReloadSkills(ctx context.Context) error {
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	k.catalog, k.skillTool = cat, tool
+	k.setCatalog(cat)
+	k.skillTool = tool
 	k.base = withGroup(k.base, PartSkills, single(part), k.order)
 	k.parts = withGroup(k.parts, PartSkills, sentPart, k.order)
 	first := withGroup(k.first, PartSkills, sentPart, k.order)

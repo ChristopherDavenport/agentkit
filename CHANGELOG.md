@@ -57,10 +57,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   a product rewrote is sent the filtered catalogue: the composition
   holds whichever catalogue the parent's last request carried, the
   whole one before any, and v0.0.19 sent a rewrite it did not know
-  unfiltered. A rewrite's catalogue is swapped only when every skill it
-  lists is one the kit's catalogue lists; another kit's catalogue, or
-  one the product wrote, is left as written, where v0.0.19 replaced
-  every `<available_skills>` block. `writeManifest`'s read-once rule is
+  unfiltered. A rewrite's catalogue is swapped, whole, when any skill it
+  lists is one the kit has listed since `New`, known by its location,
+  so a rewrite made before a `ReloadSkills` edited, removed or renamed
+  a skill, or one a product mixed its own entry into, is still
+  filtered; a catalogue listing none of the kit's skills, another
+  kit's or one the product wrote, is left as written, where v0.0.19
+  replaced every `<available_skills>` block. `writeManifest`'s read-once rule is
   agentmemory's, agentmemory#58. Closes #142.
 
 ### Dependencies
