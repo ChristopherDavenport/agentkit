@@ -1357,8 +1357,14 @@ func TestToolsNamesEachToolWithItsSource(t *testing.T) {
 	if _, ok := from["memory_forget"]; ok {
 		t.Error("a tool the filter dropped is listed")
 	}
-	if got, want := len(kit.Tools()), len(kit.Config().ResolveTools(t.Context())); got != want {
-		t.Errorf("Tools lists %d, the config offers %d", got, want)
+	// memory_read is listed, for a policy to name, though with no index
+	// scope the config offers it only once a render has dropped the
+	// block, which this one did not. (#144)
+	if from[agentmemory.ReadTool] != "WithMemory" {
+		t.Errorf("%s comes from %q, want WithMemory", agentmemory.ReadTool, from[agentmemory.ReadTool])
+	}
+	if got, want := len(kit.Tools()), len(kit.Config().ResolveTools(t.Context()))+1; got != want {
+		t.Errorf("Tools lists %d, want the config's offer and %s, %d", got, agentmemory.ReadTool, want)
 	}
 }
 

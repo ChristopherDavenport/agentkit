@@ -300,7 +300,9 @@ memTools := agentmemory.Tools(store, writable, append([]agentmemory.ToolOption{
 	}),
 }, memToolOpts...)...)
 // With no index scope, memory_read comes from a set built WithRead and is
-// withheld from every request whose block was sent (BeforeModelCall).
+// offered only while the last render dropped the block (the provider,
+// below), and taken out of a request whose own render shows it
+// (BeforeModelCall).
 reader := agentmemory.ReadTool
 if !slices.ContainsFunc(memTools, func(t agenttool.Tool) bool { return t.Name() == agentmemory.ReadTool }) {
 	reader = agentmemory.SearchTool
@@ -371,6 +373,14 @@ offered := engine.ToolProvider(func(ctx context.Context) []agenttool.Tool {
 		unions[run] = byName(list) // for lookup, below
 	} else {
 		own = byName(list)
+	}
+	if reader == agentmemory.SearchTool && !lastDropped { // under a lock
+		// memory_read only once a render has dropped the block, so the
+		// configuration the recorder writes at a run's start, which runs
+		// no BeforeModelCall, is the first request's: a request whose
+		// own render first drops the block offers memory_search alone,
+		// and the next one memory_read.
+		list = slices.DeleteFunc(slices.Clone(list), func(t agenttool.Tool) bool { return t.Name() == agentmemory.ReadTool })
 	}
 	return list
 })
@@ -493,25 +503,30 @@ under it.
 `agentmemory.WithRendered` bases a `memory_save` on the hash the block
 showed the model, so a write another session made after the render is
 a lost update `agentmemory.LostUpdates` reports. The render is the
-save's own run's: the hook keeps each run's last render under
-`agentturn.RunIDFromContext(ctx)`, and the save is built per call over
-it (`based(...)[0]` is `memory_save`, the first tool `agentmemory.Tools`
-returns). Two runs off one kit render in turn, and a save based on the
-other run's render, which may already hold a write a third session made
-in between, discards that write with nothing reported. A save held for
-approval runs in the `Resume`, a run of its own that has not rendered,
-so `saveBase` keeps its run's render: `keepSaveBase`, the first
+write's own run's: the hook keeps each run's last render under
+`agentturn.RunIDFromContext(ctx)`, and the one tool set's
+`WithRendered` function hands agentmemory the render of the write that
+holds the turn, set by that write's wrapper just before its call
+(`writing`, above). agentmemory reads it once, at the start of each
+write, before the write touches the store (agentmemory#58 makes that
+read-once rule its contract), and the read gives the turn back, so a
+slow store write holds up no other conversation's write. Two runs off
+one kit render in turn, and a save based on the other run's render,
+which may already hold a write a third session made in between,
+discards that write with nothing reported. A write held for approval
+runs in the `Resume`, a run of its own that has not rendered, so
+`saveBase` keeps its run's render: `keepSaveBase`, the first
 `BeforeToolCall` hook ([below](#beforetoolcall-and-the-engine)), puts
-it there each time a `memory_save` call is decided in a run that
-rendered, keyed by the session on the context and the call ID, since
-two conversations whose provider numbers its calls both have a
-`call_0`. It runs ahead of whatever holds the call, the kit's engine,
-one built for `WithEngine` or a product hook, so the base is kept
-whoever holds it. After a restart, or once the bounded maps have
-dropped the run, `manifestAtCall` folds the manifest records on the
-path of the run's session, `recorderFor(ctx)`'s, read through
-`rec.Store().Open`, up to the call, and takes what is in force there
-only when no other run's render can be the last record:
+it there each time a memory write is decided in a run that rendered,
+keyed by the session on the context and the call ID, since two
+conversations whose provider numbers its calls both have a `call_0`.
+It runs ahead of whatever holds the call, the kit's engine, one built
+for `WithEngine` or a product hook, so the base is kept whoever holds
+it. After a restart, or once the bounded maps have dropped the run,
+`manifestAtCall` folds the manifest records on the path of the run's
+session, `recorderFor(ctx)`'s, read through `rec.Store().Open`, up to
+the call, and takes what is in force there only when no other run's
+render can be the last record:
 
 ```go
 manifestAtCall := func(ctx context.Context, callID string) (agentmemory.Manifest, bool) {
@@ -666,6 +681,19 @@ childCfg.Instructions = agentsession.JoinInstructions(append(sentOwn, selected(k
 // session, and the prompt and the groups each guarded with guardParts.
 // Ahead of the child's own.
 childCfg.BeforeModelCall = agentturn.ChainBeforeModelCall(renderChild, childCfg.BeforeModelCall)
+// With memory and no index scope, a child whose tools hold memory_read
+// (a ToolProvider, or Tools naming it) is offered it as the parent is:
+// only while renderChild's last render dropped the block.
+if memory && (childCfg.ToolProvider != nil || holdsRead(childCfg.Tools)) {
+	resolve := childCfg.ResolveTools
+	childCfg.ToolProvider = func(ctx context.Context) []agenttool.Tool {
+		tools := resolve(ctx)
+		if reader == agentmemory.SearchTool && !childLastDropped { // under a lock
+			tools = withoutRead(tools)
+		}
+		return tools
+	}
+}
 ```
 
 and the parts function the kit's recorder takes knows both the text the
@@ -839,14 +867,14 @@ instructions := func(ctx context.Context, req *openresponses.Request) error {
 	if sent, err = guardParts(ctx, chain, layers); err != nil {
 		return err
 	}
-	last, rendered[agentturn.RunIDFromContext(ctx)] = m, render{m, dropped} // memory_save's base
+	last, lastDropped, rendered[agentturn.RunIDFromContext(ctx)] = m, dropped, render{m, dropped} // memory_save's base; lastDropped is the provider's
 	req.Instructions = agentsession.JoinInstructions(sent)
 	if dropped {
 		req.Tools = slices.DeleteFunc(slices.Clone(req.Tools), func(t openresponses.Tool) bool {
 			f, ok := t.(*openresponses.FunctionTool)
 			return ok && slices.Contains(agentmemory.WriteTools(), f.Name)
 		})
-	} else if reader == agentmemory.SearchTool { // memory_read for a dropped block alone
+	} else if reader == agentmemory.SearchTool { // memory_read for a dropped block alone: the provider offered it after a drop
 		req.Tools = slices.DeleteFunc(slices.Clone(req.Tools), func(t openresponses.Tool) bool {
 			f, ok := t.(*openresponses.FunctionTool)
 			return ok && f.Name == agentmemory.ReadTool

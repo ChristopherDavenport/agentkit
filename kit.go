@@ -1152,7 +1152,7 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 	provider := func(ctx context.Context) []agenttool.Tool {
 		tools := union(ctx)
 		k.remember(ctx, tools)
-		return tools
+		return k.offerMemoryRead(tools)
 	}
 	if k.engine != nil {
 		// The engine's filter reads the grant scope of the context it is
@@ -1169,6 +1169,34 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 	return nil
 }
 
+// offerMemoryRead returns tools, the provider's offer, without the
+// memory_read of [Kit.memoryTools]'s second set unless the kit's last
+// render dropped the block: the configuration the recorder writes at a
+// run's start, which runs no BeforeModelCall, is then the first
+// request's whenever that request's render agrees with the last one.
+// A request whose own render first drops the block offers memory_search
+// alone, and the next one memory_read; [Kit.instructions] still takes
+// it out of a request whose render shows the block again. The kit's
+// union keeps it, so [Kit.LookupTool] finds it either way.
+func (k *Kit) offerMemoryRead(tools []agenttool.Tool) []agenttool.Tool {
+	if !k.readOnDrop {
+		return tools
+	}
+	k.mu.Lock()
+	dropped := k.memDropped
+	k.mu.Unlock()
+	return offerReadIf(tools, dropped)
+}
+
+// offerReadIf returns tools without memory_read unless dropped.
+func offerReadIf(tools []agenttool.Tool, dropped bool) []agenttool.Tool {
+	isRead := func(t agenttool.Tool) bool { return t.Name() == agentmemory.ReadTool }
+	if dropped || !slices.ContainsFunc(tools, isRead) {
+		return tools
+	}
+	return slices.DeleteFunc(slices.Clone(tools), isRead)
+}
+
 // memoryTools builds agentmemory's tools over the writable scopes, one
 // tool set, with [agentmemory.WithRendered] returning the render the
 // calling write's run was shown, [Kit.writeAsRendered], and the kit's
@@ -1176,10 +1204,11 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 // That set offers memory_read when a scope renders as an index, or the
 // product asked for it, and then in every request, as agentmemory RFC
 // 0001 §6.11 requires. Otherwise memory_read comes from a second set
-// built with [agentmemory.WithRead], and is offered only in a request
-// whose block the budget dropped, [withoutMemoryRead], beside
-// memory_search: that request has no usage paragraph and no writer, so
-// nothing in it names a tool it does not offer.
+// built with [agentmemory.WithRead], and is offered only while the
+// kit's last render dropped the block, [Kit.offerMemoryRead], and taken
+// out of a request whose own render shows it, [withoutMemoryRead],
+// beside memory_search: that request has no usage paragraph and no
+// writer, so nothing in it names a tool it does not offer.
 // agentmemory.Tools panics on scopes it cannot build over, and New is
 // the call documented to fail, so the panic is returned as an error.
 func (k *Kit) memoryTools(s *settings) (tools []agenttool.Tool, err error) {
@@ -3280,6 +3309,8 @@ func (k *Kit) markHeld(out []ToolOrigin) []ToolOrigin {
 // Deferred set, since the model may load it, and tool_search, from the
 // source "WithToolSearch", after the rest while any is held. A provider's list is fetched each turn too and is listed as it
 // was at New, so a tool a [WithToolProvider] adds later is not here.
+// memory_read is listed whenever [WithMemory] builds it, though with no
+// index scope a request is offered it only while the block is dropped.
 // The filter, the product's wrapper and the kit's own run on every
 // listing, under context.Background, so a wrapper with side effects has
 // them here too. A tool the engine takes off the offer, by a bare deny

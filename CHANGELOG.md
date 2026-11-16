@@ -5,6 +5,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Fixed
+
+- A session with `WithMemory` and no index scope no longer records
+  `tools_removed: ["memory_read"]` on its first request: the kit's
+  `ToolProvider` offers memory_read only while the kit's last render
+  dropped the block, so the configuration the recorder writes at a
+  run's start is the first request's again (#138's invariant). A
+  request whose own render first drops the block offers memory_search
+  alone, and the next one memory_read; a render that shows the block
+  again still takes it out. `Kit.ChildConfig` applies the same rule to
+  a child whose tools hold memory_read, through a `ToolProvider` over
+  the child's tools. `Kit.Tools` still lists memory_read. The manual's
+  paragraph on a write's base described the save tool v0.0.19 replaced
+  and is rewritten. Closes #144.
+
 ### Dependencies
 
 - **Breaking**: requires agentturn and agentturn/session v0.0.41, up

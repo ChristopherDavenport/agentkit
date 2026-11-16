@@ -638,9 +638,14 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 // refused when it runs, which may be in a Resume: the render kept for
 // the call says the block was dropped, and after a restart the manifest
 // recorded at the call does ([agentmemory.Manifest.Dropped]). memory_search
-// stays offered, and memory_read is, to read an entry by name, and
-// [Kit.Omitted] lists every entry the drop left out. The
-// block, and the writes, come back on the first render that fits.
+// stays offered, and [Kit.Omitted] lists every entry the drop left out.
+// memory_read, to read an entry by name, is offered from the next
+// request on, while the last render dropped the block: the tools are
+// asked for before the request is rendered, and the configuration the
+// recorder writes at a run's start must be the first request's, so the
+// request that first drops the block offers memory_search alone. The
+// block, and the writes, come back on the first render that fits, and
+// memory_read leaves that request.
 //
 // The block is recorded as one part per piece
 // [agentmemory.RenderParts] returns, the title, each scope's heading,
@@ -790,8 +795,9 @@ func WithMemoryRender(opts ...agentmemory.RenderOption) Option {
 // under [WithMemoryReadScopes] [agentmemory.WithReadScopes], and
 // [agentmemory.WithIndexScopesOf] of [WithMemoryRender]'s options, so
 // memory_read is offered in every request when a scope renders as an
-// index. Without one it is offered only in a request whose block the
-// budget dropped, beside memory_search; [agentmemory.WithRead] given
+// index. Without one it is offered only while the kit's last render
+// dropped the block, beside memory_search, from the request after the
+// drop (see [WithMemory]); [agentmemory.WithRead] given
 // here offers it in every request, and the usage paragraph names it. A
 // read scope given here that [WithMemory] also names is an error from
 // [New]; name it in [WithMemoryReadScopes] instead.
