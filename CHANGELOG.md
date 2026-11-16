@@ -33,11 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   did under `WithCompactionModel`. Under `WithCompactionModel` the
   summary names the agent's model as at `New`, as before. Closes #143.
 
-- `WithAfterToolCall` adds a hook rather than replacing the one before
-  it: several are joined with agentturn's `ChainAfterToolCall`, in the
-  order given, each seeing the result as the hooks before it left it, as
-  `WithBeforeToolCall` appends. A product that set it twice to replace
-  the first now runs both. Closes #139.
+- **Breaking**: `WithAfterToolCall` adds a hook rather than replacing
+  the one before it: several are joined with agentturn's
+  `ChainAfterToolCall`, in the order given, each seeing the result as
+  the hooks before it left it, as `WithBeforeToolCall` appends. A
+  product that set it twice to replace the first now runs both, and
+  `WithAfterToolCall(nil)` no longer clears an earlier hook: a nil hook
+  is passed over. Closes #139.
 
 ### Fixed
 

@@ -1547,7 +1547,8 @@ func WithBeforeToolCall(fn func(context.Context, agentturn.ToolCallInfo) (*agent
 // Several are joined with [agentturn.ChainAfterToolCall], in the order
 // given: each sees the result as the hooks before it left it, a hook
 // returning no override passes the result on unchanged, and the first
-// error stops the chain. The kit adds no hook of its own here.
+// error stops the chain. A nil fn is passed over, so it does not clear
+// an earlier hook. The kit adds no hook of its own here.
 func WithAfterToolCall(fn func(context.Context, agentturn.ToolResultInfo) (*agentturn.ToolOverride, error)) Option {
 	return func(s *settings) { s.afterToolCall = append(s.afterToolCall, fn) }
 }
