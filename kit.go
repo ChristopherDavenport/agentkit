@@ -1753,7 +1753,9 @@ func (k *Kit) compactNext(instructions string) error {
 // context window calls it when it switches the agent's model; the kit
 // does not know a model's window. The kit writes no entry for the
 // change, which is the host's setting to record; each fold's record
-// carries the budget it was made under. Without compaction it returns
+// carries the budget it was made under. The kit has one transform, so
+// the budget is every conversation's the kit serves, an A2A caller's
+// beside the person's. Without compaction it returns
 // [ErrNoCompaction].
 func (k *Kit) SetCompactionBudget(tokens int) error {
 	if k.compact == nil {
