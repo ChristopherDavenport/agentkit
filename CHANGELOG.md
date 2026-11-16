@@ -5,6 +5,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- `Kit.SetCompactionBudgetFor(scope, tokens)` gives one conversation
+  of the kit, by its grant scope (`Kit.GrantScope`), a compaction
+  budget of its own, which `Kit.SetCompactionBudget` then leaves as it
+  is: a host that serves A2A callers on the model they started with
+  beside the person's conversation switches the person's budget
+  without folding the callers earlier than they need. 0 is no budget,
+  as kit-wide; a conversation with none set follows the kit-wide
+  budget and its later changes. The conversation folds through a
+  compaction transform of its own, built with the kit's options, so its
+  first own budget costs it the fold the shared transform remembered
+  for it, and later ones are that transform's `SetBudget`: a fold in
+  flight keeps the budget it began with, and each fold's record
+  carries its conversation's budget. The kit keeps the last 1024
+  conversations given one; one past them is back on the kit-wide
+  budget. `Control.Compact` now folds through its own conversation's
+  transform. Closes #146.
+
 ### Fixed
 
 - A memory_read held for approval before a restart, in a conversation

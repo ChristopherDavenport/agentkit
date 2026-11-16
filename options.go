@@ -1414,7 +1414,9 @@ func WithRecorder(rec *session.Recorder) Option {
 // nothing folds for the transcript's size, and only a fold asked for,
 // by [Control.Compact] or by the loop's retry after a context-length
 // refusal, is made (agentturn v0.0.41). [Kit.SetCompactionBudget]
-// changes the budget while the conversation goes on. When a session is
+// changes the budget while the conversation goes on, and
+// [Kit.SetCompactionBudgetFor] gives one conversation of the kit's a
+// budget of its own. When a session is
 // recorded, the fold is recorded with it, the budget it was made under
 // and the model it asked among its members. Each summary request names
 // the model the request being folded for names, and is asked under that
@@ -1497,7 +1499,8 @@ func WithCompactionModel(m openresponses.Streamer) Option {
 // provider's compaction endpoint, when the transcript grows past budget
 // tokens. It is [WithCompaction] with the fold made elsewhere, and
 // takes the same budget, where 0 is again no budget,
-// [Kit.SetCompactionBudget] included, and the same default: every
+// [Kit.SetCompactionBudget] and [Kit.SetCompactionBudgetFor] included,
+// and the same default: every
 // request names the model of the request being folded for,
 // [compact.WithModelOfRequest] ahead of opts, so a compact.WithModel in
 // opts still wins. The fold is recorded, and
