@@ -46,7 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `ToolProvider` offers memory_read only while the conversation's last
   render dropped the block (per `Kit.GrantScope`, the last 1024
   conversations to render; one the kit has none for takes `New`'s
-  render's), so the configuration the recorder writes at a
+  render's, and a session `WithResumedSession` resumes takes its last
+  recorded render's, so a memory_read held for approval before a
+  restart still runs), so the configuration the recorder writes at a
   run's start is the first request's again (#138's invariant). A
   request whose own render first drops the block offers memory_search
   alone, and the next one memory_read; a render that shows the block

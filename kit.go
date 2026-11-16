@@ -994,7 +994,26 @@ func (k *Kit) openSession(ctx context.Context, s *settings) error {
 			return fmt.Errorf("agentkit: reading the session's last failed fold: %w", err)
 		}
 	}
+	if s.memStore != nil && s.sessionResume && lastRenderDropped(sess.Path(sess.Leaf())) {
+		// The conversation's last render before the restart dropped the
+		// block, so its next request is offered memory_read as it would
+		// have been without the restart, and a memory_read call held for
+		// approval then still runs on the Resume ([Kit.offerMemoryRead]).
+		k.convDropped.put(rec.SessionID(), true)
+	}
 	return nil
+}
+
+// lastRenderDropped reports whether the manifest in force at path's end,
+// folded from its records, is a render the budget dropped.
+func lastRenderDropped(path []agentsession.Entry) bool {
+	var f manifestFold
+	for _, e := range path {
+		if c, ok := e.(*agentsession.CustomEntry); ok && c.NS == agentmemory.ManifestNS {
+			f.apply(c)
+		}
+	}
+	return f.at != "" && f.valid && droppedRender(f.fold.Manifest())
 }
 
 // build fills the rest of the config: the tool set, then the hooks.

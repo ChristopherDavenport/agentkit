@@ -2,6 +2,7 @@ package agentkit_test
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -267,5 +268,102 @@ func TestMemoryReadFollowsEachConversationsOwnRender(t *testing.T) {
 	// with the caller's turns.
 	if got := toolChanges(t, kit.Session()); len(got) != 2 {
 		t.Errorf("the person's record changed the tools %d times, want the drop and memory_read once: %v", len(got), got)
+	}
+}
+
+// A memory_read call held for approval before a restart still runs when
+// the resumed kit's own render fits the block: the conversation's last
+// render, which the call was offered under, is read back from the
+// session's record, so the resumed run is still offered memory_read.
+// (#144 review F3)
+func TestAHeldMemoryReadRunsAfterARestart(t *testing.T) {
+	store := memStore(t, agentmemory.Entry{Scope: "user", Name: "tea", Content: "tea, not coffee"})
+	var grown atomic.Bool
+	part := func(context.Context) (agentkit.PartRender, error) {
+		if grown.Load() {
+			return agentkit.PartRender{Text: strings.Repeat("r", 2000)}, nil
+		}
+		return agentkit.PartRender{Text: "rules"}, nil
+	}
+	opts := func(model agentturn.Model, budget int64, extra ...agentkit.Option) []agentkit.Option {
+		return append([]agentkit.Option{
+			agentkit.WithModel(model, "m"),
+			agentkit.WithInstructions("be brief"),
+			agentkit.WithPart("rules", "product", part),
+			agentkit.WithMemory(store, "user"),
+			agentkit.WithInstructionBudget(budget),
+		}, extra...)
+	}
+	whole, err := agentkit.New(t.Context(), opts(stubModel{}, 0)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := int64(len(whole.Config().Instructions)) + 100
+	whole.Close()
+
+	sessions := agentsession.NewMemoryStore()
+	build := func(model agentturn.Model, sess agentkit.Option) (*agentkit.Kit, *agentkit.Control) {
+		kit, err := agentkit.New(t.Context(), opts(model, budget,
+			agentkit.WithPolicy(agentpolicy.Policy{Ask: policyRules(t, agentmemory.ReadTool), Default: agentpolicy.Allow()}, nil),
+			sess)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = kit.Close() })
+		agent := agentturn.New(kit.Config(), kit.AgentOptions()...)
+		t.Cleanup(kit.Attach(agent))
+		ctl, err := kit.Control(agent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return kit, ctl
+	}
+	answer := func(e *openresponses.Emitter) error {
+		w, err := e.Message(openresponses.PhaseFinalAnswer)
+		if err != nil {
+			return err
+		}
+		if err := w.Text("noted"); err != nil {
+			return err
+		}
+		return w.Close()
+	}
+	first, ctl := build(&scriptModel{turns: []func(*openresponses.Emitter) error{
+		answer,
+		callTurn(agentmemory.ReadTool, `{"scope":"user","name":"tea"}`),
+	}}, agentkit.WithSession(sessions, agentsession.Header{CWD: t.TempDir()}))
+	// The rules grow: the first request drops the block, the second is
+	// offered memory_read and the model calls it, held for approval.
+	grown.Store(true)
+	if _, err := ctl.Prompt(t.Context(), openresponses.UserText("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if end, err := ctl.Prompt(t.Context(), openresponses.UserText("what do I drink")); err != nil || end.Reason != agentturn.ReasonInputRequired {
+		t.Fatalf("prompt: %v, %+v; want memory_read held", err, end)
+	}
+
+	// The rules shrink across the restart, so the resumed kit's own
+	// render fits the block.
+	grown.Store(false)
+	model := &scriptModel{}
+	resumed, ctl := build(model, agentkit.WithResumedSession(sessions, first.SessionID()))
+	if resumed.MemoryManifest().Dropped() {
+		t.Fatal("the resumed kit's render dropped the block; the test would be vacuous")
+	}
+	end := &agentturn.RunEnd{Reason: agentturn.ReasonInputRequired, Pending: ctl.State().Pending}
+	perms := ctl.Permissions(end)
+	if len(perms) != 1 || perms[0].Call.Name != agentmemory.ReadTool {
+		t.Fatalf("permissions after the restart = %+v, want memory_read", perms)
+	}
+	if end, err := ctl.Resume(t.Context(), agentturn.Approve(perms[0].Call.CallID).WithBy(agentpolicy.ByHuman)); err != nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("resume: %v, %+v; want done", err, end)
+	}
+	reqs := model.requests()
+	if len(reqs) == 0 {
+		t.Fatal("the resumed run sent no request")
+	}
+	in, _ := json.Marshal(reqs[0].Input)
+	if !strings.Contains(string(in), "tea, not coffee") {
+		t.Errorf("the held memory_read did not run after the restart:\n%s", in)
 	}
 }
