@@ -1273,8 +1273,12 @@ setFor := func(scope string, n int) {
 	own[scope] = o
 }
 transformOf := func(ctx context.Context) *compact.Transform {
-	if o, ok := own[scopeOf(ctx)]; ok {
-		return o
+	// The scope, then each scope a child's is linked under (childRun's
+	// link), so a child folds through its conversation's own transform.
+	for scope, ok := scopeOf(ctx), true; ok; scope, ok = parentOf(scope) {
+		if o, ok := own[scope]; ok {
+			return o
+		}
 	}
 	return t
 }

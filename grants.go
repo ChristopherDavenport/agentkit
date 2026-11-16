@@ -171,10 +171,13 @@ type skillGrants struct {
 // not a scope whose name merely begins with its own. A WithChildAgent
 // child's scope is forgotten again when its call is over and nothing is
 // held under it, [Kit.endChildCall], so a conversation that is never
-// ended does not keep one per child run.
+// ended does not keep one per child run. parents is the same links
+// the other way, each child scope's parent, which [Kit.compactionOf]
+// follows to a child's conversation.
 type childScopes struct {
 	mu       sync.Mutex
 	children map[string]map[string]bool
+	parents  map[string]string
 }
 
 // link records scope as a child scope of parent.
@@ -188,6 +191,19 @@ func (c *childScopes) link(parent, scope string) {
 		c.children[parent] = map[string]bool{}
 	}
 	c.children[parent][scope] = true
+	if c.parents == nil {
+		c.parents = map[string]string{}
+	}
+	c.parents[scope] = parent
+}
+
+// parentOf is the scope scope was linked under, and false when it is
+// linked under none.
+func (c *childScopes) parentOf(scope string) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	parent, ok := c.parents[scope]
+	return parent, ok
 }
 
 // unlink forgets scope as a child scope of parent, when no scope is
@@ -205,6 +221,7 @@ func (c *childScopes) unlink(parent, scope string, empty func(string) bool) bool
 		delete(c.children, parent)
 	}
 	delete(c.children, scope)
+	delete(c.parents, scope)
 	return true
 }
 
@@ -243,6 +260,7 @@ func (c *childScopes) take(scope string) []string {
 	children := c.under(scope)
 	for _, child := range children {
 		delete(c.children, child)
+		delete(c.parents, child)
 	}
 	delete(c.children, scope)
 	sort.Strings(children)

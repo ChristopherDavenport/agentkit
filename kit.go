@@ -1790,13 +1790,25 @@ func (k *Kit) compactNext(ctx context.Context, instructions string) error {
 
 // compactionOf is the compaction transform of the conversation on ctx,
 // [Kit.GrantScope]: the one a budget of its own gave it, else the
-// kit's. The kit has compaction.
+// kit's. A child agent's scope with none of its own takes its
+// conversation's, through the link [Kit.childRun] made from the child's
+// scope to its parent's, as it takes the kit's without one. The kit
+// has compaction.
 func (k *Kit) compactionOf(ctx context.Context) *compact.Transform {
-	scope := k.GrantScope(ctx)
+	scopes := []string{k.GrantScope(ctx)}
+	for {
+		parent, ok := k.scopes.parentOf(scopes[len(scopes)-1])
+		if !ok || slices.Contains(scopes, parent) {
+			break
+		}
+		scopes = append(scopes, parent)
+	}
 	k.cmu.Lock()
 	defer k.cmu.Unlock()
-	if t, ok := k.ownCompact.get(scope); ok {
-		return t
+	for _, scope := range scopes {
+		if t, ok := k.ownCompact.get(scope); ok {
+			return t
+		}
 	}
 	return k.compact
 }
@@ -1842,7 +1854,10 @@ func (k *Kit) SetCompactionBudget(tokens int) error {
 // transform's [compact.Transform.SetBudget]. A fold in flight keeps
 // the budget it began with, under any of the three calls, and each
 // fold's record carries the budget its conversation's transform made
-// it under. [Control.Compact] asks the transform of its own
+// it under. A child agent run under a grant scope of its own,
+// [WithChildAgent] or [Kit.StartChild], whose config carries the kit's
+// Transform folds through its conversation's transform unless it is
+// given a budget of its own. [Control.Compact] asks the transform of its own
 // conversation to fold, so a conversation's own budget is set before
 // its first run: a Compact asked of it before then stays with the kit's
 // transform, and the next request of another conversation on it takes

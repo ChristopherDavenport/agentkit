@@ -19,7 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   first own budget costs it the fold the shared transform remembered
   for it, and later ones are that transform's `SetBudget`: a fold in
   flight keeps the budget it began with, and each fold's record
-  carries its conversation's budget. The kit keeps the last 1024
+  carries its conversation's budget. A child agent under a grant
+  scope of its own whose config carries the kit's `Transform` folds
+  through its conversation's. The kit keeps the last 1024
   conversations given one; one past them is back on the kit-wide
   budget, and `Kit.ClearCompactionBudgetFor(scope)` puts one back at
   once, dropping its transform. A host pins the conversations that stay

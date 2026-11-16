@@ -45,13 +45,13 @@ func (l *foldLog) of(scope string) []scopedFold {
 // budgetKit is a kit that records the person's conversation, compacting
 // under a kit-wide budget nothing reaches, whose fold observer notes
 // each fold's conversation, and the person's Control.
-func budgetKit(t *testing.T, model agentturn.Model) (*agentkit.Kit, *agentkit.Control, *foldLog) {
+func budgetKit(t *testing.T, model agentturn.Model, extra ...agentkit.Option) (*agentkit.Kit, *agentkit.Control, *foldLog) {
 	t.Helper()
 	var (
 		kit *agentkit.Kit
 		log foldLog
 	)
-	kit, err := agentkit.New(t.Context(),
+	kit, err := agentkit.New(t.Context(), append([]agentkit.Option{
 		agentkit.WithModel(model, "m"),
 		agentkit.WithInstructions("Be brief."),
 		agentkit.WithCompaction(1_000_000, compact.WithKeepLast(1), compact.WithMinFold(0)),
@@ -61,7 +61,7 @@ func budgetKit(t *testing.T, model agentturn.Model) (*agentkit.Kit, *agentkit.Co
 			log.folds = append(log.folds, scopedFold{scope: kit.GrantScope(ctx), budget: f.Budget, requested: f.Requested})
 		}),
 		agentkit.WithSession(agentsession.NewMemoryStore(), agentsession.Header{}),
-	)
+	}, extra...)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,5 +334,37 @@ func TestAClearedConversationFollowsTheKitWideBudgetAgain(t *testing.T) {
 	defer plain.Close()
 	if err := plain.ClearCompactionBudgetFor("a2a:caller-1"); !errors.Is(err, agentkit.ErrNoCompaction) {
 		t.Fatalf("ClearCompactionBudgetFor without compaction = %v, want ErrNoCompaction", err)
+	}
+}
+
+// A child agent run under a grant scope of its own, under its
+// conversation's, folds under its conversation's own budget when its
+// config carries the kit's Transform, as it does under the kit-wide
+// one: the kit finds the conversation through its link to the child's
+// scope. (#146 review, LOCAL note 1)
+func TestAChildFoldsUnderItsConversationsOwnBudget(t *testing.T) {
+	kit, _, log := budgetKit(t, &scriptModel{},
+		agentkit.WithPolicy(agentpolicy.Policy{Default: agentpolicy.Allow()}, nil))
+	person := kit.GrantScope(t.Context())
+	if err := kit.SetCompactionBudgetFor(person, 1); err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := kit.StartChild(t.Context(), agentsession.NewSpawnID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := kit.GrantScope(ctx)
+	if scope == person {
+		t.Fatal("the child runs under its conversation's scope; the test would be vacuous")
+	}
+	child := agentturn.New(kit.Config())
+	defer kit.AttachChild(child)()
+	for _, text := range []string{"one", "two"} {
+		if _, err := child.Prompt(ctx, openresponses.UserText(text)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := log.of(scope); len(got) == 0 || got[0].budget != 1 {
+		t.Errorf("the child's folds = %+v, want one under its conversation's own budget 1", got)
 	}
 }
