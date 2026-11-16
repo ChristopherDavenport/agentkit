@@ -301,3 +301,38 @@ func TestABudgetChangedDuringAFoldAppliesNext(t *testing.T) {
 		t.Errorf("folded again under its own budget nothing reached: %+v", got)
 	}
 }
+
+// ClearCompactionBudgetFor returns a conversation to the kit-wide
+// budget: it folds under it, and follows its changes, again. (#146
+// review L4)
+func TestAClearedConversationFollowsTheKitWideBudgetAgain(t *testing.T) {
+	kit, _, log := budgetKit(t, &scriptModel{})
+	a := newCaller(t, kit, "a2a:caller-1")
+	if err := kit.SetCompactionBudgetFor("a2a:caller-1", 1_000_000); err != nil {
+		t.Fatal(err)
+	}
+	if err := kit.SetCompactionBudget(1); err != nil {
+		t.Fatal(err)
+	}
+	a.prompt(t, "one")
+	a.prompt(t, "two")
+	if got := log.of("a2a:caller-1"); len(got) != 0 {
+		t.Fatalf("the caller folded %+v under its own budget nothing reached", got)
+	}
+	if err := kit.ClearCompactionBudgetFor("a2a:caller-1"); err != nil {
+		t.Fatal(err)
+	}
+	a.prompt(t, "three")
+	if got := log.of("a2a:caller-1"); len(got) == 0 || got[0].budget != 1 {
+		t.Errorf("the cleared caller's folds = %+v, want one under the kit-wide budget 1", got)
+	}
+
+	plain, err := agentkit.New(t.Context(), agentkit.WithModel(&scriptModel{}, "m"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Close()
+	if err := plain.ClearCompactionBudgetFor("a2a:caller-1"); !errors.Is(err, agentkit.ErrNoCompaction) {
+		t.Fatalf("ClearCompactionBudgetFor without compaction = %v, want ErrNoCompaction", err)
+	}
+}

@@ -1262,6 +1262,7 @@ t = compact.New(compactor, opts...)        // WithCompactor
 // Kit.SetCompactionBudgetFor(scope, n): the conversation's own transform,
 // the last 1024 conversations given one.
 own := map[string]*compact.Transform{} // bounded, under a lock
+// Kit.ClearCompactionBudgetFor(scope) is delete(own, scope).
 setFor := func(scope string, n int) {
 	if o, ok := own[scope]; ok {
 		o.SetBudget(n)
@@ -1300,7 +1301,28 @@ transform takes one budget, and a transform per conversation is what
 conversation the fold the shared transform remembered for it, so its
 next fold summarises its older part whole; later ones are that
 transform's `SetBudget`. Past the last 1024 conversations given one,
-a conversation is back on `t`. The kit writes no entry for the
+a conversation is back on `t`, and `Kit.ClearCompactionBudgetFor(scope)`
+(`delete(own, scope)`) puts it back on `t` at once, its own transform
+and what it remembered dropped. `Control.Compact` asks the
+conversation's transform to fold, so a conversation's own budget is set
+before its first run: a `Compact` asked of it before then stays with
+`t`, and another conversation's next request takes the fold.
+
+When to use which: pin the conversations that stay on one model, such
+as A2A callers served on the model they started with, with
+`SetCompactionBudgetFor` at their first run, and clear it when the
+conversation ends; keep the conversation whose model the host switches,
+the person's, on `SetCompactionBudget`, whose transform keeps that
+conversation's fold across the switch:
+
+```go
+// Each caller's run, under its recorder (ContextWithRecorder).
+_ = kit.SetCompactionBudgetFor(kit.GrantScope(ctx), callersBudget)
+// The person's /model.
+_ = kit.SetCompactionBudget(budgetOf(newModel))
+// A caller's conversation ends.
+_ = kit.ClearCompactionBudgetFor(scope)
+``` The kit writes no entry for the
 change; the host records its own setting, and each fold's `fold` member
 carries `budget` and `model` (`compact.Fold.Budget`, `Fold.Model`),
 which `rec.Fold` writes from the fold `fold` passes it unchanged. `compact.WithOnFold` adds a

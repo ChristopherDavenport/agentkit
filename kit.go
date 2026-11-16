@@ -1843,13 +1843,22 @@ func (k *Kit) SetCompactionBudget(tokens int) error {
 // the budget it began with, under any of the three calls, and each
 // fold's record carries the budget its conversation's transform made
 // it under. [Control.Compact] asks the transform of its own
-// conversation to fold.
+// conversation to fold, so a conversation's own budget is set before
+// its first run: a Compact asked of it before then stays with the kit's
+// transform, and the next request of another conversation on it takes
+// the fold.
 //
-// The kit keeps the budgets of the last 1024 conversations given one;
-// a conversation past them, and its transform's memory, goes back to
-// the kit-wide budget, so a front that serves more sets the budget
-// again at each conversation's run. Without compaction it returns
-// [ErrNoCompaction].
+// So a host pins the conversations that stay on one model, an A2A
+// caller's, with SetCompactionBudgetFor at their first run, and keeps
+// the conversation whose model it switches, the person's, on
+// [Kit.SetCompactionBudget], whose transform keeps that conversation's
+// fold across the switch. [Kit.ClearCompactionBudgetFor] returns a
+// conversation to the kit-wide budget and lets its transform go, when
+// it ends. The kit keeps the budgets of the last 1024 conversations
+// given one; a conversation past them, and its transform's memory, goes
+// back to the kit-wide budget, so a front that serves more sets the
+// budget again at each conversation's run. Without compaction it
+// returns [ErrNoCompaction].
 func (k *Kit) SetCompactionBudgetFor(scope string, tokens int) error {
 	if k.compact == nil {
 		return ErrNoCompaction
@@ -1863,6 +1872,27 @@ func (k *Kit) SetCompactionBudgetFor(scope string, tokens int) error {
 		t = k.newCompact(tokens)
 	}
 	k.ownCompact.put(scope, t)
+	return nil
+}
+
+// ClearCompactionBudgetFor returns the conversation whose grant scope is
+// scope to the kit-wide budget, [Kit.SetCompactionBudget], from its
+// next call, and drops the transform [Kit.SetCompactionBudgetFor] gave
+// it, with the fold that transform remembered and a [Control.Compact]
+// asked of it and not yet made: the kit's transform folds for it again,
+// summarising its older part whole at its next fold over the budget. A
+// fold in flight finishes under the transform it began on. A host
+// calls it when the conversation ends, so its transform's summaries
+// are not kept until 1024 other conversations push it out. A scope
+// with no budget of its own is left as it is. Without compaction it
+// returns [ErrNoCompaction].
+func (k *Kit) ClearCompactionBudgetFor(scope string) error {
+	if k.compact == nil {
+		return ErrNoCompaction
+	}
+	k.cmu.Lock()
+	defer k.cmu.Unlock()
+	k.ownCompact.delete(scope)
 	return nil
 }
 

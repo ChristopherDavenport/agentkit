@@ -21,8 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   flight keeps the budget it began with, and each fold's record
   carries its conversation's budget. The kit keeps the last 1024
   conversations given one; one past them is back on the kit-wide
-  budget. `Control.Compact` now folds through its own conversation's
-  transform. Closes #146.
+  budget, and `Kit.ClearCompactionBudgetFor(scope)` puts one back at
+  once, dropping its transform. A host pins the conversations that stay
+  on one model, an A2A caller's, at their first run, and keeps the one
+  whose model it switches on `SetCompactionBudget`. Closes #146.
+
+### Changed
+
+- `Control.Compact` folds through its own conversation's compaction
+  transform: the kit's, as before, unless `SetCompactionBudgetFor` gave
+  the conversation one of its own. A `Compact` asked before that stays
+  with the kit's transform.
 
 ### Fixed
 
