@@ -1310,7 +1310,18 @@ a conversation is back on `t`, and `Kit.ClearCompactionBudgetFor(scope)`
 and what it remembered dropped. `Control.Compact` asks the
 conversation's transform to fold, so a conversation's own budget is set
 before its first run: a `Compact` asked of it before then stays with
-`t`, and another conversation's next request takes the fold.
+`t`, and another conversation's next request takes the fold. The kit writes no entry for the
+change; the host records its own setting, and each fold's `fold` member
+carries `budget` and `model` (`compact.Fold.Budget`, `Fold.Model`),
+which `rec.Fold` writes from the fold `fold` passes it unchanged. `compact.WithOnFold` adds a
+callback (agentturn v0.0.14), so the kit passes `fold` ahead of the
+product's `compact.Option`s, whether or not there is a session, since a
+run may bring a recorder on its context, and a `compact.WithOnFold`
+among the product's is called after it, once the fold is recorded.
+`WithFoldObserver` is the kit's own way to hear of a fold, and it hears
+a failed one too, with `Fold.Err` set and no summary: a front that says
+the model has forgotten something says it for a fold whose `Err` is
+nil.
 
 When to use which: pin the conversations that stay on one model, such
 as A2A callers served on the model they started with, with
@@ -1326,18 +1337,7 @@ _ = kit.SetCompactionBudgetFor(kit.GrantScope(ctx), callersBudget)
 _ = kit.SetCompactionBudget(budgetOf(newModel))
 // A caller's conversation ends.
 _ = kit.ClearCompactionBudgetFor(scope)
-``` The kit writes no entry for the
-change; the host records its own setting, and each fold's `fold` member
-carries `budget` and `model` (`compact.Fold.Budget`, `Fold.Model`),
-which `rec.Fold` writes from the fold `fold` passes it unchanged. `compact.WithOnFold` adds a
-callback (agentturn v0.0.14), so the kit passes `fold` ahead of the
-product's `compact.Option`s, whether or not there is a session, since a
-run may bring a recorder on its context, and a `compact.WithOnFold`
-among the product's is called after it, once the fold is recorded.
-`WithFoldObserver` is the kit's own way to hear of a fold, and it hears
-a failed one too, with `Fold.Err` set and no summary: a front that says
-the model has forgotten something says it for a fold whose `Err` is
-nil.
+```
 
 A summary the agent's model writes is asked under the reasoning of the
 request being folded for, `compact.WithModelOfRequest`'s: a thinking
