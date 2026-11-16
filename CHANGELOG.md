@@ -3,6 +3,24 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Dependencies
+
+- **Breaking**: requires agentturn and agentturn/session v0.0.41, up
+  from v0.0.40, agentsession v0.0.40, up from v0.0.39, and
+  openresponses v0.0.21, up from v0.0.20, in the root and in
+  `examples/a2a` (front/a2a and tools/a2a v0.0.41 there). A budget of
+  0 given to `WithCompaction` or `WithCompactor` is now no budget:
+  nothing folds for the transcript's size, and only a fold asked for,
+  by `Control.Compact` or by the loop's retry after a context-length
+  refusal, is made, where v0.0.19 folded on every request; a negative
+  budget is 0. A final answer its provider ended `incomplete` with an
+  empty reason now ends the run `ReasonStopped` with
+  `StopMaxOutputTokens`, as one with no details does, and a
+  `WithChildAgent` child stopped so is reported to its parent as cut
+  short at its output limit.
+
 ## v0.0.19 - 2026-11-15
 
 ### Added

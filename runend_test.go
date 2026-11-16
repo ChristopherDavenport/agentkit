@@ -50,11 +50,15 @@ func TestAProviderStopReachesTheControlsCaller(t *testing.T) {
 		reason openresponses.IncompleteReason
 		cause  agentturn.StopCause
 		refuse string
+		want   openresponses.IncompleteReason
 	}{
-		{openresponses.IncompleteReasonContentFilter, agentturn.StopContentFilter, "I can't help with that."},
-		{openresponses.IncompleteReasonMaxOutputTokens, agentturn.StopMaxOutputTokens, ""},
+		{openresponses.IncompleteReasonContentFilter, agentturn.StopContentFilter, "I can't help with that.", openresponses.IncompleteReasonContentFilter},
+		{openresponses.IncompleteReasonMaxOutputTokens, agentturn.StopMaxOutputTokens, "", openresponses.IncompleteReasonMaxOutputTokens},
+		// An empty reason is the output limit's stop, since agentturn
+		// v0.0.41, and RunEnd.Incomplete names it.
+		{"", agentturn.StopMaxOutputTokens, "", openresponses.IncompleteReasonMaxOutputTokens},
 	} {
-		t.Run(string(c.reason), func(t *testing.T) {
+		t.Run("reason="+string(c.reason), func(t *testing.T) {
 			_, ctl, _ := controlled(t, agentkit.WithModel(stoppedShort{reason: c.reason}, "m"))
 			end, err := ctl.Prompt(t.Context(), openresponses.UserText("hi"))
 			if err != nil {
@@ -63,8 +67,8 @@ func TestAProviderStopReachesTheControlsCaller(t *testing.T) {
 			if end.Reason != agentturn.ReasonStopped || end.Cause != c.cause {
 				t.Errorf("end = %s/%s, want stopped/%s", end.Reason, end.Cause, c.cause)
 			}
-			if end.Incomplete == nil || end.Incomplete.Reason != c.reason {
-				t.Errorf("incomplete = %+v, want reason %s", end.Incomplete, c.reason)
+			if end.Incomplete == nil || end.Incomplete.Reason != c.want {
+				t.Errorf("incomplete = %+v, want reason %s", end.Incomplete, c.want)
 			}
 			if end.Refusal != c.refuse {
 				t.Errorf("refusal = %q, want %q", end.Refusal, c.refuse)
@@ -84,8 +88,9 @@ func TestAChildsProviderStopReachesTheParentsModel(t *testing.T) {
 	}{
 		{openresponses.IncompleteReasonContentFilter, `was refused by its model's provider (content_filter): I can't help with that.`},
 		{openresponses.IncompleteReasonMaxOutputTokens, `answer was cut short at its model's output limit (max_output_tokens)`},
+		{"", `answer was cut short at its model's output limit (max_output_tokens)`},
 	} {
-		t.Run(string(c.reason), func(t *testing.T) {
+		t.Run("reason="+string(c.reason), func(t *testing.T) {
 			parent := &scriptModel{turns: []func(*openresponses.Emitter) error{
 				callTurn("explore", `{"input":"look"}`),
 			}}

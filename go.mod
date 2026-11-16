@@ -5,14 +5,14 @@ go 1.25.0
 require (
 	github.com/ChristopherDavenport/agentmemory v0.0.13
 	github.com/ChristopherDavenport/agentpolicy v0.0.20
-	github.com/ChristopherDavenport/agentsession v0.0.39
+	github.com/ChristopherDavenport/agentsession v0.0.40
 	github.com/ChristopherDavenport/agentskill v0.0.12
 	github.com/ChristopherDavenport/agentsmd v0.0.6
 	github.com/ChristopherDavenport/agenttool v0.0.30
 	github.com/ChristopherDavenport/agenttool/mcpclient v0.0.30
-	github.com/ChristopherDavenport/agentturn v0.0.40
-	github.com/ChristopherDavenport/agentturn/session v0.0.40
-	github.com/ChristopherDavenport/openresponses v0.0.20
+	github.com/ChristopherDavenport/agentturn v0.0.41
+	github.com/ChristopherDavenport/agentturn/session v0.0.41
+	github.com/ChristopherDavenport/openresponses v0.0.21
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 )
 
