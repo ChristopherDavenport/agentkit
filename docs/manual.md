@@ -43,7 +43,7 @@ and no fold is recorded.
 | `AfterToolCall` | `WithAfterToolCall` | `agentturn.ChainAfterToolCall(yours...)`, in the order given, or the one hook alone; the kit adds none of its own |
 | `OutputGuard` | `WithGuards`, `WithOutputGuard` | `agentturn.ChainOutputGuard(chain.OutputGuard(), yours...)` |
 | `ShouldStopAfterTurn` | `WithGuards`, `WithShouldStopAfterTurn` | `agentturn.ChainShouldStopAfterTurn(chain.ShouldStopAfterTurn(), yours...)` |
-| `Transform` | `WithCompaction`, `WithCompactionModel`, `WithCompactor`, `WithTransform`, `WithFoldObserver` | `agentturn.ChainTransform(yours, compact.NewLocal(model, compact.WithModelOfRequest(), compact.WithOnFold(fold), compact.WithBudget(n), theirs...).Transform)` (`compact.WithModel(name)` in its place under `WithCompactionModel`), or `compact.New(compactor, ...)` with the same options for `WithCompactor`, where `fold` is `rec.Fold` and then the observer; `Control.Compact(ctx, instructions)` is `t.FoldNext(instructions)` on that transform, kept beside the config, so the next request folds whatever its budget — see below |
+| `Transform` | `WithCompaction`, `WithCompactionModel`, `WithCompactor`, `WithTransform`, `WithFoldObserver` | `agentturn.ChainTransform(yours, compact.NewLocal(model, compact.WithModelOfRequest(), compact.WithOnFold(fold), compact.WithBudget(n), theirs...).Transform)` (`compact.WithModel(name)` in its place under `WithCompactionModel`), or `compact.New(compactor, ...)` with the same options for `WithCompactor`, where `fold` is `rec.Fold` and then the observer; `Control.Compact(ctx, instructions)` is `t.FoldNext(instructions)` on the conversation's transform, kept beside the config, so the next request folds whatever its budget; a conversation given a budget of its own (`Kit.SetCompactionBudgetFor`) folds through a transform of its own built with the same options, picked per call by `scopeOf(ctx)` — see below |
 | `ToolRecorder` | `WithSession`, `WithResumedSession`, `WithRecorder` | `rec.RecordFunc()`; without a session the kit leaves it nil, and the loop honours a recorder the product installs with `agenttool.ContextWithRecorder` on the prompt's context |
 | `ToolElicitor` | `WithToolElicitor`, `WithQuestionEvents` | under `WithToolElicitor`, a function that calls `rec.Elicitor(by, fn)` for the run's recorder, `recorderFor(ctx)` below, and `fn` without one; under `WithQuestionEvents`, a function that asks the elicitor the run's context names, `ask, ok := agentkit.QuestionsFromContext(ctx)` then `ask(ctx, q)`, else the Control on it, `c, ok := agentkit.ControlFromContext(ctx)` then `c.Elicitor()(ctx, q)` (both `kit.QuestionsFor(agent)`: a function over `agent.QuestionElicitor()` by `agentsession.ByHuman`, whose answer sets `Answer.By` to `agenttool.ByHuman` when the reply names no decider, so questions are events the front answers with `agent.Reply`), and with neither answers `agenttool.ActionCancel` through `rec.Elicitor(agentsession.ByPolicy, …)`; it also dials the MCP servers as `WithToolElicitor` does, with `mcpclient.WithElicitation()`. Without either the kit leaves it nil: an elicitor on the prompt's context applies, and with none a tool's question goes unasked. The loop asks the same elicitor about a nested call a tool makes with `agenttool.Invoke` that the policy defers (agentturn v0.0.35, RFC 0001 Nested calls), and never one the invoking tool put on its own context, so a nested call's approval reaches the product only through this field or an elicitor on the prompt's context. `Kit.Control(agent)` gives an agent whose config has none the kit's |
 
@@ -374,7 +374,7 @@ offered := engine.ToolProvider(func(ctx context.Context) []agenttool.Tool {
 	} else {
 		own = byName(list)
 	}
-	if reader == agentmemory.SearchTool && !droppedOf(scopeOf(ctx)) { // the conversation's last render; New's for one with none
+	if reader == agentmemory.SearchTool && !droppedOf(ctx, scopeOf(ctx)) { // the conversation's last render; with none, its session's last recorded one under ContextWithRecorder, else New's
 		// memory_read only once a render has dropped the block, so the
 		// configuration the recorder writes at a run's start, which runs
 		// no BeforeModelCall, is the first request's: a request whose
@@ -1259,6 +1259,38 @@ if sess != nil { // the session WithSession or WithResumedSession opened
 t := compact.NewLocal(summariser, opts...) // WithCompaction: model; WithCompactionModel: its model
 t = compact.New(compactor, opts...)        // WithCompactor
 // Kit.SetCompactionBudget(n) is t.SetBudget(n), ErrNoCompaction without t.
+// Kit.SetCompactionBudgetFor(scope, n): the conversation's own transform,
+// the last 1024 conversations given one.
+own := map[string]*compact.Transform{} // bounded, under a lock
+// Kit.ClearCompactionBudgetFor(scope) is delete(own, scope).
+setFor := func(scope string, n int) {
+	if o, ok := own[scope]; ok {
+		o.SetBudget(n)
+		return
+	}
+	o := compact.NewLocal(summariser, opts...) // or compact.New(compactor, opts...)
+	o.SetBudget(n)
+	own[scope] = o
+}
+// parentOf is the product's own child→parent map, filled where it runs
+// a child under a scope of its own (the kit keeps the same links
+// unexported).
+parents := map[string]string{} // under the same lock
+parentOf := func(scope string) (string, bool) { p, ok := parents[scope]; return p, ok }
+transformOf := func(ctx context.Context) *compact.Transform {
+	// The scope, then each scope a child's is linked under (childRun's
+	// link), so a child folds through its conversation's own transform.
+	for scope, ok := scopeOf(ctx), true; ok; scope, ok = parentOf(scope) {
+		if o, ok := own[scope]; ok {
+			return o
+		}
+	}
+	return t
+}
+cfg.Transform = agentturn.ChainTransform(yours, func(ctx context.Context, tr agentturn.Transcript) (agentturn.Transcript, error) {
+	return transformOf(ctx).Transform(ctx, tr)
+})
+// Control.Compact(ctx, instructions) is transformOf(RunContext(ctx)).FoldNext(instructions).
 ```
 
 `compact.WithModelOfRequest` (agentturn v0.0.41) names on each summary,
@@ -1269,7 +1301,21 @@ new one; a `compact.WithModel` of the product's wins over it in either
 order, and a compactor's request names a model as a summary's does.
 `Kit.SetCompactionBudget(n)` is `t.SetBudget(n)`: from the next call,
 a fold in flight keeping the budget it began with, the transform
-keeping its fold memory, 0 no budget. The kit writes no entry for the
+keeping its fold memory, 0 no budget. It is the budget of every
+conversation with none of its own. `Kit.SetCompactionBudgetFor(scope,
+n)` gives the conversation of grant scope `scope` (`Kit.GrantScope`)
+a budget of its own, through a transform of its own: agentturn's
+transform takes one budget, and a transform per conversation is what
+`compact.Transform`'s doc asks for anyway. The first one costs the
+conversation the fold the shared transform remembered for it, so its
+next fold summarises its older part whole; later ones are that
+transform's `SetBudget`. Past the last 1024 conversations given one,
+a conversation is back on `t`, and `Kit.ClearCompactionBudgetFor(scope)`
+(`delete(own, scope)`) puts it back on `t` at once, its own transform
+and what it remembered dropped. `Control.Compact` asks the
+conversation's transform to fold, so a conversation's own budget is set
+before its first run: a `Compact` asked of it before then stays with
+`t`, and another conversation's next request takes the fold. The kit writes no entry for the
 change; the host records its own setting, and each fold's `fold` member
 carries `budget` and `model` (`compact.Fold.Budget`, `Fold.Model`),
 which `rec.Fold` writes from the fold `fold` passes it unchanged. `compact.WithOnFold` adds a
@@ -1281,6 +1327,22 @@ among the product's is called after it, once the fold is recorded.
 a failed one too, with `Fold.Err` set and no summary: a front that says
 the model has forgotten something says it for a fold whose `Err` is
 nil.
+
+When to use which: pin the conversations that stay on one model, such
+as A2A callers served on the model they started with, with
+`SetCompactionBudgetFor` at their first run, and clear it when the
+conversation ends; keep the conversation whose model the host switches,
+the person's, on `SetCompactionBudget`, whose transform keeps that
+conversation's fold across the switch:
+
+```go
+// Each caller's run, under its recorder (ContextWithRecorder).
+_ = kit.SetCompactionBudgetFor(kit.GrantScope(ctx), callersBudget)
+// The person's /model.
+_ = kit.SetCompactionBudget(budgetOf(newModel))
+// A caller's conversation ends.
+_ = kit.ClearCompactionBudgetFor(scope)
+```
 
 A summary the agent's model writes is asked under the reasoning of the
 request being folded for, `compact.WithModelOfRequest`'s: a thinking

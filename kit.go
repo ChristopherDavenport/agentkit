@@ -305,8 +305,16 @@ type Kit struct {
 	refilter func(ctx context.Context, text string) string
 
 	// compact is the compaction transform the kit built, nil without
-	// one; Control.Compact asks it to fold.
-	compact *compact.Transform
+	// one, which folds for every conversation with no budget of its own;
+	// Control.Compact asks it to fold. newCompact builds another with
+	// the same options at a budget, and ownCompact, guarded by cmu, is
+	// the transform of each conversation given a budget of its own by
+	// [Kit.SetCompactionBudgetFor], keyed by [Kit.GrantScope], the last
+	// renderedRuns given one.
+	compact    *compact.Transform
+	newCompact func(budget int) *compact.Transform
+	cmu        sync.Mutex
+	ownCompact bounded[*compact.Transform]
 
 	// recmu guards recorded, the manifest last written to each session
 	// and the entry that holds it, keyed by the session's ID, and is held
@@ -994,26 +1002,23 @@ func (k *Kit) openSession(ctx context.Context, s *settings) error {
 			return fmt.Errorf("agentkit: reading the session's last failed fold: %w", err)
 		}
 	}
-	if s.memStore != nil && s.sessionResume && lastRenderDropped(sess.Path(sess.Leaf())) {
-		// The conversation's last render before the restart dropped the
-		// block, so its next request is offered memory_read as it would
-		// have been without the restart, and a memory_read call held for
-		// approval then still runs on the Resume ([Kit.offerMemoryRead]).
-		k.convDropped.put(rec.SessionID(), true)
-	}
 	return nil
 }
 
-// lastRenderDropped reports whether the manifest in force at path's end,
-// folded from its records, is a render the budget dropped.
-func lastRenderDropped(path []agentsession.Entry) bool {
+// lastRender reports whether the manifest in force at path's end, folded
+// from its records, is a render the budget dropped, and whether path
+// holds one in force at all.
+func lastRender(path []agentsession.Entry) (dropped, known bool) {
 	var f manifestFold
 	for _, e := range path {
 		if c, ok := e.(*agentsession.CustomEntry); ok && c.NS == agentmemory.ManifestNS {
 			f.apply(c)
 		}
 	}
-	return f.at != "" && f.valid && droppedRender(f.fold.Manifest())
+	if f.at == "" || !f.valid {
+		return false, false
+	}
+	return droppedRender(f.fold.Manifest()), true
 }
 
 // build fills the rest of the config: the tool set, then the hooks.
@@ -1216,9 +1221,14 @@ func (k *Kit) buildTools(ctx context.Context, s *settings) error {
 // one memory_read; [Kit.instructions] still takes it out of a request
 // whose render shows the block again. A conversation the kit has no
 // render for, a new one or one past the last renderedRuns to render,
-// takes New's render's, which its first configuration entry is written
-// from. The kit's union keeps the tool, so [Kit.LookupTool] finds it
-// either way.
+// takes the last render the session its runs record into records,
+// [Kit.recordedDropped], so a conversation resumed after a restart,
+// [WithResumedSession]'s or one a front records under
+// [ContextWithRecorder], is offered what it was offered before it, and
+// a memory_read held for approval then runs on the Resume; when there
+// is no session, or it records none, New's render's, which its first
+// configuration entry is written from. The kit's union keeps
+// the tool, so [Kit.LookupTool] finds it either way.
 func (k *Kit) offerMemoryRead(ctx context.Context, tools []agenttool.Tool) []agenttool.Tool {
 	if !k.readOnDrop {
 		return tools
@@ -1226,11 +1236,37 @@ func (k *Kit) offerMemoryRead(ctx context.Context, tools []agenttool.Tool) []age
 	conv := k.GrantScope(ctx)
 	k.mu.Lock()
 	dropped, ok := k.convDropped.get(conv)
-	if !ok {
-		dropped = k.firstDropped
-	}
 	k.mu.Unlock()
+	if !ok {
+		dropped = k.recordedDropped(ctx, conv)
+	}
 	return offerReadIf(tools, dropped)
+}
+
+// recordedDropped is the last render of conv, a conversation the kit
+// holds none for, read from the session a run on ctx records into, the
+// one [Kit.record] writes the renders to, [Kit.recorderFor]'s, when
+// that session records one, else New's render's, and kept as conv's
+// until its own render replaces it. The session is read without mu,
+// which a render that lands meanwhile takes: that render is newer than
+// the record, and stands.
+func (k *Kit) recordedDropped(ctx context.Context, conv string) bool {
+	var dropped, known bool
+	if rec := k.recorderFor(ctx); rec != nil {
+		if sess := k.sessionOf(ctx, rec, runSessionID(ctx, rec)); sess != nil {
+			dropped, known = lastRender(sess.Path(sess.Leaf()))
+		}
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if now, ok := k.convDropped.get(conv); ok {
+		return now
+	}
+	if !known {
+		return k.firstDropped
+	}
+	k.convDropped.put(conv, dropped)
+	return dropped
 }
 
 // offerReadIf returns tools without memory_read unless dropped.
@@ -1716,30 +1752,65 @@ func (k *Kit) buildHooks(s *settings) {
 		// options, so a restart does not ask again for the summary that
 		// failed before it.
 		opts = append(append(opts, s.compactOpts...), k.failedFold...)
-		var t *compact.Transform
-		if s.compactor != nil {
-			t = compact.New(s.compactor, opts...)
-		} else {
+		build := func() *compact.Transform {
+			if s.compactor != nil {
+				return compact.New(s.compactor, opts...)
+			}
 			model := s.compactModel
 			if model == nil {
 				model = s.model
 			}
-			t = compact.NewLocal(model, opts...)
+			return compact.NewLocal(model, opts...)
 		}
-		k.compact = t
-		transforms = append(transforms, t.Transform)
+		k.compact = build()
+		k.newCompact = func(budget int) *compact.Transform {
+			t := build()
+			t.SetBudget(budget)
+			return t
+		}
+		// Each call folds through its conversation's transform: its own,
+		// when Kit.SetCompactionBudgetFor gave it a budget, else the
+		// kit's.
+		transforms = append(transforms, func(ctx context.Context, tr agentturn.Transcript) (agentturn.Transcript, error) {
+			return k.compactionOf(ctx).Transform(ctx, tr)
+		})
 	}
 	k.cfg.Transform = chain1(transforms, agentturn.ChainTransform)
 }
 
-// compactNext asks the kit's compaction transform to fold on its next
-// call, [Control.Compact].
-func (k *Kit) compactNext(instructions string) error {
+// compactNext asks the compaction transform of the conversation on ctx
+// to fold on its next call, [Control.Compact].
+func (k *Kit) compactNext(ctx context.Context, instructions string) error {
 	if k.compact == nil {
 		return ErrNoCompaction
 	}
-	k.compact.FoldNext(instructions)
+	k.compactionOf(ctx).FoldNext(instructions)
 	return nil
+}
+
+// compactionOf is the compaction transform of the conversation on ctx,
+// [Kit.GrantScope]: the one a budget of its own gave it, else the
+// kit's. A child agent's scope with none of its own takes its
+// conversation's, through the link [Kit.childRun] made from the child's
+// scope to its parent's, as it takes the kit's without one. The kit
+// has compaction.
+func (k *Kit) compactionOf(ctx context.Context) *compact.Transform {
+	scopes := []string{k.GrantScope(ctx)}
+	for {
+		parent, ok := k.scopes.parentOf(scopes[len(scopes)-1])
+		if !ok || slices.Contains(scopes, parent) {
+			break
+		}
+		scopes = append(scopes, parent)
+	}
+	k.cmu.Lock()
+	defer k.cmu.Unlock()
+	for _, scope := range scopes {
+		if t, ok := k.ownCompact.get(scope); ok {
+			return t
+		}
+	}
+	return k.compact
 }
 
 // SetCompactionBudget changes the budget of the kit's compaction, the
@@ -1753,15 +1824,90 @@ func (k *Kit) compactNext(instructions string) error {
 // context window calls it when it switches the agent's model; the kit
 // does not know a model's window. The kit writes no entry for the
 // change, which is the host's setting to record; each fold's record
-// carries the budget it was made under. The kit has one transform, so
-// the budget is every conversation's the kit serves, an A2A caller's
-// beside the person's. Without compaction it returns
+// carries the budget it was made under. It is the budget of every
+// conversation the kit serves that has none of its own,
+// [Kit.SetCompactionBudgetFor]: the person's and an A2A caller's
+// alike, until one is given its own. Without compaction it returns
 // [ErrNoCompaction].
 func (k *Kit) SetCompactionBudget(tokens int) error {
 	if k.compact == nil {
 		return ErrNoCompaction
 	}
 	k.compact.SetBudget(tokens)
+	return nil
+}
+
+// SetCompactionBudgetFor gives the conversation whose grant scope is
+// scope, [Kit.GrantScope] of its runs' context, a compaction budget of
+// its own, from its next call, which [Kit.SetCompactionBudget] then
+// leaves as it is: an A2A caller kept on the model it started with,
+// while the person's conversation on the same kit is switched to a
+// model with another context window. 0 or less is no budget, as for
+// SetCompactionBudget: only a fold asked for is made.
+//
+// The first budget given a conversation gives it a compaction transform
+// of its own, built with the kit's options, so its folds no longer
+// share the kit's transform's memory of one fold: the next fold over
+// its budget summarises the older part of the transcript whole, since
+// the transform remembers no fold the kit's made for it, and from then
+// on the transform keeps its folds. A later budget for it is that
+// transform's [compact.Transform.SetBudget]. A fold in flight keeps
+// the budget it began with, under any of the three calls, and each
+// fold's record carries the budget its conversation's transform made
+// it under. A child agent run under a grant scope of its own,
+// [WithChildAgent] or [Kit.StartChild], whose config carries the kit's
+// Transform folds through its conversation's transform unless it is
+// given a budget of its own. [Control.Compact] asks the transform of its own
+// conversation to fold, so a conversation's own budget is set before
+// its first run: a Compact asked of it before then stays with the kit's
+// transform, and the next request of another conversation on it takes
+// the fold.
+//
+// So a host pins the conversations that stay on one model, an A2A
+// caller's, with SetCompactionBudgetFor at their first run, and keeps
+// the conversation whose model it switches, the person's, on
+// [Kit.SetCompactionBudget], whose transform keeps that conversation's
+// fold across the switch. [Kit.ClearCompactionBudgetFor] returns a
+// conversation to the kit-wide budget and lets its transform go, when
+// it ends. The kit keeps the budgets of the last 1024 conversations
+// given one; a conversation past them, and its transform's memory, goes
+// back to the kit-wide budget, so a front that serves more sets the
+// budget again at each conversation's run. Without compaction it
+// returns [ErrNoCompaction].
+func (k *Kit) SetCompactionBudgetFor(scope string, tokens int) error {
+	if k.compact == nil {
+		return ErrNoCompaction
+	}
+	k.cmu.Lock()
+	defer k.cmu.Unlock()
+	t, ok := k.ownCompact.get(scope)
+	if ok {
+		t.SetBudget(tokens)
+	} else {
+		t = k.newCompact(tokens)
+	}
+	k.ownCompact.put(scope, t)
+	return nil
+}
+
+// ClearCompactionBudgetFor returns the conversation whose grant scope is
+// scope to the kit-wide budget, [Kit.SetCompactionBudget], from its
+// next call, and drops the transform [Kit.SetCompactionBudgetFor] gave
+// it, with the fold that transform remembered and a [Control.Compact]
+// asked of it and not yet made: the kit's transform folds for it again,
+// summarising its older part whole at its next fold over the budget. A
+// fold in flight finishes under the transform it began on. A host
+// calls it when the conversation ends, so its transform's summaries
+// are not kept until 1024 other conversations push it out. A scope
+// with no budget of its own is left as it is. Without compaction it
+// returns [ErrNoCompaction].
+func (k *Kit) ClearCompactionBudgetFor(scope string) error {
+	if k.compact == nil {
+		return ErrNoCompaction
+	}
+	k.cmu.Lock()
+	defer k.cmu.Unlock()
+	k.ownCompact.delete(scope)
 	return nil
 }
 

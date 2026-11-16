@@ -3,6 +3,54 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- `Kit.SetCompactionBudgetFor(scope, tokens)` gives one conversation
+  of the kit, by its grant scope (`Kit.GrantScope`), a compaction
+  budget of its own, which `Kit.SetCompactionBudget` then leaves as it
+  is: a host that serves A2A callers on the model they started with
+  beside the person's conversation switches the person's budget
+  without folding the callers earlier than they need. 0 is no budget,
+  as kit-wide; a conversation with none set follows the kit-wide
+  budget and its later changes. The conversation folds through a
+  compaction transform of its own, built with the kit's options, so its
+  first own budget costs it the fold the shared transform remembered
+  for it, and later ones are that transform's `SetBudget`: a fold in
+  flight keeps the budget it began with, and each fold's record
+  carries its conversation's budget. A child agent under a grant
+  scope of its own whose config carries the kit's `Transform` folds
+  through its conversation's. The kit keeps the last 1024
+  conversations given one; one past them is back on the kit-wide
+  budget, and `Kit.ClearCompactionBudgetFor(scope)` puts one back at
+  once, dropping its transform. A host pins the conversations that stay
+  on one model, an A2A caller's, at their first run, and keeps the one
+  whose model it switches on `SetCompactionBudget`. Closes #146.
+
+### Changed
+
+- `Control.Compact` folds through its own conversation's compaction
+  transform: the kit's, as before, unless `SetCompactionBudgetFor` gave
+  the conversation one of its own. A `Compact` asked before that stays
+  with the kit's transform.
+
+### Fixed
+
+- A memory_read held for approval before a restart, in a conversation
+  a front records under `ContextWithRecorder`, runs on the Resume:
+  where the kit holds no render for the conversation, its first run
+  reads the last render the session it records into holds, the one
+  the kit writes the renders to, and is offered memory_read when that
+  render dropped the block, where v0.0.20 took `New`'s and the call
+  failed with `unknown tool "memory_read"`. What it reads is kept under
+  the grant scope the run decides under, so a front that scopes its
+  conversations itself is served too, and a session
+  `WithResumedSession` resumes is read the same way at its first run,
+  in place of v0.0.20's seed at `New` under the session's ID, which a
+  front's scoped runs, or a run by hand with no recorder on its
+  context, did not find. Closes #147.
+
 ## v0.0.20 - 2026-11-15
 
 ### Added

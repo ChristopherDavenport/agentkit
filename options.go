@@ -644,11 +644,16 @@ func WithSkillGrantReport(fn func(SkillGrant)) Option {
 // memory_read leaves that request. Each conversation's last render
 // decides its own offer, by [Kit.GrantScope]: an A2A caller's render on
 // the same kit does not take memory_read from the person's requests. A
-// session [WithResumedSession] resumes whose last recorded render
-// dropped the block is offered memory_read from its first request, so
-// a memory_read held for approval before a restart runs on the Resume;
-// a conversation a front resumes under [ContextWithRecorder] takes
-// New's render's until its own first render.
+// conversation whose last recorded render dropped the block is offered
+// memory_read from its first request after a restart, so a memory_read
+// held for approval before the restart runs on the Resume: a session
+// [WithResumedSession] resumes and a conversation a front resumes under
+// [ContextWithRecorder] alike, since the kit reads the session a
+// conversation's runs record into, where its renders are written, at
+// its first run, and keeps what it finds under the grant scope that run
+// decides under, [Kit.GrantScope], a front's own scope included. A
+// conversation whose session records no render, or a kit with no
+// session, takes New's.
 //
 // The block is recorded as one part per piece
 // [agentmemory.RenderParts] returns, the title, each scope's heading,
@@ -1410,7 +1415,9 @@ func WithRecorder(rec *session.Recorder) Option {
 // nothing folds for the transcript's size, and only a fold asked for,
 // by [Control.Compact] or by the loop's retry after a context-length
 // refusal, is made (agentturn v0.0.41). [Kit.SetCompactionBudget]
-// changes the budget while the conversation goes on. When a session is
+// changes the budget while the conversation goes on, and
+// [Kit.SetCompactionBudgetFor] gives one conversation of the kit's a
+// budget of its own. When a session is
 // recorded, the fold is recorded with it, the budget it was made under
 // and the model it asked among its members. Each summary request names
 // the model the request being folded for names, and is asked under that
@@ -1493,7 +1500,8 @@ func WithCompactionModel(m openresponses.Streamer) Option {
 // provider's compaction endpoint, when the transcript grows past budget
 // tokens. It is [WithCompaction] with the fold made elsewhere, and
 // takes the same budget, where 0 is again no budget,
-// [Kit.SetCompactionBudget] included, and the same default: every
+// [Kit.SetCompactionBudget] and [Kit.SetCompactionBudgetFor] included,
+// and the same default: every
 // request names the model of the request being folded for,
 // [compact.WithModelOfRequest] ahead of opts, so a compact.WithModel in
 // opts still wins. The fold is recorded, and

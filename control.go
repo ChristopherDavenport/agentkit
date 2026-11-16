@@ -363,11 +363,14 @@ var ErrNoCompaction = errors.New("agentkit: no compaction is configured, so ther
 // is the agent's next model call: the run in flight's, or the next
 // run's, so a host that wants the conversation folded now prompts it.
 // A later Compact before that request replaces the instructions. It
-// returns [ErrNoCompaction] without a compaction transform. The kit
-// holds one transform for every agent it configures, so the next
-// request of any of them takes the fold.
+// returns [ErrNoCompaction] without a compaction transform. The
+// transform is the one of the Control's conversation, [Kit.GrantScope]
+// of ctx under [Control.RunContext]: its own, when
+// [Kit.SetCompactionBudgetFor] gave it a budget, else the kit's, which
+// every conversation with no budget of its own shares, so the next
+// request of any of those takes the fold.
 func (c *Control) Compact(ctx context.Context, instructions string) error {
-	return c.kit.compactNext(instructions)
+	return c.kit.compactNext(c.RunContext(ctx), instructions)
 }
 
 var _ agentturn.Deliverer = (*Control)(nil)
