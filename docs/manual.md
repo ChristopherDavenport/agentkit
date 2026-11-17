@@ -203,6 +203,17 @@ what it did before is seeded from the child session,
 `session.SessionIDFromContext` of the context `ContinueChild` returns
 names; one seeded with nothing starts each pass afresh.
 
+The pass's agent is prompted directly with the context `StartChild` or
+`ContinueChild` returns, `agent.Prompt(ctx, items...)` with
+`Kit.AttachChild(agent)` observing it, never through the pass kit's
+`Control`: `Control.RunContext` puts `agentkit.ContextWithRecorder(ctx, rec)`,
+`session.ContextWithSessionID(ctx, rec.SessionID())` and
+`agentmemory.WithSession(ctx, rec.SessionID())` on every run, and on a
+kit built `WithRecorder(rec)` the conversation's recorder that names
+the conversation's session, so the pass's memory writes would be
+journaled under the foreground session, and its grant scope, which
+`RunContext` leaves, would still be the child's.
+
 ## `ToolProvider`
 
 ```go
