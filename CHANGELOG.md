@@ -3,6 +3,18 @@
 The format is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- `Kit.StartChild`'s and `Kit.AttachChild`'s docs, and the manual's
+  sleep-time pass, say a host-started child is prompted through its own
+  agent with the context returned, never through `Kit.Control`, whose
+  `RunContext` puts the kit's recorder's session on the run: a pass kit
+  built `WithRecorder` the conversation's recorder would journal the
+  pass's memory writes under the foreground session. A test pins where
+  the writes go on each path. Closes #149.
+
 ## v0.0.21 - 2026-11-16
 
 ### Added

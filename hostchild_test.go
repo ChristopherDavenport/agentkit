@@ -158,3 +158,94 @@ func TestAHostStartedPassDoesNotTakeTheConversationsGrant(t *testing.T) {
 		t.Fatalf("the pass ran bash %d times, ended %q; want it asked under its own scope", ran.Load(), end.Reason)
 	}
 }
+
+// A pass the host starts is prompted through its own agent with the
+// context StartChild returns, and its memory writes are journaled under
+// the child's session. Driven through the pass kit's Control instead,
+// the same writes are journaled under the session of the recorder the
+// kit was built WithRecorder, the foreground's: RunContext puts that
+// recorder's session on the run. The second half documents the trap
+// StartChild's doc warns of; it is not a behaviour to keep. (#149)
+func TestAHostStartedPassJournalsItsWritesUnderTheChildOnlyWhenPromptedDirectly(t *testing.T) {
+	sessions := agentsession.NewMemoryStore()
+	mem := memStore(t)
+	fg, err := agentkit.New(t.Context(),
+		agentkit.WithModel(&scriptModel{}, "m"),
+		agentkit.WithMemory(mem, "user"),
+		agentkit.WithSession(sessions, agentsession.Header{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fg.Close()
+
+	// pass runs one memory pass that writes content, under a kit built
+	// WithRecorder the foreground's recorder, through prompt, and returns
+	// the child session StartChild named.
+	pass := func(content string, prompt func(k *agentkit.Kit, ctx context.Context) error) string {
+		t.Helper()
+		k, err := agentkit.New(t.Context(),
+			agentkit.WithModel(&scriptModel{turns: []func(*openresponses.Emitter) error{
+				callTurn(agentmemory.InsertTool, `{"scope":"user","content":"`+content+`"}`),
+				textTurn("done"),
+			}}, "m"),
+			agentkit.WithMemory(mem, "user"),
+			agentkit.WithMemoryTools(agentmemory.WithInsert("user")),
+			agentkit.WithRecorder(fg.Recorder()),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer k.Close()
+		spawn := agentsession.NewSpawnID()
+		ctx, err := k.StartChild(t.Context(), spawn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := prompt(k, ctx); err != nil {
+			t.Fatal(err)
+		}
+		return agentsession.SpawnedSessionID(fg.SessionID(), spawn)
+	}
+	// writtenBy is the session the journal names for the write of content.
+	writtenBy := func(content string) string {
+		t.Helper()
+		var by []string
+		for c, err := range mem.Journal(t.Context(), 0) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(c.Entry.Content, content) {
+				by = append(by, c.Session)
+			}
+		}
+		if len(by) != 1 {
+			t.Fatalf("the journal holds %d writes of %q, want 1", len(by), content)
+		}
+		return by[0]
+	}
+
+	direct := pass("likes tea", func(k *agentkit.Kit, ctx context.Context) error {
+		child := agentturn.New(k.Config())
+		defer k.AttachChild(child)()
+		_, err := child.Prompt(ctx, openresponses.UserText("consolidate memory"))
+		return err
+	})
+	if got := writtenBy("likes tea"); got != direct {
+		t.Fatalf("prompted directly, the pass's write is journaled under %q, want the child's session %q", got, direct)
+	}
+
+	viaControl := pass("likes oolong", func(k *agentkit.Kit, ctx context.Context) error {
+		child := agentturn.New(k.Config(), k.AgentOptions()...)
+		defer k.AttachChild(child)()
+		c, err := k.Control(child)
+		if err != nil {
+			return err
+		}
+		_, err = c.Prompt(ctx, openresponses.UserText("consolidate memory"))
+		return err
+	})
+	if got := writtenBy("likes oolong"); got != fg.SessionID() || got == viaControl {
+		t.Fatalf("through Control, the pass's write is journaled under %q, want the foreground's %q (the trap #149 documents), not the child's %q", got, fg.SessionID(), viaControl)
+	}
+}

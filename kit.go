@@ -2606,6 +2606,13 @@ var ErrNoChildRecorder = errors.New("agentkit: no recorder writes the conversati
 // with [Kit.ContinueChild]. The kit that calls it may be another than
 // the one the conversation's agent runs under, a pass's kit built
 // [WithRecorder] the conversation's recorder.
+//
+// Prompt the child's agent itself with that context, never through
+// [Kit.Control]: [Control.RunContext] puts the kit's recorder and its
+// session on every run, so a pass kit built [WithRecorder] the
+// conversation's recorder would journal the pass's memory writes under
+// the conversation's session, while the grant scope stays the child's.
+// The same holds for the context [Kit.ContinueChild] returns.
 func (k *Kit) StartChild(ctx context.Context, spawnID string) (context.Context, error) {
 	rec := k.recorderFor(ctx)
 	if rec == nil {
@@ -2642,7 +2649,9 @@ func (k *Kit) ContinueChild(ctx context.Context, spawnID string) (context.Contex
 // context for, as [WithChildAgent] observes a child it runs:
 // [session.Recorder.Observe] files the run in the child's session. It
 // returns the unsubscribe. Not [Kit.Attach], which writes a's runs into
-// the kit's own session.
+// the kit's own session, and a is not driven through [Kit.Control],
+// whose runs are the kit's session's: prompt a with the context
+// returned, as [Kit.StartChild] says.
 func (k *Kit) AttachChild(a *agentturn.Agent) func() {
 	return a.Subscribe(func(ctx context.Context, ev agentturn.Event) error {
 		k.observeChild(ctx, ev)
