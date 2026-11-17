@@ -5,7 +5,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
-### Changed
+### Documentation
 
 - `Kit.StartChild`'s and `Kit.AttachChild`'s docs, and the manual's
   sleep-time pass, say a host-started child is prompted through its own
